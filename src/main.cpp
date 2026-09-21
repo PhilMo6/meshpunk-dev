@@ -398,6 +398,7 @@ static void write_firmware_prefs(fs::FS& fs, const char* path) {
   f.printf("ble_sync_max=%d\n", ble_sync_max_per_channel);
   f.printf("wifi_enabled=%d\n", wifi_enabled_pref ? 1 : 0);
   f.printf("lora_protocol=%s\n", lora_proto_requested());
+  f.printf("ota_channel=%s\n", ota_channel_requested());
   f.printf("trackball_sens=%d\n", input_ui_trackball_sens_get());
   f.printf("trackball_roll=%d\n", input_ui_trackball_roll_get());
   f.printf("sym_toggle=%d\n", input_ui_sym_toggle_get() ? 1 : 0);
@@ -794,6 +795,8 @@ static void firmware_prefs_load() {
       wifi_enabled_pref = (atoi(val) == 1);
     } else if (strcmp(key, "lora_protocol") == 0) {
       lora_proto_set_requested(val);   // sanitizes; bad ids become "meshcore"
+    } else if (strcmp(key, "ota_channel") == 0) {
+      ota_channel_set_requested(val);  // sanitizes; bad ids become "stable"
     } else if (strcmp(key, "trackball_sens") == 0) {
       int v = atoi(val);
       if (v >= 0 && v <= 500) input_ui_trackball_sens_set((uint16_t)v);
@@ -4775,6 +4778,24 @@ void setupLuaVGL() {
     SLog.printf("[PROTO] boot protocol set to '%s' (reboot to apply)\n",
                 lora_proto_requested());
     lua_pushstring(L, lora_proto_requested());
+    return 1;
+  });
+
+  // Firmware update channel (Settings/Firmware). No argument reads it; a
+  // string argument persists it and takes effect on the next check — unlike
+  // the protocol choice there is nothing to reload, the channel only decides
+  // which GitHub repo _ota_check polls. Returns the sanitized id actually
+  // stored; anything that is not a known channel becomes "stable".
+  // Usage: local id = _ota_channel()        -- read
+  //        local id = _ota_channel("dev")   -- write
+  lua_register(L, "_ota_channel", [](lua_State *L) -> int {
+    if (lua_gettop(L) >= 1 && !lua_isnil(L, 1)) {
+      const char* id = luaL_checkstring(L, 1);
+      ota_channel_set_requested(id);
+      firmware_prefs_save();
+      SLog.printf("[OTA] update channel set to '%s'\n", ota_channel_requested());
+    }
+    lua_pushstring(L, ota_channel_requested());
     return 1;
   });
 

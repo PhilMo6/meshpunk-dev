@@ -403,6 +403,13 @@
 //                  that call it need min_fw 15 — the Web and IRC apps
 //                  carry their own loader instead, so they keep running
 //                  on level 14. No ELF host_export.
+//                  ALSO this level: `_ota_channel([id]) -> id` — reads,
+//                  or with an argument persists, the firmware update
+//                  channel ("stable" or "dev"), which selects the GitHub
+//                  repo _ota_check polls. _ota_info gained `channel` and
+//                  _ota_check gained `channel` and `older`. Settings/
+//                  Firmware needs min_fw 15 for the channel row. No ELF
+//                  host_export.
 #define MESHPUNK_FW_API 15
 
 // BLE companion protocol identity (reported in the DEVICE_INFO frame — see

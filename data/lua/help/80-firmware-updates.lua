@@ -13,6 +13,8 @@ Releases are on the MeshPunk GitHub releases page. Builds are per device: the fi
 
 - Updates: Settings > Firmware checks GitHub over WiFi and installs the new release from the device, or installs a -firmware.bin copied to the SD card; no computer needed. The firmware AND the bundled files are refreshed on the next boot; your settings and messages are kept. Flashing the -firmware.bin by USB does the same.
 
+- Channel: the Firmware page checks the stable releases by default. Switching it to dev checks a separate development repo instead, whose -devN builds are unreleased and expected to be rough. Nothing else changes: the same device tag, verification and updater install them. Switching back to stable offers the newest stable release even though it is older than the dev build that is running - that is the way back, and it is labelled Switch rather than Update.
+
 - One-time step for a device flashed before the updater existed: the Firmware page says the layout predates on-device updates. Flash the -merged.bin once by USB (this replaces the filesystem); after that, updates work from the page.
 
 - The updater has its own screen: it shows the job, verifies the file again, draws a progress bar while writing, and restarts when done. Do not power off while it writes; if that happens anyway, it simply runs the same job again on the next start.

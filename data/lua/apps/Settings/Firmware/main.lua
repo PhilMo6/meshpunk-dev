@@ -69,6 +69,18 @@ end
 -- ── Update over WiFi ────────────────────────────────────────────────────────
 content:Label { text = "-- Update over WiFi --", w = lvgl.PCT(100), h = 16 }
 
+-- Release channel. "stable" is the published firmware; "dev" is the
+-- development repo, which carries -devN builds that have not been released.
+-- The channel only decides which repo is polled, so switching it takes effect
+-- on the next check — no reboot.
+local channel = info.channel or "stable"
+local chan_btn = content:Button { w = lvgl.PCT(100), h = 30 }
+local chan_lbl = chan_btn:Label { text = "", align = lvgl.ALIGN.CENTER }
+local function show_channel()
+    chan_lbl:set({ text = "Channel: " .. channel })
+end
+show_channel()
+
 local check_btn = content:Button { w = lvgl.PCT(100), h = 30 }
 check_btn:Label { text = "Check for update", align = lvgl.ALIGN.CENTER }
 local avail_lbl = content:Label { text = "", w = lvgl.PCT(100), h = 16 }
@@ -221,6 +233,17 @@ local function begin(source, arg, label)
     start_stepping()
 end
 
+chan_btn:onClicked(function()
+    channel = _ota_channel(channel == "dev" and "stable" or "dev")
+    show_channel()
+    -- A result from the other channel must not stay on screen: its tag and
+    -- URL belong to a repo we are no longer pointed at.
+    avail_lbl.text = ""
+    status.text = ""
+    dl_url, dl_tag = nil, nil
+    show(dl_btn, false)
+end)
+
 check_btn:onClicked(function()
     status.text = "Connecting to WiFi..."
     avail_lbl.text = ""
@@ -230,7 +253,7 @@ check_btn:onClicked(function()
             status.text = "WiFi not connected"
             return
         end
-        status.text = "Checking GitHub releases..."
+        status.text = "Checking " .. channel .. " releases..."
         local ok, r = pcall(_ota_check)
         if not ok or type(r) ~= "table" then
             status.text = "Check failed: " .. tostring(r)
@@ -241,11 +264,17 @@ check_btn:onClicked(function()
             return
         end
         status.text = ""
-        local action = "Download "
+        local action = "Update to "
         if r.newer then
             avail_lbl.text = r.tag .. " is available"
         elseif installed == "" then
-            avail_lbl.text = "Latest release: " .. r.tag .. " (installed version unknown)"
+            avail_lbl.text = "Latest on " .. channel .. ": " .. r.tag .. " (installed version unknown)"
+            action = "Download "
+        elseif r.older then
+            -- Reached by switching channels: stable is behind the dev build
+            -- that is running. Offered anyway, because that is the way back.
+            avail_lbl.text = channel .. " is at " .. r.tag .. " (older than installed)"
+            action = "Switch to "
         else
             -- Same release as the bundle marker: offered as a reinstall so a
             -- damaged bundle can be repaired without a computer.
