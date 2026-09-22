@@ -371,7 +371,7 @@ function M.run_install(root, opts)
     overlay:add_flag(lvgl.FLAG.CLICKABLE)
 
     local box = overlay:Object {
-        w = 250, h = lvgl.SIZE_CONTENT, align = lvgl.ALIGN.CENTER,
+        w = math.min(250, lvgl.HOR_RES() - 20), h = lvgl.SIZE_CONTENT, align = lvgl.ALIGN.CENTER,
         radius = 6, border_width = 1, pad_all = 8,
         flex = { flex_direction = "column", flex_wrap = "nowrap" },
     }
@@ -576,7 +576,7 @@ function M.run_remove(root, name, dir, opts)
     overlay:add_flag(lvgl.FLAG.CLICKABLE)
 
     local box = overlay:Object {
-        w = 240, h = lvgl.SIZE_CONTENT, align = lvgl.ALIGN.CENTER,
+        w = math.min(240, lvgl.HOR_RES() - 20), h = lvgl.SIZE_CONTENT, align = lvgl.ALIGN.CENTER,
         radius = 6, border_width = 1, pad_all = 8,
         flex = { flex_direction = "column", flex_wrap = "nowrap" },
     }

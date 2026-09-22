@@ -2825,6 +2825,11 @@ int elf_host_run_pending(void) {
     s_mod_alloc_count = 0;
     s_mod_tracking = true;
 
+    // Module video contract: force the panel to native landscape for the
+    // whole session — modules, zone overlays and the OSK all draw 320x240
+    // (display_dev.h). Restored after the cleanup below, on every path.
+    display_dev_module_video(true);
+
     // Load and relocate
     elf_module_t* mod = elf_load(elf_data, elf_size, host_exports);
     heap_caps_free(elf_data); // raw ELF data no longer needed
@@ -2935,6 +2940,9 @@ int elf_host_run_pending(void) {
     } else {
         SLog.println("[elf_host] elf_load failed");
     }
+
+    // Restore the user's display orientation (no-op when it is landscape).
+    display_dev_module_video(false);
 
     // Touch layout/OSK teardown — after blit_drain: no push reads the
     // overlay buffers past this point. Also clears a layout stashed by

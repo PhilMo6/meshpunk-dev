@@ -1,5 +1,15 @@
 # MeshPunk - LVGL with Lua for LoRa handhelds
 
+> [!WARNING]
+> **This is the MeshPunk development repository.** The code and the releases here are work in progress: dev builds may be broken, unfinished, or refuse to boot. The stable firmware lives at [github.com/PhilMo6/meshpunk](https://github.com/PhilMo6/meshpunk) — install from there unless you deliberately want development builds.
+
+## Development repo notes
+
+- Development releases are tagged `vX.Y.Z-devN` and published here as normal releases, never as GitHub "pre-releases" — devices find the newest build through `/releases/latest`, which skips pre-releases.
+- On the device, Settings > Firmware > **Channel: dev** points the updater at this repo; the Channel setting ships in releases after v0.4.3. Checking the stable channel afterwards offers the newest stable release as "Switch to", which is the way back even though it is a downgrade.
+- This repo's git history and the stable repo's history are independent: finished work moves to stable as a file sync, not a merge. Report issues against stable releases on the stable repo.
+- This README.md is specific to the dev repo and must be excluded from any dev-to-stable sync so it never overwrites the stable README.
+
 Join the MeshPunk Discord: https://discord.gg/cmJKV5gEdP
 
 ## Supported devices

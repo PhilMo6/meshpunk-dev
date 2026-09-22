@@ -34,7 +34,7 @@ content:Label { text = "-- Actions --", w = lvgl.PCT(100), h = 16 }
 
 local function farewell(text, fn)
     local f = lvgl.Object {
-        w = 320, h = 240, x = 0, y = 0,
+        w = lvgl.HOR_RES(), h = lvgl.VER_RES(), x = 0, y = 0,
         bg_color = "#000000", bg_opa = 255, border_width = 0, pad_all = 0,
     }
     f:clear_flag(lvgl.FLAG.SCROLLABLE)

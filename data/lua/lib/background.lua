@@ -80,16 +80,40 @@ function M.fill(color)
     send_to_back()
 end
 
--- Image wallpaper from a path, e.g. "S:/themes/midnight/wall.bin" (RGB565 native
--- little-endian per the lodepng/RGB565 note) or a .png.
+-- Image wallpaper from a path, e.g. "S:/themes/midnight/wall.png" or a .bin.
+--
+-- PNG: decoded ONCE and cover-scaled (bilinear, centered crop) to the screen
+-- size by _bg_load_scaled, so one wallpaper file fits every resolution and
+-- orientation. The widget shows the scaled RGB565 buffer; the C-level delete
+-- handler frees it when the layer is torn down, and nothing enters the LVGL
+-- image cache (the decode buffers are transient inside the binding).
+--
+-- .bin (RGB565 native little-endian): pre-rendered at a specific resolution
+-- by design — drawn as-is through the LVGL cache, evicted in free().
 function M.image(src)
     local base = new_base(false)
-    local ok = pcall(function()
-        local img = base:Image({ src = src, x = 0, y = 0, w = W(), h = H() })
-        img:clear_flag(lvgl.FLAG.CLICKABLE)
-        img:clear_flag(lvgl.FLAG.SCROLLABLE)
-    end)
-    last_image_src = ok and src or nil
+    if src:sub(-4):lower() == ".png" then
+        local buf = _bg_load_scaled(src, W(), H())
+        if buf then
+            local ok = pcall(function()
+                local img = base:Image({ x = 0, y = 0, w = W(), h = H() })
+                img:set_src(buf)
+                img:clear_flag(lvgl.FLAG.CLICKABLE)
+                img:clear_flag(lvgl.FLAG.SCROLLABLE)
+                _snapshot_attach_free(img, buf)
+            end)
+            if not ok then pcall(_snapshot_free, buf) end
+        else
+            print("[background] wallpaper load failed; skipped: " .. tostring(src))
+        end
+    else
+        local ok = pcall(function()
+            local img = base:Image({ src = src, x = 0, y = 0, w = W(), h = H() })
+            img:clear_flag(lvgl.FLAG.CLICKABLE)
+            img:clear_flag(lvgl.FLAG.SCROLLABLE)
+        end)
+        last_image_src = ok and src or nil
+    end
     send_to_back()
 end
 

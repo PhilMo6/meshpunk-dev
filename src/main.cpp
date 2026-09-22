@@ -285,6 +285,10 @@ static uint8_t kbd_brightness = 200;  // 0–255, persisted
 
 // ── Display Backlight ──────────────────────────────────────────────────────
 static uint8_t display_brightness = 16;  // 0–16, persisted
+// Display orientation: 0–3 quarter turns from the board's native landscape
+// (display_dev.h), persisted. Applied once before LVGL is created; a change
+// from Settings takes effect on restart.
+static uint8_t display_orientation = 0;
 
 // ── Inactivity Timeouts ───────────────────────────────────────────────────
 static uint16_t screen_timeout_secs  = 60;  // 0 = never, persisted
@@ -384,6 +388,7 @@ static void write_firmware_prefs(fs::FS& fs, const char* path) {
   f.printf("usb_speaker=%d\n", usb_speaker_pref_get() ? 1 : 0);
   f.printf("kbd_bright=%d\n", kbd_brightness);
   f.printf("disp_bright=%d\n", display_brightness);
+  f.printf("disp_orient=%d\n", display_orientation);
   f.printf("screen_timeout=%d\n", screen_timeout_secs);
   f.printf("kbd_timeout=%d\n", kbd_timeout_secs);
   f.printf("msg_retain_days=%d\n", msg_retain_days);
@@ -757,6 +762,9 @@ static void firmware_prefs_load() {
     } else if (strcmp(key, "disp_bright") == 0) {
       int v = atoi(val);
       if (v >= 0 && v <= 16) display_brightness = (uint8_t)v;
+    } else if (strcmp(key, "disp_orient") == 0) {
+      int v = atoi(val);
+      if (v >= 0 && v <= 3) display_orientation = (uint8_t)v;
     } else if (strcmp(key, "screen_timeout") == 0) {
       int v = atoi(val);
       if (v >= 0 && v <= 65535) screen_timeout_secs = (uint16_t)v;
@@ -1784,6 +1792,12 @@ void setupLvgl() {
   //  delay(5000);
   //  assert(buf);
   //}
+
+  // Apply the persisted orientation now — after the prefs load, before any
+  // LVGL geometry exists. Until here the panel ran the native landscape so
+  // the boot splash stayed upright through the whole bring-up; this clears
+  // it to black and LVGL's first frame follows in the oriented geometry.
+  display_dev_set_orientation(display_orientation);
 
 #define BUF_LINES 48
   const size_t BUF_SIZE =
@@ -3642,6 +3656,60 @@ static unsigned png_decode_raw(const uint8_t *png_data, uint32_t png_size,
   return lodepng_decode((unsigned char **)decoded, w, h, state, png_data, png_size);
 }
 
+// Cover-scale RGB565: fill the whole dw×dh target from src, preserving the
+// aspect ratio by scaling to the LARGER axis ratio and cropping the centered
+// overshoot. Bilinear taps; equal dimensions degenerate to a row copy. dst
+// rows are dst_stride bytes apart (lv_draw_buf strides can be padded past
+// dw*2). Used by the _bg_load_scaled wallpaper loader.
+static void rgb565_scale_cover(const uint16_t *src, int sw, int sh,
+                               uint8_t *dst, uint32_t dst_stride,
+                               int dw, int dh) {
+  if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+  if (sw == dw && sh == dh) {
+    for (int y = 0; y < dh; y++)
+      memcpy(dst + (size_t)y * dst_stride, src + (size_t)y * sw, (size_t)dw * 2);
+    return;
+  }
+  float scale = fmaxf((float)dw / (float)sw, (float)dh / (float)sh);
+  int32_t step = (int32_t)(65536.0f / scale);          // src px per dst px, 16.16
+  int32_t x0 = ((int32_t)sw * 65536 - step * dw) / 2;  // centered crop origin
+  int32_t y0 = ((int32_t)sh * 65536 - step * dh) / 2;
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  for (int y = 0; y < dh; y++) {
+    int32_t syf = y0 + y * step;
+    int sy = syf >> 16;
+    if (sy < 0) sy = 0;
+    if (sy > sh - 1) sy = sh - 1;
+    int sy1 = (sy + 1 < sh) ? sy + 1 : sy;
+    uint32_t fy = (syf >> 8) & 0xFF;
+    const uint16_t *r0 = src + (size_t)sy * sw;
+    const uint16_t *r1 = src + (size_t)sy1 * sw;
+    uint16_t *out = (uint16_t *)(dst + (size_t)y * dst_stride);
+    for (int x = 0; x < dw; x++) {
+      int32_t sxf = x0 + x * step;
+      int sx = sxf >> 16;
+      if (sx < 0) sx = 0;
+      if (sx > sw - 1) sx = sw - 1;
+      int sx1 = (sx + 1 < sw) ? sx + 1 : sx;
+      uint32_t fx = (sxf >> 8) & 0xFF;
+      uint16_t p00 = r0[sx], p01 = r0[sx1];
+      uint16_t p10 = r1[sx], p11 = r1[sx1];
+      uint32_t top, bot, rr, gg, bb;
+      top = ((p00 >> 11) & 31) * (256 - fx) + ((p01 >> 11) & 31) * fx;
+      bot = ((p10 >> 11) & 31) * (256 - fx) + ((p11 >> 11) & 31) * fx;
+      rr  = (top * (256 - fy) + bot * fy) >> 16;
+      top = ((p00 >> 5) & 63) * (256 - fx) + ((p01 >> 5) & 63) * fx;
+      bot = ((p10 >> 5) & 63) * (256 - fx) + ((p11 >> 5) & 63) * fx;
+      gg  = (top * (256 - fy) + bot * fy) >> 16;
+      top = (p00 & 31) * (256 - fx) + (p01 & 31) * fx;
+      bot = (p10 & 31) * (256 - fx) + (p11 & 31) * fx;
+      bb  = (top * (256 - fy) + bot * fy) >> 16;
+      out[x] = (uint16_t)((rr << 11) | (gg << 5) | bb);
+    }
+  }
+}
+
 // Decode a PNG from memory and pack native little-endian RGB565 into dst.
 // Shared by png_buf_to_bin (downloads -> .bin file) and _tile_show (user PNG
 // tiles -> tile pool slot). Does NOT free png_data — the caller owns it.
@@ -4504,6 +4572,13 @@ static int lua_dofile_sd(lua_State *L) {
 #define MAIN_HEAP_RESERVE  (3584u * 1024u)        // kept free for the Map (tile pool + canvases) + slack
 #define LUA_ARENA_MIN      (1536u * 1024u)        // floor if PSRAM is tight (overflow spills to the gap)
 #define LUA_ARENA_MAX      (3u * 1024u * 1024u)   // ceiling: Lua won't need more; don't starve the Map
+// Collector pacing for the fixed-size arena (applied in setupLuaVGL). PAUSE: a
+// new cycle starts when the heap reaches this percentage of the bytes the last
+// cycle marked live (Lua default 250). STEPMUL: collector work per allocated
+// byte (Lua default 200). Lua stores both in a 5-significant-bit format: 112
+// encodes as 112.5%, 400 as 400%.
+#define LUA_GC_PAUSE       112
+#define LUA_GC_STEPMUL     400
 static multi_heap_handle_t s_lua_heap = NULL;
 static uintptr_t s_lua_arena_base = 0;
 static size_t    s_lua_arena_size = 0;
@@ -4514,6 +4589,12 @@ static size_t    s_lua_arena_size = 0;
 // surfaced in the mesh task's periodic [HEAP] line rather than failing silently.
 // Written on Core 0 (Lua alloc), read on Core 1 (log); aligned 32-bit, no lock.
 volatile uint32_t g_lua_arena_spill_count = 0;
+
+// Bytes Lua holds through lua_psram_alloc (arena + spilled) and the free bytes
+// inside the arena, republished on every allocator call for the same [HEAP]
+// line. Written on Core 0, read on Core 1, like the spill counter.
+volatile uint32_t g_lua_heap_bytes = 0;
+volatile uint32_t g_lua_arena_free_bytes = 0;
 
 static inline bool lua_in_arena(void *p) {
   return s_lua_arena_base && (uintptr_t)p >= s_lua_arena_base &&
@@ -4556,6 +4637,7 @@ static void lua_arena_destroy() {
   s_lua_heap = NULL;
   s_lua_arena_base = 0;
   s_lua_arena_size = 0;
+  g_lua_arena_free_bytes = 0;
   heap_caps_free(blk);
   SLog.printf("[lua_arena] freed; psram largest now %uKB\n",
               (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024));
@@ -4564,7 +4646,7 @@ static void lua_arena_destroy() {
 // PSRAM allocator for Lua. Routes through the arena (multi_heap) when it exists,
 // falling back to the shared PSRAM heap (small Lua objects -> TLSF puts them in the
 // gap). osize is Lua's valid old size (only when ptr != NULL) for cross-heap memcpy.
-static void *lua_psram_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
+static void *lua_psram_route(void *ud, void *ptr, size_t osize, size_t nsize) {
     (void)ud;
     if (nsize == 0) {                       // free
         if (ptr) {
@@ -4594,6 +4676,20 @@ static void *lua_psram_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
     }
     // No arena (pre-create / create failed): plain shared-heap realloc.
     return heap_caps_realloc(ptr, nsize, MALLOC_CAP_SPIRAM);
+}
+
+// The lua_Alloc given to lua_newstate: routes the request, then republishes the
+// [HEAP] figures. For a new block (ptr == NULL) Lua passes an object-type tag
+// in osize, not a size.
+static void *lua_psram_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
+    void *r = lua_psram_route(ud, ptr, osize, nsize);
+    if (nsize == 0) {
+        if (ptr) g_lua_heap_bytes -= osize;
+    } else if (r) {
+        g_lua_heap_bytes += nsize - (ptr ? osize : 0);
+    }
+    g_lua_arena_free_bytes = s_lua_heap ? multi_heap_free_size(s_lua_heap) : 0;
+    return r;
 }
 
 
@@ -4668,6 +4764,10 @@ void setupLuaVGL() {
     SLog.println("Failed to create Lua state");
     return;
   }
+
+  // Collector pacing (LUA_GC_PAUSE / LUA_GC_STEPMUL, defined with the arena).
+  lua_gc(L, LUA_GCPARAM, LUA_GCPPAUSE, LUA_GC_PAUSE);
+  lua_gc(L, LUA_GCPARAM, LUA_GCPSTEPMUL, LUA_GC_STEPMUL);
 
   // Open standard Lua libraries
   luaL_openlibs(L);
@@ -4747,6 +4847,7 @@ void setupLuaVGL() {
     lua_pushstring(L, MESHPUNK_BOARD_NAME);        lua_setfield(L, -2, "name");
     lua_pushinteger(L, display_dev_width());       lua_setfield(L, -2, "screen_w");
     lua_pushinteger(L, display_dev_height());      lua_setfield(L, -2, "screen_h");
+    lua_pushinteger(L, display_dev_orientation()); lua_setfield(L, -2, "orientation");
     switch (audio_dev_kind()) {
       case AUDIO_DEV_I2S:    lua_pushstring(L, "i2s");    break;
       case AUDIO_DEV_BUZZER: lua_pushstring(L, "buzzer"); break;
@@ -5713,6 +5814,25 @@ void setupLuaVGL() {
     return 1;
   });
 
+  // Display orientation (Settings/Device). No argument reads the persisted
+  // setting; an integer 0-3 persists it. The panel is NOT rotated live —
+  // LVGL was created with the boot geometry — so a change takes effect on
+  // restart (the page says so). Returns the stored value.
+  // Usage: local o = _disp_orientation()     -- read
+  //        local o = _disp_orientation(1)    -- write
+  lua_register(L, "_disp_orientation", [](lua_State* L) -> int {
+    if (lua_gettop(L) >= 1 && !lua_isnil(L, 1)) {
+      int v = luaL_checkinteger(L, 1);
+      if (v < 0) v = 0; if (v > 3) v = 3;
+      display_orientation = (uint8_t)v;
+      firmware_prefs_save();
+      SLog.printf("[DISP] orientation set to %d (restart to apply)\n",
+                  display_orientation);
+    }
+    lua_pushinteger(L, display_orientation);
+    return 1;
+  });
+
   // ── Inactivity timeouts ──────────────────────────────────────────────────
   lua_register(L, "_screen_timeout_set", [](lua_State* L) -> int {
     int v = luaL_checkinteger(L, 1);
@@ -6082,6 +6202,81 @@ void setupLuaVGL() {
       }, LV_EVENT_DELETE, buf);
     }
     return 0;
+  });
+
+  // _bg_load_scaled(src, w, h) -> lightuserdata draw_buf (or nil).
+  // Wallpaper loader: reads a PNG through the LVGL fs layer (the same S:/L:
+  // drive letters Image sources use), decodes once via png_decode_565, then
+  // cover-scales (bilinear, centered crop) into a w×h RGB565 draw buffer.
+  // Nothing enters the LVGL image cache and both transient buffers are freed
+  // before returning — the caller owns ONLY the returned draw_buf (free via
+  // _snapshot_free or _snapshot_attach_free). Equal source and target
+  // dimensions copy through unscaled. LVGL-thread only (the decode may drop
+  // the image cache under fragmentation).
+  lua_register(L, "_bg_load_scaled", [](lua_State *L) -> int {
+    const char *src = luaL_checkstring(L, 1);
+    int dw = (int)luaL_checkinteger(L, 2);
+    int dh = (int)luaL_checkinteger(L, 3);
+    if (dw <= 0 || dh <= 0) { lua_pushnil(L); return 1; }
+
+    lv_fs_file_t f;
+    if (lv_fs_open(&f, src, LV_FS_MODE_RD) != LV_FS_RES_OK) {
+      SLog.printf("[bg] open failed: %s\n", src);
+      lua_pushnil(L); return 1;
+    }
+    uint32_t fsize = 0;
+    lv_fs_seek(&f, 0, LV_FS_SEEK_END);
+    lv_fs_tell(&f, &fsize);
+    lv_fs_seek(&f, 0, LV_FS_SEEK_SET);
+    uint8_t *png = (fsize > 0 && fsize < 4u * 1024 * 1024)
+        ? (uint8_t *)heap_caps_malloc(fsize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+        : nullptr;
+    uint32_t rd = 0;
+    if (png) lv_fs_read(&f, png, fsize, &rd);
+    lv_fs_close(&f);
+    if (!png || rd != fsize) {
+      if (png) heap_caps_free(png);
+      SLog.printf("[bg] read failed: %s (%u/%u)\n", src, (unsigned)rd,
+                  (unsigned)fsize);
+      lua_pushnil(L); return 1;
+    }
+
+    PngInfo info;
+    if (!png_read_ihdr(png, fsize, &info)) {
+      heap_caps_free(png);
+      SLog.printf("[bg] not a PNG: %s\n", src);
+      lua_pushnil(L); return 1;
+    }
+    uint32_t raw_bytes = (uint32_t)info.w * info.h * 2;
+    uint16_t *raw = (uint16_t *)heap_caps_malloc(
+        raw_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!raw) {
+      heap_caps_free(png);
+      SLog.printf("[bg] no memory for %ux%u decode\n", info.w, info.h);
+      lua_pushnil(L); return 1;
+    }
+    unsigned sw = 0, sh = 0;
+    const char *stage = png_decode_565(png, fsize, raw, raw_bytes, true,
+                                       &sw, &sh);
+    heap_caps_free(png);
+    if (stage) {
+      heap_caps_free(raw);
+      SLog.printf("[bg] decode failed (%s): %s\n", stage, src);
+      lua_pushnil(L); return 1;
+    }
+
+    lv_draw_buf_t *dbuf =
+        lv_draw_buf_create(dw, dh, LV_COLOR_FORMAT_RGB565, LV_STRIDE_AUTO);
+    if (!dbuf) {
+      heap_caps_free(raw);
+      SLog.printf("[bg] no memory for %dx%d wallpaper\n", dw, dh);
+      lua_pushnil(L); return 1;
+    }
+    rgb565_scale_cover(raw, (int)sw, (int)sh, (uint8_t *)dbuf->data,
+                       dbuf->header.stride, dw, dh);
+    heap_caps_free(raw);
+    lua_pushlightuserdata(L, dbuf);
+    return 1;
   });
 
   // _screenshot([obj]) -> true. Queues a capture of whatever is on the panel;

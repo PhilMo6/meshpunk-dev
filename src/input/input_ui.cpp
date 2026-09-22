@@ -17,6 +17,7 @@ extern "C" {
 
 #include "input_dev.h"
 #include "input_ui.h"
+#include "../display/display_dev.h"   // display_dev_orientation (trackball remap)
 #include "input_zones.h"        // controller-mode touch zones
 #include "../meshpunk_sync.h"   // SLog
 #include "../usb_manager.h"     // usb_kbd_snapshot + UsbFlashGuard
@@ -562,12 +563,32 @@ static void keyboard_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
       key_from_trackball = true;
       trackball_btn_pressed = true;
     } else {
+      // Trackball remap for the display orientation: which PHYSICAL counter
+      // produces each VISUAL direction. Derived from the same quarter-turn
+      // algebra display_dev_orient_point uses, so a finger drag and a
+      // trackball roll agree on every orientation. Identity at orientation
+      // 0 — and module runs consume the raw counters in elf_host, where the
+      // effective orientation is forced to 0 anyway.
+      static volatile int* const tb_phys[4] =
+          { &trackball_up, &trackball_down, &trackball_left, &trackball_right };
+      static const uint8_t tb_vis2phys[4][4] = {
+          { 0, 1, 2, 3 },   // orientation 0: identity
+          { 3, 2, 0, 1 },   // 1: visual up reads physical right
+          { 1, 0, 3, 2 },   // 2: inverted
+          { 2, 3, 1, 0 },   // 3: visual up reads physical left
+      };
+      const uint8_t* v2p = tb_vis2phys[display_dev_orientation() & 3];
+      volatile int* tb_up    = tb_phys[v2p[0]];
+      volatile int* tb_down  = tb_phys[v2p[1]];
+      volatile int* tb_left  = tb_phys[v2p[2]];
+      volatile int* tb_right = tb_phys[v2p[3]];
+
       uint32_t nav_dir = wasd_dir;
       if (!nav_dir) {
-        if      (trackball_up > 0)    nav_dir = LV_KEY_UP;
-        else if (trackball_down > 0)  nav_dir = LV_KEY_DOWN;
-        else if (trackball_left > 0)  nav_dir = LV_KEY_LEFT;
-        else if (trackball_right > 0) nav_dir = LV_KEY_RIGHT;
+        if      (*tb_up > 0)    nav_dir = LV_KEY_UP;
+        else if (*tb_down > 0)  nav_dir = LV_KEY_DOWN;
+        else if (*tb_left > 0)  nav_dir = LV_KEY_LEFT;
+        else if (*tb_right > 0) nav_dir = LV_KEY_RIGHT;
       }
 
       if (nav_dir) {
@@ -579,15 +600,15 @@ static void keyboard_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
           last_nav_ms = now;
           if (!wasd_dir) {
             if (trackball_roll_ms > 0) {
-              if      (nav_dir == LV_KEY_UP)    trackball_up--;
-              else if (nav_dir == LV_KEY_DOWN)  trackball_down--;
-              else if (nav_dir == LV_KEY_LEFT)  trackball_left--;
-              else if (nav_dir == LV_KEY_RIGHT) trackball_right--;
+              if      (nav_dir == LV_KEY_UP)    (*tb_up)--;
+              else if (nav_dir == LV_KEY_DOWN)  (*tb_down)--;
+              else if (nav_dir == LV_KEY_LEFT)  (*tb_left)--;
+              else if (nav_dir == LV_KEY_RIGHT) (*tb_right)--;
             } else {
-              if      (nav_dir == LV_KEY_UP)    trackball_up = 0;
-              else if (nav_dir == LV_KEY_DOWN)  trackball_down = 0;
-              else if (nav_dir == LV_KEY_LEFT)  trackball_left = 0;
-              else if (nav_dir == LV_KEY_RIGHT) trackball_right = 0;
+              if      (nav_dir == LV_KEY_UP)    *tb_up = 0;
+              else if (nav_dir == LV_KEY_DOWN)  *tb_down = 0;
+              else if (nav_dir == LV_KEY_LEFT)  *tb_left = 0;
+              else if (nav_dir == LV_KEY_RIGHT) *tb_right = 0;
             }
           }
           last_key_code = nav_dir;
