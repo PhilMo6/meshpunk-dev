@@ -3656,28 +3656,23 @@ static unsigned png_decode_raw(const uint8_t *png_data, uint32_t png_size,
   return lodepng_decode((unsigned char **)decoded, w, h, state, png_data, png_size);
 }
 
-// Cover-scale RGB565: fill the whole dw×dh target from src, preserving the
-// aspect ratio by scaling to the LARGER axis ratio and cropping the centered
-// overshoot. Bilinear taps; equal dimensions degenerate to a row copy. dst
-// rows are dst_stride bytes apart (lv_draw_buf strides can be padded past
-// dw*2). Used by the _bg_load_scaled wallpaper loader.
-static void rgb565_scale_cover(const uint16_t *src, int sw, int sh,
-                               uint8_t *dst, uint32_t dst_stride,
-                               int dw, int dh) {
+// Bilinear RGB565 resize of the WHOLE source into exactly dw×dh. The aspect
+// policy belongs to the caller — it picks dw/dh (the wallpaper loader picks
+// the contain-fit box). Equal dimensions degenerate to a row copy. dst rows
+// are dst_stride bytes apart (lv_draw_buf strides can be padded past dw*2).
+static void rgb565_resize(const uint16_t *src, int sw, int sh,
+                          uint8_t *dst, uint32_t dst_stride,
+                          int dw, int dh) {
   if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
   if (sw == dw && sh == dh) {
     for (int y = 0; y < dh; y++)
       memcpy(dst + (size_t)y * dst_stride, src + (size_t)y * sw, (size_t)dw * 2);
     return;
   }
-  float scale = fmaxf((float)dw / (float)sw, (float)dh / (float)sh);
-  int32_t step = (int32_t)(65536.0f / scale);          // src px per dst px, 16.16
-  int32_t x0 = ((int32_t)sw * 65536 - step * dw) / 2;  // centered crop origin
-  int32_t y0 = ((int32_t)sh * 65536 - step * dh) / 2;
-  if (x0 < 0) x0 = 0;
-  if (y0 < 0) y0 = 0;
+  uint32_t step_x = (uint32_t)(((uint64_t)sw << 16) / (uint32_t)dw);
+  uint32_t step_y = (uint32_t)(((uint64_t)sh << 16) / (uint32_t)dh);
   for (int y = 0; y < dh; y++) {
-    int32_t syf = y0 + y * step;
+    int32_t syf = (int32_t)((uint32_t)y * step_y);
     int sy = syf >> 16;
     if (sy < 0) sy = 0;
     if (sy > sh - 1) sy = sh - 1;
@@ -3687,7 +3682,7 @@ static void rgb565_scale_cover(const uint16_t *src, int sw, int sh,
     const uint16_t *r1 = src + (size_t)sy1 * sw;
     uint16_t *out = (uint16_t *)(dst + (size_t)y * dst_stride);
     for (int x = 0; x < dw; x++) {
-      int32_t sxf = x0 + x * step;
+      int32_t sxf = (int32_t)((uint32_t)x * step_x);
       int sx = sxf >> 16;
       if (sx < 0) sx = 0;
       if (sx > sw - 1) sx = sw - 1;
@@ -6204,15 +6199,18 @@ void setupLuaVGL() {
     return 0;
   });
 
-  // _bg_load_scaled(src, w, h) -> lightuserdata draw_buf (or nil).
+  // _bg_load_scaled(src, max_w, max_h) -> draw_buf, fit_w, fit_h (or nil).
   // Wallpaper loader: reads a PNG through the LVGL fs layer (the same S:/L:
   // drive letters Image sources use), decodes once via png_decode_565, then
-  // cover-scales (bilinear, centered crop) into a w×h RGB565 draw buffer.
-  // Nothing enters the LVGL image cache and both transient buffers are freed
-  // before returning — the caller owns ONLY the returned draw_buf (free via
-  // _snapshot_free or _snapshot_attach_free). Equal source and target
-  // dimensions copy through unscaled. LVGL-thread only (the decode may drop
-  // the image cache under fragmentation).
+  // CONTAIN-fits it — bilinear resize to the largest size that fits inside
+  // max_w×max_h with the aspect ratio kept, never cropping. The buffer is
+  // the FITTED size (the returned fit_w/fit_h); the caller centers the
+  // widget and the layer behind shows through the letterbox. Nothing enters
+  // the LVGL image cache and both transient buffers are freed before
+  // returning — the caller owns ONLY the returned draw_buf (free via
+  // _snapshot_free or _snapshot_attach_free). Equal source and target copy
+  // through unscaled. LVGL-thread only (the decode may drop the image cache
+  // under fragmentation).
   lua_register(L, "_bg_load_scaled", [](lua_State *L) -> int {
     const char *src = luaL_checkstring(L, 1);
     int dw = (int)luaL_checkinteger(L, 2);
@@ -6255,7 +6253,10 @@ void setupLuaVGL() {
       SLog.printf("[bg] no memory for %ux%u decode\n", info.w, info.h);
       lua_pushnil(L); return 1;
     }
-    unsigned sw = 0, sh = 0;
+    // Two statements on purpose: lua_register is a MACRO, and a comma at
+    // brace level inside the lambda splits its argument list.
+    unsigned sw = 0;
+    unsigned sh = 0;
     const char *stage = png_decode_565(png, fsize, raw, raw_bytes, true,
                                        &sw, &sh);
     heap_caps_free(png);
@@ -6265,18 +6266,31 @@ void setupLuaVGL() {
       lua_pushnil(L); return 1;
     }
 
+    // Contain fit: one scale factor (the smaller axis ratio), no crop. A
+    // source smaller than the screen upscales to fit — one wallpaper file
+    // serves every panel size.
+    float fit = fminf((float)dw / (float)sw, (float)dh / (float)sh);
+    int fw = (int)((float)sw * fit + 0.5f);
+    int fh = (int)((float)sh * fit + 0.5f);
+    if (fw < 1) fw = 1;
+    if (fh < 1) fh = 1;
+    if (fw > dw) fw = dw;
+    if (fh > dh) fh = dh;
+
     lv_draw_buf_t *dbuf =
-        lv_draw_buf_create(dw, dh, LV_COLOR_FORMAT_RGB565, LV_STRIDE_AUTO);
+        lv_draw_buf_create(fw, fh, LV_COLOR_FORMAT_RGB565, LV_STRIDE_AUTO);
     if (!dbuf) {
       heap_caps_free(raw);
-      SLog.printf("[bg] no memory for %dx%d wallpaper\n", dw, dh);
+      SLog.printf("[bg] no memory for %dx%d wallpaper\n", fw, fh);
       lua_pushnil(L); return 1;
     }
-    rgb565_scale_cover(raw, (int)sw, (int)sh, (uint8_t *)dbuf->data,
-                       dbuf->header.stride, dw, dh);
+    rgb565_resize(raw, (int)sw, (int)sh, (uint8_t *)dbuf->data,
+                  dbuf->header.stride, fw, fh);
     heap_caps_free(raw);
     lua_pushlightuserdata(L, dbuf);
-    return 1;
+    lua_pushinteger(L, fw);
+    lua_pushinteger(L, fh);
+    return 3;
   });
 
   // _screenshot([obj]) -> true. Queues a capture of whatever is on the panel;
