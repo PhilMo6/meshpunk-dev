@@ -2041,6 +2041,8 @@ static int lua_wifi_fetch(lua_State *L) {
 // _wifi_download_file(url, filepath) -> {success=bool, error=string|nil, size=int|nil}
 // Downloads binary data directly to a file, bypassing Lua strings (which truncate at null bytes).
 // filepath uses S:/L: prefix convention (see meshpunk_fs).
+// A chunked response (Transfer-Encoding: chunked) is decoded: only the body
+// data reaches the file, and the download ends at the zero-size chunk.
 //
 // The HTTPClient (and its TLS session) persists between calls: consecutive
 // downloads from the same host reuse the socket and skip DNS + TCP + TLS
@@ -2050,6 +2052,73 @@ static int lua_wifi_fetch(lua_State *L) {
 static HTTPClient *s_dl_http = nullptr;
 static uint8_t *s_dl_buf = nullptr;  // PSRAM transfer buffer, allocated once
 static const size_t DL_BUF_SIZE = 4096;
+
+// Incremental decoder for a chunked HTTP body: "<hex size>[;ext]\r\n", that
+// many data bytes, "\r\n", repeated until a zero-size chunk. The trailer after
+// the zero-size chunk is not read.
+struct ChunkDecoder {
+  enum State : uint8_t { CK_SIZE, CK_EXT, CK_DATA, CK_CR, CK_LF, CK_END, CK_BAD };
+  State state = CK_SIZE;
+  uint32_t size = 0;     // CK_SIZE/CK_EXT: chunk size parsed so far; CK_DATA: data bytes left
+  bool digits = false;   // CK_SIZE: a hex digit has been seen on this size line
+};
+
+// Decodes buf[0..n) in place: data bytes are moved to the front of buf and the
+// framing is dropped. Returns the number of data bytes. Bytes after CK_END or
+// CK_BAD are ignored.
+static int chunk_decode(ChunkDecoder *d, uint8_t *buf, int n) {
+  int out = 0;
+  int i = 0;
+  while (i < n && d->state != ChunkDecoder::CK_END && d->state != ChunkDecoder::CK_BAD) {
+    if (d->state == ChunkDecoder::CK_DATA) {
+      int run = n - i;
+      if ((uint32_t)run > d->size) run = (int)d->size;
+      memmove(buf + out, buf + i, run);
+      out += run;
+      i += run;
+      d->size -= run;
+      if (d->size == 0) d->state = ChunkDecoder::CK_CR;
+      continue;
+    }
+    uint8_t c = buf[i++];
+    switch (d->state) {
+      case ChunkDecoder::CK_CR:
+        d->state = (c == '\r') ? ChunkDecoder::CK_LF : ChunkDecoder::CK_BAD;
+        break;
+      case ChunkDecoder::CK_LF:
+        if (c == '\n') {
+          d->state = ChunkDecoder::CK_SIZE;
+          d->size = 0;
+          d->digits = false;
+        } else {
+          d->state = ChunkDecoder::CK_BAD;
+        }
+        break;
+      default: {  // CK_SIZE or CK_EXT
+        if (c == '\n') {
+          if (!d->digits) d->state = ChunkDecoder::CK_BAD;
+          else d->state = d->size ? ChunkDecoder::CK_DATA : ChunkDecoder::CK_END;
+        } else if (d->state == ChunkDecoder::CK_EXT || c == '\r' || c == ' ' || c == '\t') {
+          // chunk extension text, or whitespace / CR before the LF
+        } else if (c == ';') {
+          d->state = ChunkDecoder::CK_EXT;
+        } else {
+          int v = (c >= '0' && c <= '9') ? c - '0'
+                : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+          if (v < 0 || d->size > 0x07FFFFFF) {
+            d->state = ChunkDecoder::CK_BAD;
+          } else {
+            d->size = d->size * 16 + (uint32_t)v;
+            d->digits = true;
+          }
+        }
+        break;
+      }
+    }
+  }
+  return out;
+}
 
 static void wifi_dl_client_close() {
   if (!s_dl_http) return;
@@ -2064,6 +2133,9 @@ static bool wifi_dl_client_open(const char *url) {
     s_dl_http = new HTTPClient();
     s_dl_http->setUserAgent("meshpunk/1.0");
     s_dl_http->setReuse(true);
+    // Kept across begin(); HTTPClient clears the value before each request.
+    static const char *dl_headers[] = { "Transfer-Encoding" };
+    s_dl_http->collectHeaders(dl_headers, 1);
   }
   return s_dl_http->begin(url);
 }
@@ -2130,7 +2202,10 @@ static int lua_wifi_download_file(lua_State *L) {
     return 1;
   }
 
-  int len = s_dl_http->getSize();
+  // Transfer-Encoding overrides any Content-Length (RFC 7230 3.3.3).
+  const bool chunked =
+      s_dl_http->header("Transfer-Encoding").equalsIgnoreCase("chunked");
+  int len = chunked ? -1 : s_dl_http->getSize();
   WiFiClient *stream = s_dl_http->getStreamPtr();
 
   MeshpunkFile mf = meshpunk_open(filepath, "w", false);
@@ -2159,7 +2234,9 @@ static int lua_wifi_download_file(lua_State *L) {
   // Stall detector, not a total-time cap: big files legitimately take longer
   // than any fixed budget, so the deadline resets on every received chunk.
   uint32_t deadline = millis() + 20000;
+  ChunkDecoder ck;
   while (len > 0 || len == -1) {
+    if (chunked && (ck.state == ChunkDecoder::CK_END || ck.state == ChunkDecoder::CK_BAD)) break;
     if ((int32_t)(millis() - deadline) >= 0) break;
     int avail = stream->available();
     if (avail <= 0) {
@@ -2170,10 +2247,13 @@ static int lua_wifi_download_file(lua_State *L) {
     int toRead = (avail < (int)DL_BUF_SIZE) ? avail : (int)DL_BUF_SIZE;
     int rd = stream->readBytes(s_dl_buf, toRead);
     if (rd <= 0) break;
-    if (mf.is_sd) sd_spi_take();
-    mf.file.write(s_dl_buf, rd);
-    if (mf.is_sd) sd_spi_release();
-    total += rd;
+    int out = chunked ? chunk_decode(&ck, s_dl_buf, rd) : rd;
+    if (out > 0) {
+      if (mf.is_sd) sd_spi_take();
+      mf.file.write(s_dl_buf, out);
+      if (mf.is_sd) sd_spi_release();
+    }
+    total += out;
     if (len > 0) len -= rd;
     deadline = millis() + 20000;   // progress made — reset the stall clock
   }
@@ -2193,9 +2273,22 @@ static int lua_wifi_download_file(lua_State *L) {
     return 1;
   }
 
+  if (chunked && ck.state != ChunkDecoder::CK_END) {
+    // The chunked body stopped before its zero-size chunk (stall, closed
+    // connection or malformed framing): the file is incomplete.
+    wifi_dl_client_close();
+    lua_pushboolean(L, 0);
+    lua_setfield(L, -2, "success");
+    lua_pushstring(L, ck.state == ChunkDecoder::CK_BAD ? "Bad chunked encoding"
+                                                     : "Truncated download");
+    lua_setfield(L, -2, "error");
+    return 1;
+  }
+
   if (len == -1) {
-    // No Content-Length: body was read until close/stall, so this connection
-    // can't be trusted for another request.
+    // No Content-Length: a close-delimited body was read until close/stall,
+    // and a chunked body's trailer is left unread, so this connection can't
+    // be trusted for another request.
     wifi_dl_client_close();
   } else {
     s_dl_http->end();  // keeps the socket alive when the server allows reuse
