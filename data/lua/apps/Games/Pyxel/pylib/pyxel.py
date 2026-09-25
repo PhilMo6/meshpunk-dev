@@ -1,0 +1,794 @@
+# pyxel API for the Meshpunk Pyxel player (MicroPython).
+# Drawing, input, resources and the frame loop are native (_pyxel, src/api.c);
+# this module adds the constants, the resource classes and the bank objects.
+# API reference: https://github.com/kitao/pyxel/blob/main/docs/api-reference.md
+#
+# Key codes match upstream below 0x80; upstream's 0x4000_00nn keys are
+# 0x10000 + nn here and its 0x5000_0000 + n keys are 0x20000 + n.
+
+import _pyxel as _p
+
+VERSION = "2.9.9"
+
+# ---------------------------------------------------------------------------
+# Keys
+# ---------------------------------------------------------------------------
+KEY_UNKNOWN = 0x0
+KEY_BACKSPACE = 0x8
+KEY_TAB = 0x9
+KEY_RETURN = 0xD
+KEY_ESCAPE = 0x1B
+KEY_SPACE = 0x20
+KEY_EXCLAIM = 0x21
+KEY_QUOTEDBL = 0x22
+KEY_HASH = 0x23
+KEY_DOLLAR = 0x24
+KEY_PERCENT = 0x25
+KEY_AMPERSAND = 0x26
+KEY_QUOTE = 0x27
+KEY_LEFTPAREN = 0x28
+KEY_RIGHTPAREN = 0x29
+KEY_ASTERISK = 0x2A
+KEY_PLUS = 0x2B
+KEY_COMMA = 0x2C
+KEY_MINUS = 0x2D
+KEY_PERIOD = 0x2E
+KEY_SLASH = 0x2F
+KEY_0 = 0x30
+KEY_1 = 0x31
+KEY_2 = 0x32
+KEY_3 = 0x33
+KEY_4 = 0x34
+KEY_5 = 0x35
+KEY_6 = 0x36
+KEY_7 = 0x37
+KEY_8 = 0x38
+KEY_9 = 0x39
+KEY_COLON = 0x3A
+KEY_SEMICOLON = 0x3B
+KEY_LESS = 0x3C
+KEY_EQUALS = 0x3D
+KEY_GREATER = 0x3E
+KEY_QUESTION = 0x3F
+KEY_AT = 0x40
+KEY_LEFTBRACKET = 0x5B
+KEY_BACKSLASH = 0x5C
+KEY_RIGHTBRACKET = 0x5D
+KEY_CARET = 0x5E
+KEY_UNDERSCORE = 0x5F
+KEY_BACKQUOTE = 0x60
+KEY_A = 0x61
+KEY_B = 0x62
+KEY_C = 0x63
+KEY_D = 0x64
+KEY_E = 0x65
+KEY_F = 0x66
+KEY_G = 0x67
+KEY_H = 0x68
+KEY_I = 0x69
+KEY_J = 0x6A
+KEY_K = 0x6B
+KEY_L = 0x6C
+KEY_M = 0x6D
+KEY_N = 0x6E
+KEY_O = 0x6F
+KEY_P = 0x70
+KEY_Q = 0x71
+KEY_R = 0x72
+KEY_S = 0x73
+KEY_T = 0x74
+KEY_U = 0x75
+KEY_V = 0x76
+KEY_W = 0x77
+KEY_X = 0x78
+KEY_Y = 0x79
+KEY_Z = 0x7A
+KEY_DELETE = 0x7F
+KEY_CAPSLOCK = 0x10039
+KEY_F1 = 0x1003A
+KEY_F2 = 0x1003B
+KEY_F3 = 0x1003C
+KEY_F4 = 0x1003D
+KEY_F5 = 0x1003E
+KEY_F6 = 0x1003F
+KEY_F7 = 0x10040
+KEY_F8 = 0x10041
+KEY_F9 = 0x10042
+KEY_F10 = 0x10043
+KEY_F11 = 0x10044
+KEY_F12 = 0x10045
+KEY_PRINTSCREEN = 0x10046
+KEY_SCROLLLOCK = 0x10047
+KEY_PAUSE = 0x10048
+KEY_INSERT = 0x10049
+KEY_HOME = 0x1004A
+KEY_PAGEUP = 0x1004B
+KEY_END = 0x1004D
+KEY_PAGEDOWN = 0x1004E
+KEY_RIGHT = 0x1004F
+KEY_LEFT = 0x10050
+KEY_DOWN = 0x10051
+KEY_UP = 0x10052
+KEY_NUMLOCKCLEAR = 0x10053
+KEY_KP_DIVIDE = 0x10054
+KEY_KP_MULTIPLY = 0x10055
+KEY_KP_MINUS = 0x10056
+KEY_KP_PLUS = 0x10057
+KEY_KP_ENTER = 0x10058
+KEY_KP_1 = 0x10059
+KEY_KP_2 = 0x1005A
+KEY_KP_3 = 0x1005B
+KEY_KP_4 = 0x1005C
+KEY_KP_5 = 0x1005D
+KEY_KP_6 = 0x1005E
+KEY_KP_7 = 0x1005F
+KEY_KP_8 = 0x10060
+KEY_KP_9 = 0x10061
+KEY_KP_0 = 0x10062
+KEY_KP_PERIOD = 0x10063
+KEY_APPLICATION = 0x10065
+KEY_POWER = 0x10066
+KEY_KP_EQUALS = 0x10067
+KEY_F13 = 0x10068
+KEY_F14 = 0x10069
+KEY_F15 = 0x1006A
+KEY_F16 = 0x1006B
+KEY_F17 = 0x1006C
+KEY_F18 = 0x1006D
+KEY_F19 = 0x1006E
+KEY_F20 = 0x1006F
+KEY_F21 = 0x10070
+KEY_F22 = 0x10071
+KEY_F23 = 0x10072
+KEY_F24 = 0x10073
+KEY_EXECUTE = 0x10074
+KEY_HELP = 0x10075
+KEY_MENU = 0x10076
+KEY_SELECT = 0x10077
+KEY_STOP = 0x10078
+KEY_AGAIN = 0x10079
+KEY_UNDO = 0x1007A
+KEY_CUT = 0x1007B
+KEY_COPY = 0x1007C
+KEY_PASTE = 0x1007D
+KEY_FIND = 0x1007E
+KEY_MUTE = 0x1007F
+KEY_VOLUMEUP = 0x10080
+KEY_VOLUMEDOWN = 0x10081
+KEY_KP_COMMA = 0x10085
+KEY_KP_EQUALSAS400 = 0x10086
+KEY_ALTERASE = 0x10099
+KEY_SYSREQ = 0x1009A
+KEY_CANCEL = 0x1009B
+KEY_CLEAR = 0x1009C
+KEY_PRIOR = 0x1009D
+KEY_RETURN2 = 0x1009E
+KEY_SEPARATOR = 0x1009F
+KEY_OUT = 0x100A0
+KEY_OPER = 0x100A1
+KEY_CLEARAGAIN = 0x100A2
+KEY_CRSEL = 0x100A3
+KEY_EXSEL = 0x100A4
+KEY_KP_00 = 0x100B0
+KEY_KP_000 = 0x100B1
+KEY_THOUSANDSSEPARATOR = 0x100B2
+KEY_DECIMALSEPARATOR = 0x100B3
+KEY_CURRENCYUNIT = 0x100B4
+KEY_CURRENCYSUBUNIT = 0x100B5
+KEY_KP_LEFTPAREN = 0x100B6
+KEY_KP_RIGHTPAREN = 0x100B7
+KEY_KP_LEFTBRACE = 0x100B8
+KEY_KP_RIGHTBRACE = 0x100B9
+KEY_KP_TAB = 0x100BA
+KEY_KP_BACKSPACE = 0x100BB
+KEY_KP_A = 0x100BC
+KEY_KP_B = 0x100BD
+KEY_KP_C = 0x100BE
+KEY_KP_D = 0x100BF
+KEY_KP_E = 0x100C0
+KEY_KP_F = 0x100C1
+KEY_KP_XOR = 0x100C2
+KEY_KP_POWER = 0x100C3
+KEY_KP_PERCENT = 0x100C4
+KEY_KP_LESS = 0x100C5
+KEY_KP_GREATER = 0x100C6
+KEY_KP_AMPERSAND = 0x100C7
+KEY_KP_DBLAMPERSAND = 0x100C8
+KEY_KP_VERTICALBAR = 0x100C9
+KEY_KP_DBLVERTICALBAR = 0x100CA
+KEY_KP_COLON = 0x100CB
+KEY_KP_HASH = 0x100CC
+KEY_KP_SPACE = 0x100CD
+KEY_KP_AT = 0x100CE
+KEY_KP_EXCLAM = 0x100CF
+KEY_KP_MEMSTORE = 0x100D0
+KEY_KP_MEMRECALL = 0x100D1
+KEY_KP_MEMCLEAR = 0x100D2
+KEY_KP_MEMADD = 0x100D3
+KEY_KP_MEMSUBTRACT = 0x100D4
+KEY_KP_MEMMULTIPLY = 0x100D5
+KEY_KP_MEMDIVIDE = 0x100D6
+KEY_KP_PLUSMINUS = 0x100D7
+KEY_KP_CLEAR = 0x100D8
+KEY_KP_CLEARENTRY = 0x100D9
+KEY_KP_BINARY = 0x100DA
+KEY_KP_OCTAL = 0x100DB
+KEY_KP_DECIMAL = 0x100DC
+KEY_KP_HEXADECIMAL = 0x100DD
+KEY_LCTRL = 0x100E0
+KEY_LSHIFT = 0x100E1
+KEY_LALT = 0x100E2
+KEY_LGUI = 0x100E3
+KEY_RCTRL = 0x100E4
+KEY_RSHIFT = 0x100E5
+KEY_RALT = 0x100E6
+KEY_RGUI = 0x100E7
+KEY_NONE = 0x20000
+KEY_SHIFT = 0x20001
+KEY_CTRL = 0x20002
+KEY_ALT = 0x20003
+KEY_GUI = 0x20004
+
+MOUSE_POS_X = 0x20100
+MOUSE_POS_Y = 0x20101
+MOUSE_WHEEL_X = 0x20102
+MOUSE_WHEEL_Y = 0x20103
+MOUSE_BUTTON_LEFT = 0x20104
+MOUSE_BUTTON_MIDDLE = 0x20105
+MOUSE_BUTTON_RIGHT = 0x20106
+MOUSE_BUTTON_X1 = 0x20107
+MOUSE_BUTTON_X2 = 0x20108
+
+_PAD_KEYS = (
+    "AXIS_LEFTX", "AXIS_LEFTY", "AXIS_RIGHTX", "AXIS_RIGHTY",
+    "AXIS_TRIGGERLEFT", "AXIS_TRIGGERRIGHT",
+    "BUTTON_A", "BUTTON_B", "BUTTON_X", "BUTTON_Y", "BUTTON_BACK", "BUTTON_GUIDE",
+    "BUTTON_START", "BUTTON_LEFTSTICK", "BUTTON_RIGHTSTICK", "BUTTON_LEFTSHOULDER",
+    "BUTTON_RIGHTSHOULDER", "BUTTON_DPAD_UP", "BUTTON_DPAD_DOWN", "BUTTON_DPAD_LEFT",
+    "BUTTON_DPAD_RIGHT",
+)
+_g = globals()
+for _n in range(4):
+    for _i in range(len(_PAD_KEYS)):
+        _g["GAMEPAD%d_%s" % (_n + 1, _PAD_KEYS[_i])] = 0x20200 + 0x100 * _n + _i
+
+# ---------------------------------------------------------------------------
+# Graphics and audio constants
+# ---------------------------------------------------------------------------
+COLOR_BLACK = 0
+COLOR_NAVY = 1
+COLOR_PURPLE = 2
+COLOR_GREEN = 3
+COLOR_BROWN = 4
+COLOR_DARK_BLUE = 5
+COLOR_LIGHT_BLUE = 6
+COLOR_WHITE = 7
+COLOR_RED = 8
+COLOR_ORANGE = 9
+COLOR_YELLOW = 10
+COLOR_LIME = 11
+COLOR_CYAN = 12
+COLOR_GRAY = 13
+COLOR_PINK = 14
+COLOR_PEACH = 15
+
+NUM_COLORS = 16
+NUM_IMAGES = 3
+IMAGE_SIZE = 256
+NUM_TILEMAPS = 8
+TILEMAP_SIZE = 256
+TILE_SIZE = 8
+FONT_WIDTH = 4
+FONT_HEIGHT = 6
+
+NUM_CHANNELS = 4
+NUM_TONES = 4
+NUM_SOUNDS = 64
+NUM_MUSICS = 8
+
+TONE_TRIANGLE = 0
+TONE_SQUARE = 1
+TONE_PULSE = 2
+TONE_NOISE = 3
+
+EFFECT_NONE = 0
+EFFECT_SLIDE = 1
+EFFECT_VIBRATO = 2
+EFFECT_FADEOUT = 3
+EFFECT_HALF_FADEOUT = 4
+EFFECT_QUARTER_FADEOUT = 5
+
+DEFAULT_COLORS = (
+    0x000000, 0x2B335F, 0x7E2072, 0x19959C, 0x8B4852, 0x395C98, 0xA9C1FF, 0xEEEEEE,
+    0xD4186C, 0xD38441, 0xE9C35B, 0x70C6A9, 0x7696DE, 0xA3A3A3, 0xFF9798, 0xEDC7B0,
+)
+
+
+class _Colors(list):
+    def from_list(self, lst):
+        self[:] = list(lst)
+
+    def to_list(self):
+        return list(self)
+
+
+colors = _Colors(DEFAULT_COLORS)
+
+# ---------------------------------------------------------------------------
+# Resource classes
+# ---------------------------------------------------------------------------
+def _simplify(s):
+    return "".join(c for c in s.lower() if c not in " \t\r\n")
+
+
+class Image:
+    # _h: bank handle (0-2 image banks, 3 screen, 4 cursor) or None for an
+    # image created by the game, whose state lives in _st/_buf.
+    def __init__(self, width, height, _h=None):
+        self._h = _h
+        if _h is None:
+            self._st, self._buf = _p.image_alloc(width, height)
+
+    @staticmethod
+    def from_image(filename, include_colors=False):
+        img = Image(0, 0, -1)
+        img._h = None
+        img._st, img._buf = _p.image_from_file(filename, include_colors)
+        return img
+
+    @property
+    def width(self):
+        return _p.i_size(self)[0]
+
+    @property
+    def height(self):
+        return _p.i_size(self)[1]
+
+    def set(self, x, y, data):
+        _p.i_set(self, x, y, data)
+
+    def load(self, x, y, filename, include_colors=False):
+        _p.i_load(self, x, y, filename, include_colors)
+
+    def save(self, filename, scale):
+        raise NotImplementedError("Image.save is not supported")
+
+    def data_ptr(self):
+        raise NotImplementedError("Image.data_ptr is not supported")
+
+    def clip(self, *args):
+        _p.i_clip(self, *args)
+
+    def camera(self, *args):
+        _p.i_camera(self, *args)
+
+    def pal(self, *args):
+        _p.i_pal(self, *args)
+
+    def dither(self, alpha):
+        _p.i_dither(self, alpha)
+
+    def cls(self, col):
+        _p.i_cls(self, col)
+
+    def pget(self, x, y):
+        return _p.i_pget(self, x, y)
+
+    def pset(self, x, y, col):
+        _p.i_pset(self, x, y, col)
+
+    def line(self, x1, y1, x2, y2, col):
+        _p.i_line(self, x1, y1, x2, y2, col)
+
+    def rect(self, x, y, w, h, col):
+        _p.i_rect(self, x, y, w, h, col)
+
+    def rectb(self, x, y, w, h, col):
+        _p.i_rectb(self, x, y, w, h, col)
+
+    def circ(self, x, y, r, col):
+        _p.i_circ(self, x, y, r, col)
+
+    def circb(self, x, y, r, col):
+        _p.i_circb(self, x, y, r, col)
+
+    def elli(self, x, y, w, h, col):
+        _p.i_elli(self, x, y, w, h, col)
+
+    def ellib(self, x, y, w, h, col):
+        _p.i_ellib(self, x, y, w, h, col)
+
+    def tri(self, x1, y1, x2, y2, x3, y3, col):
+        _p.i_tri(self, x1, y1, x2, y2, x3, y3, col)
+
+    def trib(self, x1, y1, x2, y2, x3, y3, col):
+        _p.i_trib(self, x1, y1, x2, y2, x3, y3, col)
+
+    def fill(self, x, y, col):
+        _p.i_fill(self, x, y, col)
+
+    def blt(self, x, y, img, u, v, w, h, colkey=None, rotate=None, scale=None):
+        _p.i_blt(self, x, y, img, u, v, w, h, colkey, rotate, scale)
+
+    def bltm(self, x, y, tm, u, v, w, h, colkey=None, rotate=None, scale=None):
+        _p.i_bltm(self, x, y, tm, u, v, w, h, colkey, rotate, scale)
+
+    def blt3d(self, *args, **kwargs):
+        raise NotImplementedError("blt3d is not supported")
+
+    def bltm3d(self, *args, **kwargs):
+        raise NotImplementedError("bltm3d is not supported")
+
+    def text(self, x, y, s, col, font=None):
+        _p.i_text(self, x, y, s, col, font)
+
+
+class Tilemap:
+    def __init__(self, width, height, img, _h=None):
+        self._h = _h
+        self._imgsrc_obj = None
+        if _h is None:
+            self._st, self._buf = _p.tilemap_alloc(width, height, img if isinstance(img, int) else 0)
+            if not isinstance(img, int):
+                self.imgsrc = img
+
+    @staticmethod
+    def from_tmx(filename, layer):
+        raise NotImplementedError("TMX tilemaps are not supported yet")
+
+    @property
+    def width(self):
+        return _p.t_size(self)[0]
+
+    @property
+    def height(self):
+        return _p.t_size(self)[1]
+
+    @property
+    def imgsrc(self):
+        n = _p.t_imgsrc(self, None)
+        return n if n >= 0 else self._imgsrc_obj
+
+    @imgsrc.setter
+    def imgsrc(self, value):
+        if isinstance(value, int):
+            self._imgsrc_obj = None
+            _p.t_imgsrc(self, value)
+        elif value._h is not None and 0 <= value._h < NUM_IMAGES:
+            self._imgsrc_obj = None
+            _p.t_imgsrc(self, value._h)
+        else:
+            self._imgsrc_obj = value
+            _p.t_imgsrc(self, -1)
+
+    def set(self, x, y, data):
+        _p.t_set(self, x, y, data)
+
+    def load(self, x, y, filename, layer):
+        raise NotImplementedError("TMX tilemaps are not supported yet")
+
+    def data_ptr(self):
+        raise NotImplementedError("Tilemap.data_ptr is not supported")
+
+    def clip(self, *args):
+        _p.t_clip(self, *args)
+
+    def camera(self, *args):
+        _p.t_camera(self, *args)
+
+    def cls(self, tile):
+        _p.t_cls(self, tile)
+
+    def pget(self, x, y):
+        return _p.t_pget(self, x, y)
+
+    def pset(self, x, y, tile):
+        _p.t_pset(self, x, y, tile)
+
+    def line(self, x1, y1, x2, y2, tile):
+        _p.t_line(self, x1, y1, x2, y2, tile)
+
+    def rect(self, x, y, w, h, tile):
+        _p.t_rect(self, x, y, w, h, tile)
+
+    def rectb(self, x, y, w, h, tile):
+        _p.t_rectb(self, x, y, w, h, tile)
+
+    def circ(self, x, y, r, tile):
+        _p.t_circ(self, x, y, r, tile)
+
+    def circb(self, x, y, r, tile):
+        _p.t_circb(self, x, y, r, tile)
+
+    def elli(self, x, y, w, h, tile):
+        _p.t_elli(self, x, y, w, h, tile)
+
+    def ellib(self, x, y, w, h, tile):
+        _p.t_ellib(self, x, y, w, h, tile)
+
+    def tri(self, x1, y1, x2, y2, x3, y3, tile):
+        _p.t_tri(self, x1, y1, x2, y2, x3, y3, tile)
+
+    def trib(self, x1, y1, x2, y2, x3, y3, tile):
+        _p.t_trib(self, x1, y1, x2, y2, x3, y3, tile)
+
+    def fill(self, x, y, tile):
+        _p.t_fill(self, x, y, tile)
+
+    def blt(self, x, y, tm, u, v, w, h, tilekey=None, rotate=None, scale=None):
+        _p.t_blt(self, x, y, tm, u, v, w, h, tilekey, rotate, scale)
+
+    def collide(self, x, y, w, h, dx, dy, walls):
+        raise NotImplementedError("Tilemap.collide is not supported yet")
+
+
+_NOTE_BASE = {"c": 0, "d": 2, "e": 4, "f": 5, "g": 7, "a": 9, "b": 11}
+_TONE_CHARS = {"t": 0, "s": 1, "p": 2, "n": 3}
+_EFFECT_CHARS = {"n": 0, "s": 1, "v": 2, "f": 3, "h": 4, "q": 5}
+
+
+class Sound:
+    def __init__(self):
+        self.notes = []
+        self.tones = []
+        self.volumes = []
+        self.effects = []
+        self.speed = 30
+        self._mml = None
+        self._pcm = None
+
+    def set(self, notes, tones, volumes, effects, speed):
+        self.set_notes(notes)
+        self.set_tones(tones)
+        self.set_volumes(volumes)
+        self.set_effects(effects)
+        if speed <= 0:
+            raise ValueError("speed must be greater than 0")
+        self.speed = speed
+
+    def set_notes(self, notes):
+        s = _simplify(notes)
+        out = []
+        i = 0
+        while i < len(s):
+            c = s[i]
+            i += 1
+            if c == "r":
+                out.append(-1)
+                continue
+            if c not in _NOTE_BASE:
+                raise ValueError("Invalid sound note '%s'" % c)
+            note = _NOTE_BASE[c]
+            c = s[i] if i < len(s) else ""
+            if c == "#":
+                note += 1
+                i += 1
+            elif c == "-":
+                note -= 1
+                i += 1
+            c = s[i] if i < len(s) else ""
+            if c not in "01234" or c == "":
+                raise ValueError("Invalid sound note '%s'" % c)
+            i += 1
+            out.append(note + int(c) * 12)
+        self.notes = out
+
+    def set_tones(self, tones):
+        out = []
+        for c in _simplify(tones):
+            if c in _TONE_CHARS:
+                out.append(_TONE_CHARS[c])
+            elif "0" <= c <= "9":
+                out.append(int(c))
+            else:
+                raise ValueError("Invalid sound tone '%s'" % c)
+        self.tones = out
+
+    def set_volumes(self, volumes):
+        out = []
+        for c in _simplify(volumes):
+            if "0" <= c <= "7":
+                out.append(int(c))
+            else:
+                raise ValueError("Invalid sound volume '%s'" % c)
+        self.volumes = out
+
+    def set_effects(self, effects):
+        out = []
+        for c in _simplify(effects):
+            if c in _EFFECT_CHARS:
+                out.append(_EFFECT_CHARS[c])
+            else:
+                raise ValueError("Invalid sound effect '%s'" % c)
+        self.effects = out
+
+    def mml(self, code=None):
+        self._mml = code
+        if code is not None:
+            self._pcm = None
+
+    def pcm(self, filename=None):
+        self._pcm = filename
+        if filename is not None:
+            self._mml = None
+
+    def total_sec(self):
+        if not self.notes:
+            return 0.0
+        return len(self.notes) * self.speed / 120.0
+
+    def save(self, filename, sec, ffmpeg=False):
+        raise NotImplementedError("Sound.save is not supported")
+
+
+class Music:
+    def __init__(self):
+        self.seqs = []
+
+    def set(self, *seqs):
+        self.seqs = [list(seq) for seq in seqs]
+
+    def save(self, filename, sec, ffmpeg=False):
+        raise NotImplementedError("Music.save is not supported")
+
+
+class Channel:
+    def __init__(self, _index=None):
+        self._index = _index
+        self.gain = 0.125
+        self.detune = 0
+
+    def play(self, snd, sec=None, loop=False, resume=False):
+        play(self._index, snd, sec, loop, resume)
+
+    def stop(self):
+        _p.stop(self._index)
+
+    def play_pos(self):
+        return _p.play_pos(self._index)
+
+
+class Tone:
+    # mode: 0 wavetable, 1 short-period noise, 2 long-period noise
+    def __init__(self, mode=0, sample_bits=4, wavetable=None, gain=1.0):
+        self.mode = mode
+        self.sample_bits = sample_bits
+        self.wavetable = list(wavetable) if wavetable else []
+        self.gain = gain
+
+
+class Font:
+    def __init__(self, filename, font_size=10.0):
+        raise NotImplementedError("custom fonts are not supported yet")
+
+
+# ---------------------------------------------------------------------------
+# Banks and runtime variables (frame_count, mouse_x, ... are updated by _pyxel)
+# ---------------------------------------------------------------------------
+images = [Image(IMAGE_SIZE, IMAGE_SIZE, i) for i in range(NUM_IMAGES)]
+tilemaps = [Tilemap(TILEMAP_SIZE, TILEMAP_SIZE, 0, i) for i in range(NUM_TILEMAPS)]
+screen = Image(0, 0, 3)
+cursor = Image(8, 8, 4)
+font = None
+sounds = [Sound() for _ in range(NUM_SOUNDS)]
+musics = [Music() for _ in range(NUM_MUSICS)]
+channels = [Channel(i) for i in range(NUM_CHANNELS)]
+tones = [
+    Tone(0, 4, (8, 9, 10, 11, 12, 13, 14, 15, 15, 14, 13, 12, 11, 10, 9, 8,
+                7, 6, 5, 4, 3, 2, 1, 0, 0, 1, 2, 3, 4, 5, 6, 7), 1.0),
+    Tone(0, 1, (1, 0), 0.3),
+    Tone(0, 1, (1, 0, 0, 0), 0.3),
+    Tone(2, 0, (), 0.6),
+]
+
+width = 0
+height = 0
+frame_count = 0
+mouse_x = 0
+mouse_y = 0
+mouse_wheel = 0
+input_keys = []
+input_text = ""
+dropped_files = []
+
+# ---------------------------------------------------------------------------
+# Native functions
+# ---------------------------------------------------------------------------
+init = _p.init
+run = _p.run
+show = _p.show
+flip = _p.flip
+quit = _p.quit
+reset = _p.reset
+title = _p.title
+icon = _p.icon
+fullscreen = _p.fullscreen
+resize = _p.resize
+screen_mode = _p.screen_mode
+perf_monitor = _p.perf_monitor
+integer_scale = _p.integer_scale
+
+load = _p.load
+save = _p.save
+load_pal = _p.load_pal
+save_pal = _p.save_pal
+user_data_dir = _p.user_data_dir
+screenshot = _p.screenshot
+screencast = _p.screencast
+reset_screencast = _p.reset_screencast
+
+btn = _p.btn
+btnp = _p.btnp
+btnr = _p.btnr
+btnv = _p.btnv
+mouse = _p.mouse
+
+cls = _p.cls
+pget = _p.pget
+pset = _p.pset
+line = _p.line
+rect = _p.rect
+rectb = _p.rectb
+circ = _p.circ
+circb = _p.circb
+elli = _p.elli
+ellib = _p.ellib
+tri = _p.tri
+trib = _p.trib
+fill = _p.fill
+blt = _p.blt
+bltm = _p.bltm
+blt3d = _p.blt3d
+bltm3d = _p.bltm3d
+text = _p.text
+clip = _p.clip
+camera = _p.camera
+pal = _p.pal
+dither = _p.dither
+
+def play(ch, snd, sec=None, loop=False, resume=False, tick=None):
+    if tick is not None:
+        sec = tick / 120.0
+    if isinstance(snd, str):
+        raise NotImplementedError("MML sounds are not supported yet")
+    if isinstance(snd, (int, Sound)):
+        snd = [snd]
+    seq = [sounds[s] if isinstance(s, int) else s for s in snd]
+    _p.play(ch, seq, sec, loop, resume)
+
+
+def playm(msc, sec=None, loop=False, tick=None):
+    if tick is not None:
+        sec = tick / 120.0
+    seqs = musics[msc].seqs
+    for ch in range(min(len(seqs), NUM_CHANNELS)):
+        if seqs[ch]:
+            play(ch, seqs[ch], sec, loop)
+
+
+def stop(ch=None):
+    _p.stop(ch)
+
+
+play_pos = _p.play_pos
+
+
+def gen_bgm(preset, transp, instr, seed, play=False):
+    raise NotImplementedError("gen_bgm is not supported")
+
+
+ceil = _p.ceil
+floor = _p.floor
+clamp = _p.clamp
+sgn = _p.sgn
+sqrt = _p.sqrt
+sin = _p.sin
+cos = _p.cos
+atan2 = _p.atan2
+rseed = _p.rseed
+rndi = _p.rndi
+rndf = _p.rndf
+nseed = _p.nseed
+noise = _p.noise
+
+_p._bind(globals())
