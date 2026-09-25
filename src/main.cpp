@@ -127,6 +127,9 @@ RADIO_CLASS radio = new Module(PIN_LORA_CS, PIN_LORA_DIO1, PIN_LORA_RST, PIN_LOR
 #if defined(BOARD_HELTEC_V4)
 #include "boards/punk_heltec_board.h"
 PunkHeltecBoard board;   // FEM TX/RX switching + Heltec battery circuit
+#elif defined(BOARD_WIO_L2)
+#include "boards/punk_wio_l2_board.h"
+PunkWioL2Board board;    // battery through the power backend (ADS1115)
 #else
 ESP32Board board;
 #endif
@@ -7250,6 +7253,16 @@ void setup() {
   // itself. A start failure leaves the protocol selected with the radio not
   // running, logged + bell-noticed — see lora_proto_start().
   SLog.printf("===== PROTO INIT: %s =====\n", lora_proto_active());
+  // This board's label (board_pins.h) names the protocol's default node
+  // ("Meshpunk <label>") and its BLE model name. Forwarded BEFORE start: it
+  // sets the protocol's defaults, and a saved node name loaded by start()
+  // replaces them. Protocols without the key ignore it.
+  {
+    const LoraProtoOps* ops = lora_proto_ops();
+    if (ops && ops->set_config) {
+      MESH_LOCK(); ops->set_config("board_label", MESHPUNK_BOARD_LABEL); MESH_UNLOCK();
+    }
+  }
   if (!lora_proto_start()) {
     // The load-failure notice site above already ran (notify is up by now):
     // post the start-failure notice here.
@@ -7610,7 +7623,7 @@ static void standby_run() {
   screen_timed_out = true;
   input_dev_kbd_backlight(0);
   kbd_timed_out = true;
-  display_dev_sleep(true);      // frame memory survives; wake shows the old screen
+  display_dev_sleep(true);      // the restore below repaints the UI on wake
   power_dev_standby_enter();    // Heltec: GNSS rail off
 
   // Keep the wake pins' runtime input config through light sleep instead of
@@ -7746,6 +7759,9 @@ static void standby_run() {
   input_dev_wake_pin_restore();   // re-attach the GPIO0 click ISR (edge config included)
   power_dev_standby_exit();     // Heltec: GNSS rail back on
   display_dev_sleep(false);
+  // Not every panel keeps its frame memory through sleep (display_dev.h):
+  // repaint the whole UI.
+  lv_obj_invalidate(lv_screen_active());
   // Full backlight re-init, not the incremental path: after minutes held in
   // shutdown the pulse chip's state cannot be trusted to match the driver's
   // tracking, and a mismatch leaves the screen black with no self-heal.

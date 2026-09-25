@@ -45,12 +45,17 @@ BOARD_SLUG = {
     "meshpunk_release":       "tdeck",
     "meshpunk_heltec":        "heltec_v4",
     "meshpunk_heltec_release": "heltec_v4",
+    "meshpunk_wio_l2":        "wio_l2",
+    "meshpunk_wio_l2_release": "wio_l2",
 }
-RELEASE_ENVS  = {"meshpunk_release", "meshpunk_heltec_release"}
+RELEASE_ENVS  = {"meshpunk_release", "meshpunk_heltec_release",
+                 "meshpunk_wio_l2_release"}
 LAUNCHER_ENVS = {"meshpunk_release"}   # bmorcelli Launcher exists for T-Deck only
 
 # The updater firmware of each board (src/updater/main_updater.cpp), built by
-# its own env and included in merged.bin at OFFSETS["updater"].
+# its own env and included in merged.bin at OFFSETS["updater"]. A board with
+# no entry has no updater yet: merge_bin produces no artifacts for it (another
+# board's updater must never land in its image).
 UPDATER_ENV = {
     "meshpunk":                "meshpunk_updater",
     "meshpunk_release":        "meshpunk_updater",
@@ -128,7 +133,11 @@ def merge_bin(source, target, env):
                                "meshpunk-%s-%s-merged.bin" % (slug, version))
 
     framework_dir = env.PioPlatform().get_package_dir("framework-arduinoespressif32")
-    updater_env   = UPDATER_ENV.get(pioenv, "meshpunk_updater")
+    updater_env   = UPDATER_ENV.get(pioenv)
+    if updater_env is None:
+        print("merge_bin: %s has no updater env yet - no merged/release"
+              " artifacts (flash with 'pio run -e %s -t upload')" % (pioenv, pioenv))
+        return
 
     bins = {
         "bootloader": os.path.join(build_dir, "bootloader.bin"),

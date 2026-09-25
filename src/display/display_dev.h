@@ -75,9 +75,10 @@ void display_dev_fill_black(void);
 void display_dev_backlight_init(void);
 void display_dev_brightness(uint8_t value);
 
-// Panel sleep-in/sleep-out (ST7789/ILI9341 SLPIN 0x10 / SLPOUT 0x11) for
-// standby. Frame memory is retained through sleep-in, so waking shows the
-// screen exactly as it was. Callers pair this with display_dev_brightness().
+// Panel sleep-in/sleep-out for standby. Frame memory survives it on the
+// ST7789 boards (SLPIN 0x10 / SLPOUT 0x11) but not on every panel — the
+// Wio L2's NV3031B wakes through a software reset — so callers repaint the
+// UI after waking. Callers pair this with display_dev_brightness().
 void display_dev_sleep(bool sleep);
 
 // Full known-state backlight re-init to `value`. The T-Deck's pulse-counted

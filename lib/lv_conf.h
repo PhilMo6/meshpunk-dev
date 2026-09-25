@@ -409,7 +409,7 @@
 #define LV_USE_LINUX_FBDEV      0
 #define LV_USE_NUTTX    0
 #define LV_USE_LINUX_DRM        0
-#define LV_USE_TFT_ESPI         1
+#define LV_USE_TFT_ESPI         0
 #define LV_USE_EVDEV    0
 #define LV_USE_LIBINPUT    0
 #define LV_USE_ST7735        0
