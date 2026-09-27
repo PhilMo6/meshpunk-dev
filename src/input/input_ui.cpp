@@ -235,6 +235,38 @@ static bool          s_touch_chord_prev    = false;
 static uint32_t      s_touch_chord_last_ms = 0;
 static volatile bool s_touch_chord_pending = false;
 
+// Standby wake-press hold (input_ui_ignore_click_until_release). Standby's
+// exit re-attaches the click ISR while the wake press can still be held, so
+// that press can still produce click edges. While the hold is armed the
+// keyboard reader drops click edges; it disarms once the click line has read
+// released for CLICK_HOLD_RELEASE_MS without a break.
+#define CLICK_HOLD_RELEASE_MS 250
+static bool     s_click_hold          = false;
+static bool     s_click_hold_released = false;
+static uint32_t s_click_hold_up_ms    = 0;
+
+void input_ui_ignore_click_until_release(void) {
+  trackball_click       = 0;
+  s_click_hold_released = false;
+  s_click_hold          = true;
+}
+
+// Top of each keyboard read: drops click edges while the hold is armed and
+// disarms it after the release window. True while armed.
+static bool click_hold_update(void) {
+  if (!s_click_hold) return false;
+  trackball_click = 0;
+  if (input_dev_nav_click_held()) {
+    s_click_hold_released = false;
+  } else if (!s_click_hold_released) {
+    s_click_hold_released = true;
+    s_click_hold_up_ms    = millis();
+  } else if (millis() - s_click_hold_up_ms >= CLICK_HOLD_RELEASE_MS) {
+    s_click_hold = false;
+  }
+  return s_click_hold;
+}
+
 // ── LVGL keyboard read callback ────────────────────────────────────────────
 static bool trackball_btn_pressed = false;
 
@@ -244,6 +276,9 @@ static void keyboard_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
   static uint32_t kb_mapped_key = 0;
   bool any_new = false;
   bool key_from_trackball = false;
+  // Standby wake-press hold: an edge the click ISR adds while this read runs
+  // is also left unconsumed below, and the next read drops it.
+  bool click_hold = click_hold_update();
 
   // ── Sample the keyboard (raw matrix — or one ASCII byte in legacy mode) ──
   // detect_legacy_fw=true: this interactive reader is where the
@@ -487,7 +522,7 @@ static void keyboard_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
     for (int ch = 1; ch < 128 && !got; ch++)
       if (kb_key_state[ch] && !kb_key_prev[ch]) got = ch;
     if (!got) {
-      if      (trackball_click > 0) got = 0x85;
+      if      (trackball_click > 0 && !click_hold) got = 0x85;
       else if (trackball_up > 0)    got = 0x81;
       else if (trackball_down > 0)  got = 0x82;
       else if (trackball_left > 0)  got = 0x83;
@@ -556,7 +591,7 @@ static void keyboard_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
 
   // ── Direction navigation — WASD + trackball, shared sensitivity ──
   if (!kb_active) {
-    if (trackball_click > 0) {
+    if (trackball_click > 0 && !click_hold) {
       trackball_click = 0;
       last_key_code = LV_KEY_ENTER;
       any_new = true;

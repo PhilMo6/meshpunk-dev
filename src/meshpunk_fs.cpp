@@ -3,7 +3,7 @@
 #include "usb_manager.h"   // UsbFlashGuardIf — pause USB audio around flash writes
 #include "usb_fs.h"        // usb_fs()/usb_fs_mounted() — the U: backend
 
-#include <SD.h>
+#include "storage/sd_dev.h"
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
 #include <esp_littlefs.h>
@@ -23,8 +23,8 @@ bool mp_littlefs_df(size_t* total, size_t* used) {
 
 // Strip an S:/L:/U: prefix, set *drive accordingly.
 // If no prefix, *drive = default_sd ? MP_SD : MP_FLASH.
-// Also strips leading /sd/ when targeting SD, since SD.open() already
-// operates relative to the SD mount point.
+// Also strips leading /sd/ when targeting SD, since sd_dev_fs().open()
+// already operates relative to the SD mount point.
 const char* meshpunk_parse_drive(const char* path, MpDrive* drive, bool default_sd) {
     *drive = default_sd ? MP_SD : MP_FLASH;
     if (path[0] != '\0' && path[1] == ':') {
@@ -39,7 +39,7 @@ const char* meshpunk_parse_drive(const char* path, MpDrive* drive, bool default_
             return path + 2;
         }
     }
-    // Strip /sd/ prefix for SD paths — SD.open() adds the mount point itself
+    // Strip /sd/ prefix for SD paths — sd_dev_fs().open() adds the mount point itself
     if (*drive == MP_SD && strncmp(path, "/sd/", 4) == 0) {
         return path + 3; // keep the leading /
     }
@@ -57,7 +57,7 @@ MeshpunkFile meshpunk_open(const char* path, const char* mode, bool default_sd) 
     if (drive == MP_SD) {
         if (!sd_mounted) return mf;
         sd_spi_take();
-        mf.file = SD.open(actual, mode);
+        mf.file = sd_dev_fs().open(actual, mode);
     } else if (drive == MP_USB) {
         // USB drive: no SPI lock (it's on the OTG controller, not the shared
         // SPI bus) and no flash guard (writes never stall the cache).
@@ -99,7 +99,7 @@ bool meshpunk_mkdirs(const char* path, bool default_sd) {
     if (n == 0 || n >= sizeof(buf)) return false;
     memcpy(buf, actual, n + 1);
 
-    fs::FS* f = (drive == MP_SD)  ? (fs::FS*)&SD
+    fs::FS* f = (drive == MP_SD)  ? &sd_dev_fs()
               : (drive == MP_USB) ? &usb_fs()
                                   : (fs::FS*)&LittleFS;
     bool ok = true;

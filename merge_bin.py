@@ -61,6 +61,8 @@ UPDATER_ENV = {
     "meshpunk_release":        "meshpunk_updater",
     "meshpunk_heltec":         "meshpunk_heltec_updater",
     "meshpunk_heltec_release": "meshpunk_heltec_updater",
+    "meshpunk_wio_l2":         "meshpunk_wio_l2_updater",
+    "meshpunk_wio_l2_release": "meshpunk_wio_l2_updater",
 }
 
 # Launcher build (bmorcelli/Launcher): a merged image of bootloader + table +
@@ -150,9 +152,10 @@ def merge_bin(source, target, env):
 
     # The littlefs image is identical across envs (same data/ + partition csv),
     # so if this env hasn't run buildfs, reuse the same board's dev-env image
-    # instead of requiring a second buildfs run.
+    # (the release env's name without "_release") instead of requiring a
+    # second buildfs run.
     if not os.path.isfile(bins["littlefs"]):
-        dev_env = "meshpunk_heltec" if "heltec" in pioenv else "meshpunk"
+        dev_env = pioenv[:-len("_release")] if pioenv.endswith("_release") else pioenv
         alt = os.path.join(os.path.dirname(build_dir), dev_env, "littlefs.bin")
         if os.path.isfile(alt):
             print("merge_bin: using littlefs.bin from %s env" % dev_env)
@@ -210,8 +213,7 @@ def merge_bin(source, target, env):
     # empty filesystem.
     if pioenv not in RELEASE_ENVS:
         print("merge_bin: dev env - skipping firmware/launcher artifacts"
-              " (use 'pio run -e meshpunk_release' or"
-              " 'pio run -e meshpunk_heltec_release' for release builds)")
+              " (use 'pio run -e %s_release' for release builds)" % pioenv)
         print("merge_bin: done")
         return
 

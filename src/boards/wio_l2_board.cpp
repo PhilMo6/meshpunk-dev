@@ -144,6 +144,40 @@ void wio_l2_backlight_set(uint8_t pwm) {
   (void)light_write(LIGHT_REG_UPDATE, 0x55);
 }
 
+// ── Core-1 driver init ──────────────────────────────────────────────────────
+
+struct Core1Job {
+  void (*fn)(void*);
+  void* arg;
+  SemaphoreHandle_t done;
+};
+
+static void core1_job_task(void* p) {
+  Core1Job* job = (Core1Job*)p;
+  job->fn(job->arg);
+  xSemaphoreGive(job->done);
+  vTaskDelete(NULL);
+}
+
+bool wio_l2_run_on_core1(void (*fn)(void*), void* arg) {
+  Core1Job job = { fn, arg, xSemaphoreCreateBinary() };
+  if (!job.done) {
+    SLog.println("[WIO] FAIL: core-1 init: no semaphore");
+    return false;
+  }
+  // 8 KB covers LovyanGFX's panel init and esp_vfs_fat_sdmmc_mount (card
+  // init + f_mount) plus SLog's 224-byte format buffer.
+  if (xTaskCreatePinnedToCore(core1_job_task, "wio_core1", 8192, &job,
+                              uxTaskPriorityGet(NULL), NULL, 1) != pdPASS) {
+    vSemaphoreDelete(job.done);
+    SLog.println("[WIO] FAIL: core-1 init: task create");
+    return false;
+  }
+  xSemaphoreTake(job.done, portMAX_DELAY);
+  vSemaphoreDelete(job.done);
+  return true;
+}
+
 bool wio_l2_backlight_init(uint8_t pwm) {
   bool ok = true;
   ok = light_write(0x00, 0x01) && ok;

@@ -59,6 +59,9 @@
 // ── ADS1115 battery ADC ─────────────────────────────────────────────────────
 #define WIO_L2_BATT_ADC_ADDR  0x48
 
+// ── AW35615 USB-C port controller (CC pins, VBUS sense) ─────────────────────
+#define WIO_L2_TYPEC_ADDR     0x22
+
 // Bring the board up: I2C bus, expander probe, then the power-up sequence
 // (LCD rail + reset pulse, GNSS rail + reset, touch reset, battery divider
 // enable ON, every other switched line parked OFF). Runs once, before any
@@ -80,5 +83,15 @@ bool wio_l2_exp_get(uint8_t bit, bool* level);
 // 0-255 on all channels. init() applies `pwm` as its first duty.
 bool wio_l2_backlight_init(uint8_t pwm);
 void wio_l2_backlight_set(uint8_t pwm);
+
+// Run fn(arg) in a task on core 1 and block until it returns; false (logged)
+// if the task could not be created. esp_intr_alloc() binds a driver's
+// interrupt to the core that calls it, and setup() runs on core 0. The L2's
+// display bus (LovyanGFX's SPI3 through the ESP-IDF SPI driver) and SDMMC
+// host initialize through here so their interrupts land on core 1: with
+// them on core 0, core 0 had no free interrupt line left when the WiFi
+// task's first hardware-AES use (WPA2 handshake) allocated its own, and
+// esp-aes aborts on that failure.
+bool wio_l2_run_on_core1(void (*fn)(void*), void* arg);
 
 #endif // BOARD_WIO_L2

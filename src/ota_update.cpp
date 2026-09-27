@@ -39,7 +39,7 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <FS.h>
-#include <SD.h>
+#include "storage/sd_dev.h"
 #include <LittleFS.h>
 extern "C" {
 #include <lua.h>
@@ -72,6 +72,8 @@ static const char kBoardTag[] = "MESHPUNK-BOARD:" MESHPUNK_BOARD_NAME;
 static const char* kUpdaterEnv = "meshpunk_updater";
 #elif defined(BOARD_HELTEC_V4)
 static const char* kUpdaterEnv = "meshpunk_heltec_updater";
+#elif defined(BOARD_WIO_L2)
+static const char* kUpdaterEnv = "meshpunk_wio_l2_updater";
 #else
 static const char* kUpdaterEnv = "<board>_updater";
 #endif
@@ -243,7 +245,7 @@ static String read_installed_version(void) {
 static bool sd_path_exists(const char* bare) {
   if (!sd_mounted) return false;
   sd_spi_take();
-  bool e = SD.exists(bare);
+  bool e = sd_dev_fs().exists(bare);
   sd_spi_release();
   return e;
 }
@@ -252,7 +254,7 @@ static void remove_staged(const char* path) {
   if (path[0] == 'S') {
     if (!sd_mounted) return;
     sd_spi_take();
-    SD.remove(path + 2);
+    sd_dev_fs().remove(path + 2);
     sd_spi_release();
   } else {
     UsbFlashGuard g;
@@ -712,7 +714,7 @@ static int lua_ota_begin(lua_State* L) {
     }
     if (sd_mounted) {
       sd_spi_take();
-      uint64_t free_bytes = SD.totalBytes() - SD.usedBytes();
+      uint64_t free_bytes = sd_dev_total_bytes() - sd_dev_used_bytes();
       sd_spi_release();
       if (free_bytes < (uint64_t)len + 65536) {
         session_close_files();
@@ -823,7 +825,7 @@ static int lua_ota_install(lua_State* L) {
   delay(60);   // let an in-flight dispatcher tick finish
   if (sd_mounted) {
     sd_spi_take();
-    SD.end();
+    sd_dev_unmount();
     sd_mounted = false;
     sd_spi_release();
   }

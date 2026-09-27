@@ -59,7 +59,9 @@
  * OPERATING SYSTEM
  *=================*/
 
-#define LV_USE_OS   LV_OS_FREERTOS
+/* No draw thread: every draw task runs inside lv_timer_handler(), on its
+ * caller (loopTask). emoji_font.cpp's cache recycling depends on that. */
+#define LV_USE_OS   LV_OS_NONE
 
 #if LV_USE_OS == LV_OS_CUSTOM
     #define LV_OS_CUSTOM_INCLUDE <stdint.h>

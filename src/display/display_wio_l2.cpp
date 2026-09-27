@@ -73,9 +73,14 @@ void display_dev_orient_point(int16_t* x, int16_t* y) {
   }
 }
 
+static void lcd_init_job(void* ok) { *(bool*)ok = lcd.init(); }
+
+// lcd.init() allocates the SPI3 bus interrupt through the ESP-IDF SPI
+// driver, so it runs on core 1 (wio_l2_run_on_core1, wio_l2_board.h).
 void display_dev_init(void) {
+  bool ok = false;
   SPI_LOCK();
-  bool ok = lcd.init();
+  wio_l2_run_on_core1(lcd_init_job, &ok);
   lcd.setRotation(0);
   lcd.fillScreen(0);
   SPI_UNLOCK();

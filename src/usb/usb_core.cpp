@@ -34,6 +34,7 @@
 #include "usb_fs.h"                 // usb_fs_mounted — Lua bridge status field
 #include "meshpunk_sync.h"          // sd_spi_take — SD-base driver-dir scans
 #include "tdeck_link.h"             // peer-link bridge (link socket backend)
+#include "power/power_dev.h"        // USB host port power (board)
 #include <dirent.h>                 // POSIX dir walk over the driver bases
 #include <sys/stat.h>               // .disabled marker probe
 
@@ -1008,12 +1009,18 @@ static void usb_task(void*) {
         usb_host_uninstall(); s_client = NULL; s_running = false; vTaskDelete(NULL); return;
     }
 
-    ulog("Host running — plug in a powered dongle.");
+    // Board port power (power_dev.h): true when the board itself supplies
+    // 5 V to an attached device.
+    if (power_dev_usb_host_begin())
+        ulog("Host running — plug in a device (this port supplies 5 V).");
+    else
+        ulog("Host running — plug in a powered dongle.");
 
     while (!s_stop_req) {
         uint32_t flags = 0;
         usb_host_lib_handle_events(0, &flags);
         usb_host_client_handle_events(s_client, pdMS_TO_TICKS(50));
+        power_dev_usb_host_tick();
 
         // Flash-write guard: park every running driver's deadline-bearing
         // transfers, drain them to zero in flight, then idle until released.
@@ -1105,6 +1112,7 @@ static void usb_task(void*) {
     }
     esp_err_t uerr = usb_host_uninstall();
     restore_serial_jtag_phy();
+    power_dev_usb_host_end();
     memset(&s_info, 0, sizeof(s_info));
     ulog("Host stopped (%s). USB serial restored", uerr == ESP_OK ? "clean" : esp_err_to_name(uerr));
     ulog("(replug the PC cable if it doesn't show).");

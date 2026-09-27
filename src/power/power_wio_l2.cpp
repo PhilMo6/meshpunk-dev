@@ -14,19 +14,28 @@
 // Wake from power-off: the USER button (GPIO0, active LOW) via ext0. The
 // WAKE button cannot do it — it sits on the expander, whose INT (GPIO45) is
 // not an RTC pad.
+//
+// USB host port power: the AW35615 USB-C port controller (I2C 0x22) and
+// OTG_EN (expander P13) — see its section below.
 
 #if defined(BOARD_WIO_L2)
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <driver/rtc_io.h>
 #include <esp_sleep.h>
 #include <esp_system.h>      // esp_reset_reason
 
 #include "power_dev.h"
+#include "aw35615.h"
 #include "../boards/board_pins.h"     // PIN_BOOT_BTN
 #include "../boards/wio_l2_board.h"
 #include "../meshpunk_sync.h"         // SLog
+#include "../usb_manager.h"           // usb_ulog
+
+static void usb_port_boot(void);
 
 void power_dev_init(void) {
   if (esp_reset_reason() == ESP_RST_DEEPSLEEP) {
@@ -40,6 +49,8 @@ void power_dev_init(void) {
   // I2C bus, expander probe, then the rail/reset sequence. Logs its own
   // FAIL line; everything downstream that needs the expander logs too.
   wio_l2_board_init();
+
+  usb_port_boot();
 }
 
 // ── Battery (ADS1115) ──────────────────────────────────────────────────────
@@ -110,6 +121,254 @@ uint16_t power_dev_battery_mv(void) {
   return (uint16_t)mv;
 }
 
+// ── USB host port power (AW35615 + OTG_EN) ─────────────────────────────────
+// Host mode makes the USB-C port a Type-C source. The AW35615 toggles in SRC
+// mode (Rp at default USB current) and stops on a sink's Rd; only then, and
+// only while VBUS is below 4.0 V (nothing else is powering it), OTG_EN
+// (expander P13) switches 5 V onto VBUS. The measured CC pin rising above
+// 1.6 V means the sink's Rd is gone: OTG_EN goes low and VBUS is discharged.
+// Outside host mode the chip is at its reset defaults, Rd on both CC pins: a
+// sink, which is what a charger needs before it supplies the board. The chip
+// keeps its registers across an ESP32 reset, so boot and power-off reset it.
+//
+// State changes print to serial (SLog) and to the Tools/USB Host log
+// (usb_ulog): in host mode the port no longer carries USB serial.
+
+enum UsbSrcState : uint8_t {
+  USB_SRC_OFF,        // host mode not running; the port is a sink
+  USB_SRC_ARMED,      // toggling as a source, waiting for a sink
+  USB_SRC_EXTERNAL,   // a sink attached while VBUS was already up from elsewhere
+  USB_SRC_SOURCING,   // OTG_EN high: 5 V on VBUS
+  USB_SRC_FAILED,     // stopped after a logged failure until host mode restarts
+};
+
+static SemaphoreHandle_t s_usb_mux     = nullptr;
+static UsbSrcState       s_usb_state   = USB_SRC_OFF;
+static bool              s_usbc_ok     = false;   // the AW35615 answered at boot
+static uint8_t           s_usb_cc      = 0;       // the sink's CC pin while sourcing
+static uint32_t          s_usb_tick_ms = 0;
+
+static void usbc_log(const char* fmt, ...) {
+  char line[96];   // the usb_ulog line length
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(line, sizeof line, fmt, ap);
+  va_end(ap);
+  SLog.printf("[USBC] %s\n", line);
+  usb_ulog("%s", line);
+}
+
+static void usb_port_boot(void) {
+  s_usb_mux = xSemaphoreCreateMutex();
+  uint16_t vendor = 0;
+  uint8_t  id     = 0;
+  s_usbc_ok = aw35615_reset(Wire, WIO_L2_TYPEC_ADDR, &vendor, &id);
+  if (s_usbc_ok)
+    SLog.printf("[USBC] AW35615 vendor 0x%04X id 0x%02X: reset to sink\n", vendor, id);
+  else
+    SLog.printf("[USBC] FAIL: AW35615 at 0x%02X %s (vendor 0x%04X)\n", WIO_L2_TYPEC_ADDR,
+                vendor ? "reports another vendor ID" : "not answering", vendor);
+}
+
+// OTG_EN low, then the 660 ohm discharge until VBUSOK clears (500 ms cap).
+// Returns the discharge time in ms; -1 when VBUS was still at or above
+// 4.0 V at the cap; -2 when the chip did not answer.
+static int usb_vbus_off(void) {
+  if (!wio_l2_exp_set(WIO_L2_EXP_USB_OTG, false))
+    usbc_log("FAIL: expander write OTG_EN low");
+  int ms = -2;
+  if (aw35615_vbus_discharge(true)) {
+    uint32_t t0 = millis();
+    for (;;) {
+      bool vbus = true;
+      if (!aw35615_status(&vbus, nullptr)) break;
+      if (!vbus) {
+        ms = (int)(millis() - t0);
+        break;
+      }
+      if (millis() - t0 >= 500) {
+        ms = -1;
+        break;
+      }
+      delay(5);
+    }
+  }
+  aw35615_vbus_discharge(false);
+  return ms;
+}
+
+// Loud stop: OTG_EN low, then nothing until host mode restarts.
+static void usb_src_fail(const char* what) {
+  if (!wio_l2_exp_set(WIO_L2_EXP_USB_OTG, false))
+    usbc_log("FAIL: expander write OTG_EN low");
+  s_usb_state = USB_SRC_FAILED;
+  s_usb_cc    = 0;
+  usbc_log("FAIL: %s; port power off until host restart", what);
+}
+
+static void usb_src_rearm(void) {
+  s_usb_cc = 0;
+  if (!aw35615_source_detect()) {
+    usb_src_fail("AW35615 write (source detect)");
+    return;
+  }
+  s_usb_state = USB_SRC_ARMED;
+}
+
+static void usb_src_armed(void) {
+  uint8_t cc = 0;
+  if (!aw35615_detected_sink(&cc)) {
+    usb_src_fail("AW35615 read (STATUS1A)");
+    return;
+  }
+  if (cc == 0) return;
+
+  bool vbus = false;
+  if (!aw35615_status(&vbus, nullptr)) {
+    usb_src_fail("AW35615 read (STATUS0)");
+    return;
+  }
+  if (vbus) {
+    s_usb_state = USB_SRC_EXTERNAL;
+    usbc_log("device on CC%u, VBUS already up from elsewhere: 5 V stays off", (unsigned)cc);
+    return;
+  }
+
+  if (!aw35615_source_hold(cc)) {
+    usb_src_fail("AW35615 write (source hold)");
+    return;
+  }
+  delay(1);   // before the comparator read that follows the measure switch change
+  bool open = true;
+  if (!aw35615_status(nullptr, &open)) {
+    usb_src_fail("AW35615 read (STATUS0)");
+    return;
+  }
+  if (open) {   // the Rd was gone by the time the pin was measured
+    usb_src_rearm();
+    return;
+  }
+
+  if (!wio_l2_exp_set(WIO_L2_EXP_USB_OTG, true)) {
+    usb_src_fail("expander write OTG_EN high");
+    return;
+  }
+  uint32_t t0 = millis();
+  for (;;) {
+    if (!aw35615_status(&vbus, nullptr)) {
+      usb_src_fail("AW35615 read (STATUS0)");
+      return;
+    }
+    if (vbus) break;
+    if (millis() - t0 >= 200) {
+      usb_src_fail("VBUS below 4.0 V 200 ms after OTG_EN high");
+      return;
+    }
+    delay(2);
+  }
+  s_usb_cc    = cc;
+  s_usb_state = USB_SRC_SOURCING;
+  usbc_log("device attached (CC%u): 5 V on, VBUS up in %lu ms", (unsigned)cc,
+           (unsigned long)(millis() - t0));
+}
+
+static void usb_src_sourcing(void) {
+  bool vbus = true;
+  bool open = false;
+  if (!aw35615_status(&vbus, &open)) {
+    usb_src_fail("AW35615 read (STATUS0)");
+    return;
+  }
+  if (open) {
+    unsigned cc = s_usb_cc;
+    int ms = usb_vbus_off();
+    if (ms >= 0)
+      usbc_log("device removed (CC%u): 5 V off, VBUS below 4.0 V in %d ms", cc, ms);
+    else if (ms == -1)
+      usbc_log("device removed (CC%u): 5 V off, VBUS still 4.0 V+ after 500 ms", cc);
+    else
+      usbc_log("device removed (CC%u): 5 V off; AW35615 read failed in discharge", cc);
+    usb_src_rearm();
+    return;
+  }
+  if (!vbus) usb_src_fail("VBUS fell below 4.0 V with the device attached");
+}
+
+static void usb_src_external(void) {
+  bool vbus = true;
+  if (!aw35615_status(&vbus, nullptr)) {
+    usb_src_fail("AW35615 read (STATUS0)");
+    return;
+  }
+  if (vbus) return;
+  usbc_log("outside VBUS gone: waiting for a device");
+  usb_src_rearm();
+}
+
+bool power_dev_usb_host_begin(void) {
+  if (!s_usbc_ok) {
+    usbc_log("FAIL: AW35615 did not answer at boot: no port power");
+    return false;
+  }
+  xSemaphoreTake(s_usb_mux, portMAX_DELAY);
+  s_usb_tick_ms = 0;
+  usb_src_rearm();
+  bool armed = s_usb_state == USB_SRC_ARMED;
+  if (armed) usbc_log("port power armed: 5 V turns on when a device is attached");
+  xSemaphoreGive(s_usb_mux);
+  return armed;
+}
+
+bool power_dev_usb_port_power(void) { return s_usbc_ok; }
+
+void power_dev_usb_host_tick(void) {
+  if (!s_usbc_ok) return;
+  uint32_t now = millis();
+  if (now - s_usb_tick_ms < 100) return;
+  s_usb_tick_ms = now;
+  xSemaphoreTake(s_usb_mux, portMAX_DELAY);
+  switch (s_usb_state) {
+    case USB_SRC_ARMED:    usb_src_armed();    break;
+    case USB_SRC_EXTERNAL: usb_src_external(); break;
+    case USB_SRC_SOURCING: usb_src_sourcing(); break;
+    default:               break;
+  }
+  xSemaphoreGive(s_usb_mux);
+}
+
+void power_dev_usb_host_end(void) {
+  if (!s_usbc_ok) return;
+  xSemaphoreTake(s_usb_mux, portMAX_DELAY);
+  if (s_usb_state == USB_SRC_SOURCING) {
+    usb_vbus_off();
+  } else if (!wio_l2_exp_set(WIO_L2_EXP_USB_OTG, false)) {
+    usbc_log("FAIL: expander write OTG_EN low");
+  }
+  s_usb_state = USB_SRC_OFF;
+  s_usb_cc    = 0;
+  uint16_t vendor = 0;
+  uint8_t  id     = 0;
+  if (aw35615_reset(Wire, WIO_L2_TYPEC_ADDR, &vendor, &id))
+    usbc_log("port power off: USB-C port back to a sink (charging)");
+  else
+    usbc_log("FAIL: AW35615 reset to sink after host mode");
+  xSemaphoreGive(s_usb_mux);
+}
+
+// Light sleep stops the usb task that polls the port, so standby switches
+// 5 V off and re-arms detection; the first tick after wake finds a device
+// that is still plugged in and powers it again.
+static void usb_src_standby(void) {
+  if (!s_usbc_ok) return;
+  xSemaphoreTake(s_usb_mux, portMAX_DELAY);
+  if (s_usb_state == USB_SRC_SOURCING) {
+    usb_vbus_off();
+    usbc_log("standby: 5 V off");
+    usb_src_rearm();
+  }
+  xSemaphoreGive(s_usb_mux);
+}
+
 // ── Power off ──────────────────────────────────────────────────────────────
 
 void power_dev_shutdown(void) {
@@ -124,6 +383,18 @@ void power_dev_shutdown(void) {
   };
   for (uint8_t bit : kOff) wio_l2_exp_set(bit, false);
 
+  // Port controller back to a sink, so a charger supplies the board while it
+  // is off, whatever host mode left it as.
+  if (s_usbc_ok) {
+    xSemaphoreTake(s_usb_mux, portMAX_DELAY);
+    s_usb_state = USB_SRC_OFF;
+    uint16_t vendor = 0;
+    uint8_t  id     = 0;
+    if (!aw35615_reset(Wire, WIO_L2_TYPEC_ADDR, &vendor, &id))
+      SLog.println("[USBC] FAIL: AW35615 reset to sink at power off");
+    xSemaphoreGive(s_usb_mux);
+  }
+
   // Wake: USER button (GPIO0, active LOW) — the T-Deck/Heltec recipe; the
   // RTC-domain pull-up must persist or the pad floats LOW and instantly
   // re-wakes.
@@ -137,17 +408,21 @@ void power_dev_shutdown(void) {
   esp_deep_sleep_start();   // never returns; a press reboots
 }
 
-// Standby keeps the LCD rail (panel sleeping, frame memory kept) and cuts
-// only the GNSS rail, as on the Heltec. The L76K cold-boots back to its
-// factory 9600 NMEA on exit, the rate the firmware's baud probe locked at
-// boot. Expander outputs are external state: nothing to hold across light
-// sleep.
+// Standby keeps the LCD and SD rails (panel sleeping, card mounted) and cuts
+// the GNSS rail, as on the Heltec, plus the speaker amp (the mixer is
+// suspended for standby). The L76K cold-boots back to its factory 9600 NMEA
+// on exit, the rate the firmware's baud probe locked at boot. Expander
+// outputs are external state: nothing to hold across light sleep. USB port
+// power goes off for the standby (usb_src_standby).
 void power_dev_standby_enter(void) {
   wio_l2_exp_set(WIO_L2_EXP_GNSS_PWR, false);
+  wio_l2_exp_set(WIO_L2_EXP_AUDIO_PA, false);
+  usb_src_standby();
 }
 
 void power_dev_standby_exit(void) {
   wio_l2_exp_set(WIO_L2_EXP_GNSS_PWR, true);
+  wio_l2_exp_set(WIO_L2_EXP_AUDIO_PA, true);
 }
 
 #endif // BOARD_WIO_L2

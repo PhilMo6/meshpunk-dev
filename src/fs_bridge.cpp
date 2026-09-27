@@ -32,7 +32,7 @@
 
 #include <Arduino.h>
 #include <FS.h>
-#include <SD.h>
+#include "storage/sd_dev.h"
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
 #include <dirent.h>
@@ -67,7 +67,7 @@ static FsTarget fs_resolve(const char* raw) {
     t.is_sd    = (drive == MP_SD);
     t.is_flash = (drive == MP_FLASH);
     if (drive == MP_SD) {
-        t.fs = &SD;
+        t.fs = &sd_dev_fs();
         t.vfs_base = "/sd";
         t.ok = sd_mounted;
     } else if (drive == MP_USB) {
@@ -470,8 +470,8 @@ static int lua_fs_df(lua_State* L) {
             return 1;
         }
         sd_spi_take();
-        uint64_t total = SD.totalBytes();
-        uint64_t used = SD.usedBytes();
+        uint64_t total = sd_dev_total_bytes();
+        uint64_t used = sd_dev_used_bytes();
         sd_spi_release();
         lua_pushnumber(L, (lua_Number)total);
         lua_pushnumber(L, (lua_Number)used);

@@ -2,7 +2,8 @@
 #include <Arduino.h>
 #include <HTTPClient.h>
 #include <LittleFS.h>
-#include <SD.h>
+#include <SPI.h>
+#include "storage/sd_dev.h"
 #include <Ticker.h> // Include ticker for LVGL timing
 #include <WiFi.h>
 #include <Wire.h>
@@ -442,7 +443,7 @@ static void firmware_prefs_save() {
   }
   if (sd_mounted && use_sd_pref) {
     sd_spi_take();
-    write_firmware_prefs(SD, "/meshpunk/firmware_prefs");
+    write_firmware_prefs(sd_dev_fs(), "/meshpunk/firmware_prefs");
     sd_spi_release();
   }
 }
@@ -461,7 +462,7 @@ static void wifi_creds_save() {
   write_wifi_creds(LittleFS, "/wifi_creds");
   if (sd_mounted && use_sd_pref) {
     sd_spi_take();
-    write_wifi_creds(SD, "/meshpunk/wifi_creds");
+    write_wifi_creds(sd_dev_fs(), "/meshpunk/wifi_creds");
     sd_spi_release();
     SLog.println("[WIFI_CREDS] Saved to SD");
   }
@@ -494,7 +495,7 @@ static void wifi_creds_clear() {
   LittleFS.remove("/wifi_creds");
   if (sd_mounted && use_sd_pref) {
     sd_spi_take();
-    SD.remove("/meshpunk/wifi_creds");
+    sd_dev_fs().remove("/meshpunk/wifi_creds");
     sd_spi_release();
   }
 }
@@ -1318,29 +1319,10 @@ void sd_spi_release() {
 
 // Mount (or remount) the SD card and set sd_mounted. Called at boot and by
 // USB drive mode's stop path (usb_msc_dev.cpp) after the PC releases the
-// card. The SPI bus is shared with the TFT (80 MHz) and SX1262, but every
-// device sets its own per-transaction SPISettings, so this clock only
-// applies to SD transfers. 40 MHz cuts a 131KB map-tile read from ~400ms
-// (4 MHz Arduino default) to ~50ms. Probe descending; 4 MHz floor = old
-// behavior.
+// card. The bus, its clock probe and the /sd mountpoint are the board's
+// (storage/sd_dev.h).
 bool meshpunk_sd_mount() {
-#if defined(PIN_SD_CS)
-  static const uint32_t sd_freqs[] = {40000000U, 25000000U, 4000000U};
-  sd_mounted = false;
-  for (uint32_t freq : sd_freqs) {
-    if (SD.begin(PIN_SD_CS, board_sd_spi(), freq)) {
-      sd_mounted = true;
-      SLog.printf("[SD] Mounted at %lu Hz\n", (unsigned long)freq);
-      break;
-    }
-    SD.end();
-    SLog.printf("[SD] Mount failed at %lu Hz\n", (unsigned long)freq);
-  }
-#else
-  // No confirmed SD wiring for this board.
-  sd_mounted = false;
-  SLog.println("[SD] no SD pins defined for this board");
-#endif
+  sd_mounted = sd_dev_mount();
   return sd_mounted;
 }
 
@@ -3339,10 +3321,10 @@ static int lua_storage_set_use_sd(lua_State *L) {
   String newPrefix;
 
   if (want_sd) {
-    newFS = &SD;
+    newFS = &sd_dev_fs();
     newPrefix = "/meshpunk";
 
-    if (!SD.exists("/meshpunk")) SD.mkdir("/meshpunk");
+    if (!sd_dev_fs().exists("/meshpunk")) sd_dev_fs().mkdir("/meshpunk");
   } else {
     newFS = &LittleFS;
     newPrefix = "";
@@ -3434,7 +3416,7 @@ static int lua_list_dir_sd(lua_State *L) {
 
   MESH_LOCK();
   sd_spi_take();
-  File root = SD.open(path);
+  File root = sd_dev_fs().open(path);
 
   if (!root || !root.isDirectory()) {
     SLog.printf("[FS] _list_dir_sd: cannot open %s\n", path);
@@ -3525,7 +3507,7 @@ static int lua_list_all_sd(lua_State *L) {
 
   MESH_LOCK();
   sd_spi_take();
-  File root = SD.open(path);
+  File root = sd_dev_fs().open(path);
   if (!root || !root.isDirectory()) {
     SLog.printf("[FS] _list_all_sd: cannot open %s\n", path);
     sd_spi_release();
@@ -3579,7 +3561,7 @@ static int lua_mkdir_sd(lua_State *L) {
     return 1;
   }
   sd_spi_take();
-  bool ok = SD.exists(path) || SD.mkdir(path);
+  bool ok = sd_dev_fs().exists(path) || sd_dev_fs().mkdir(path);
   sd_spi_release();
   lua_pushboolean(L, ok ? 1 : 0);
   return 1;
@@ -3594,7 +3576,7 @@ static int lua_file_exists_sd(lua_State *L) {
   }
 
   sd_spi_take();
-  bool exists = SD.exists(path);
+  bool exists = sd_dev_fs().exists(path);
   sd_spi_release();
 
   lua_pushboolean(L, exists ? 1 : 0);
@@ -3974,7 +3956,7 @@ static const char *png_buf_to_bin(const uint8_t *png_data, uint32_t png_size,
     // between them, so the 131KB write never blocks the display flush or the
     // radio for more than one chunk (~25ms at 40MHz).
     sd_spi_take();
-    File f = SD.open(tmp_sd, FILE_WRITE);
+    File f = sd_dev_fs().open(tmp_sd, FILE_WRITE);
     sd_spi_release();
     if (!f) {
       SLog.printf("[png2bin] FAIL: open tmp %s\n", tmp_path);
@@ -3996,8 +3978,8 @@ static const char *png_buf_to_bin(const uint8_t *png_data, uint32_t png_size,
 
     sd_spi_take();
     f.close();
-    if (!wok) SD.remove(tmp_sd);
-    bool renamed = wok && SD.rename(tmp_sd, dst_sd);
+    if (!wok) sd_dev_fs().remove(tmp_sd);
+    bool renamed = wok && sd_dev_fs().rename(tmp_sd, dst_sd);
     sd_spi_release();
 
     if (!wok) {
@@ -4065,7 +4047,7 @@ static int lua_png_to_bin(lua_State *L) {
     // Conversion landed — the source PNG is dead weight now, so consume it.
     if ((src_path[0] == 'S' || src_path[0] == 's') && src_path[1] == ':') {
       sd_spi_take();
-      SD.remove(src_path + 2);
+      sd_dev_fs().remove(src_path + 2);
       sd_spi_release();
     } else if ((src_path[0] == 'L' || src_path[0] == 'l') && src_path[1] == ':') {
       LittleFS.remove(src_path + 2);
@@ -4448,7 +4430,7 @@ static int lua_tile_show(lua_State *L) {
   uint32_t data_size = 0;
 
   sd_spi_take();
-  File f = SD.open(path, "r");
+  File f = sd_dev_fs().open(path, "r");
   bool ok = f && (f.read(head, sizeof(hdr)) == (int)sizeof(hdr));
   sd_spi_release();
   if (!f) { lua_pushboolean(L, 0); return 1; }
@@ -4610,7 +4592,7 @@ static int lua_dofile_sd(lua_State *L) {
 
   LuaSDChunkReader rdr;
   sd_spi_take();
-  rdr.file = SD.open(path);
+  rdr.file = sd_dev_fs().open(path);
   if (!rdr.file || rdr.file.isDirectory()) {
     if (rdr.file) rdr.file.close();
     sd_spi_release();
@@ -4946,6 +4928,7 @@ void setupLuaVGL() {
     }
     lua_setfield(L, -2, "audio");
     lua_pushboolean(L, power_dev_battery_mv() > 0);  lua_setfield(L, -2, "battery");
+    lua_pushboolean(L, power_dev_usb_port_power()); lua_setfield(L, -2, "usb_power");
     lua_pushstring(L, lora_proto_active());         lua_setfield(L, -2, "lora_proto");
     return 1;
   });
@@ -5020,7 +5003,7 @@ void setupLuaVGL() {
     list_dir(LittleFS, false);
     if (sd_mounted) {
       sd_spi_take();
-      list_dir(SD, true);
+      list_dir(sd_dev_fs(), true);
       sd_spi_release();
     }
     return 1;
@@ -7108,7 +7091,7 @@ void setup() {
   meshpunk_sd_mount();
 
   if (sd_mounted) {
-    uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+    uint64_t cardSize = sd_dev_card_size() / (1024 * 1024);
     SLog.printf("[SD] Card mounted, size: %llu MB\n", cardSize);
 
     const char* required_dirs[] = {
@@ -7118,15 +7101,15 @@ void setup() {
       "/meshpunk/fonts",     // user-droppable .ttf files for Settings > Fonts
     };
     for (auto dir : required_dirs) {
-      if (!SD.exists(dir)) {
-        SD.mkdir(dir);
+      if (!sd_dev_fs().exists(dir)) {
+        sd_dev_fs().mkdir(dir);
         SLog.printf("[SD] Created %s\n", dir);
       }
     }
 
-    if (!LittleFS.exists("/firmware_prefs") && SD.exists("/meshpunk/firmware_prefs")) {
+    if (!LittleFS.exists("/firmware_prefs") && sd_dev_fs().exists("/meshpunk/firmware_prefs")) {
       sd_spi_take();
-      bool ok = copyFile(SD, "/meshpunk/firmware_prefs", LittleFS, "/firmware_prefs");
+      bool ok = copyFile(sd_dev_fs(), "/meshpunk/firmware_prefs", LittleFS, "/firmware_prefs");
       sd_spi_release();
       if (ok) {
         SLog.println("[FW_PREFS] Imported from SD after reflash");
@@ -7136,9 +7119,9 @@ void setup() {
       }
     }
 
-    if (!LittleFS.exists("/wifi_creds") && SD.exists("/meshpunk/wifi_creds")) {
+    if (!LittleFS.exists("/wifi_creds") && sd_dev_fs().exists("/meshpunk/wifi_creds")) {
       sd_spi_take();
-      bool ok = copyFile(SD, "/meshpunk/wifi_creds", LittleFS, "/wifi_creds");
+      bool ok = copyFile(sd_dev_fs(), "/meshpunk/wifi_creds", LittleFS, "/wifi_creds");
       sd_spi_release();
       SLog.printf("[WIFI_CREDS] %s from SD after reflash\n", ok ? "Imported" : "Import FAILED");
     }
@@ -7157,7 +7140,7 @@ void setup() {
   // protocol's data home (peers/config/identity) lives on this storage — the
   // MeshCore contacts rule, so it survives reflashes when the user runs on SD.
   if (sd_mounted && use_sd_pref) {
-    mstore::set_storage(&SD, "/meshpunk");
+    mstore::set_storage(&sd_dev_fs(), "/meshpunk");
     SLog.println("[SD] Mesh storage: SD:/meshpunk/");
   } else {
     mstore::set_storage(&LittleFS, "");
@@ -7172,10 +7155,18 @@ void setup() {
 
   // BLE protocol slot (two-slot model, docs/PROTOCOL_ABI.md §6): selected
   // independently of the LoRa protocol. The companion protocol declares
-  // requires_lora="meshcore" and the selector enforces it loudly. Early on
-  // purpose: BLE-stack allocations land low in internal SRAM.
+  // requires_lora="meshcore" and the selector enforces it loudly. This loads
+  // and inits the protocol module and brings up the BLE controller and host
+  // (ble_transport_stack_up), so their internal-RAM allocations are made
+  // before the Lua session; the protocol's start() opens the GATT service in
+  // ble_proto_start() below.
   ble_proto_select_and_init();
   log_boot_mem("after BLE early");
+
+  // The Core 1 task stacks join the other long-lived internal-RAM residents
+  // here, ahead of the Lua session; the tasks start at the end of setup().
+  meshpunk_reserve_task_stacks();
+  log_boot_mem("after task stacks");
 
   mstore::set_retain_days(msg_retain_days);  // routing/message retention window
 
@@ -7550,7 +7541,7 @@ static void system_shutdown() {
   MESH_UNLOCK();
   if (sd_mounted) {
     sd_spi_take();
-    SD.end();
+    sd_dev_unmount();
     sd_mounted = false;
     sd_spi_release();
   }
@@ -7768,7 +7759,10 @@ static void standby_run() {
   display_dev_backlight_reset(display_brightness);
   wake_activity();              // backlights + inactivity timers
   trackball_up = trackball_down = trackball_left = trackball_right = 0;
-  trackball_click = 0;          // the wake press must not click whatever was focused
+  // The wake press must not click whatever was focused: the click ISR
+  // re-attached above is live while that press can still be held
+  // (input_ui.h).
+  input_ui_ignore_click_until_release();
   if (wifi_was_on && wifi_enabled_pref) { WiFi.mode(WIFI_STA); wifi_auto_kick(); }
   if (ble_was_on) ble_proto_resume();
   gps_dev_wake();               // T-Deck: RXD activity wake; Heltec: no-op

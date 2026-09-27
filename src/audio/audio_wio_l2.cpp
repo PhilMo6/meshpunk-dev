@@ -1,62 +1,53 @@
 // audio_wio_l2.cpp — Seeed Wio Tracker L2 audio backend
 // (contract: audio_dev.h).
 //
-// The board's speaker path is an ES8311 codec (control on the shared I2C
-// bus; I2S MCLK 10 / BCK 11 / WS 12 / DOUT 16 / DIN 15) feeding an amplifier
-// whose enable is expander P14 (AUDIO_PA, parked OFF by the bring-up). The
-// codec needs register configuration before I2S produces sound, and this
-// backend does not configure it yet: the board reports no audio output, the
-// sound.cpp mixer runs tone-less, and the amplifier stays off.
+// ES8311 codec (I2C 0x18 on the shared bus, src/audio/es8311.cpp) fed by
+// I2S MCLK 10 / BCK 11 / WS 12 / DOUT 16 (Seeed wiki; Meshtastic variant
+// DAC_I2S_*), driving the 6 ohm speaker through an amplifier whose enable is
+// expander P14 (AUDIO_PA). The mixer, volume/mute prefs and the notification
+// melody live above this in sound.cpp / notify.cpp, exactly as on the
+// T-Deck's I2S path: the codec runs at 0 dB and the player's software volume
+// sets loudness.
 //
-// The decode-only player works as on the Heltec kit, so music still plays
-// through a USB audio sink.
+// The amplifier is switched on here and follows the board's power states in
+// power_wio_l2.cpp (off for standby and power-off).
 
 #if defined(BOARD_WIO_L2)
 
 #include <Arduino.h>
-#include <esp_heap_caps.h>
+#include <Wire.h>
 
 #include "audio_dev.h"
 #include "Audio.h"
+#include "es8311.h"
+#include "../boards/wio_l2_board.h"
 #include "../meshpunk_sync.h"   // SLog
 
+#define WIO_I2S_MCLK      10
+#define WIO_I2S_BCK       11
+#define WIO_I2S_WS        12
+#define WIO_I2S_DOUT      16
+#define WIO_ES8311_ADDR   0x18   // Espressif ES8311_ADDRESS_0 (CE low)
+
 Audio* audio_dev_init(void) {
-  return nullptr;   // no configured output path yet
+  Audio* audio = new Audio();
+  audio->setPinout(WIO_I2S_BCK, WIO_I2S_WS, WIO_I2S_DOUT, I2S_PIN_NO_CHANGE,
+                   WIO_I2S_MCLK);
+  es8311_init(Wire, WIO_ES8311_ADDR);   // logs its own FAIL line
+  if (!wio_l2_exp_set(WIO_L2_EXP_AUDIO_PA, true))
+    SLog.println("[AUDIO] FAIL: expander write for the speaker amp (P14)");
+  return audio;
 }
 
-AudioDevKind audio_dev_kind(void) { return AUDIO_DEV_NONE; }
+AudioDevKind audio_dev_kind(void) { return AUDIO_DEV_I2S; }
 
+// Tone-translation drive: unused on the I2S path (sound.cpp mixes real PCM).
 void audio_dev_buzzer_tone(uint32_t freq_hz) { (void)freq_hz; }
 void audio_dev_buzzer_off(void) { }
 
-// ── Decode-only player ─────────────────────────────────────────────────────
-// Same instance as audio_heltec.cpp: no setPinout() (no GPIO claimed), its
-// PCM is captured by sound.cpp's staging hook for the USB sink, and the DMA
-// ring is 4x64 (1 KB of internal SRAM) with the stock size retried if the
-// driver rejects it — see the Heltec backend for the full reasoning.
-#define WIO_DEC_DMA_COUNT 4
-#define WIO_DEC_DMA_LEN   64
-
-Audio* audio_dev_decoder_open(void) {
-  Audio* a = new Audio(false, 3, I2S_NUM_0,
-                       WIO_DEC_DMA_COUNT, WIO_DEC_DMA_LEN);
-  if (a && !a->i2sDriverInstalled()) {
-    SLog.println("[AUDIO] decoder: minimal DMA rejected, retrying stock size");
-    delete a;
-    a = new Audio(false, 3, I2S_NUM_0);          // library defaults
-    if (a && !a->i2sDriverInstalled()) { delete a; a = nullptr; }
-  }
-  if (!a) { SLog.println("[AUDIO] decoder open FAILED"); return nullptr; }
-  SLog.printf("[AUDIO] decoder open (internal free %u)\n",
-              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-  return a;
-}
-
-void audio_dev_decoder_close(Audio* a) {
-  if (!a) return;
-  delete a;   // destructor uninstalls the I2S driver and frees its buffers
-  SLog.printf("[AUDIO] decoder closed (internal free %u)\n",
-              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-}
+// This board's player from audio_dev_init() already decodes; a second
+// instance would fight it for the I2S port.
+Audio* audio_dev_decoder_open(void) { return nullptr; }
+void   audio_dev_decoder_close(Audio* a) { (void)a; }
 
 #endif // BOARD_WIO_L2
