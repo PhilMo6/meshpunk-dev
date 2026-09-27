@@ -448,6 +448,316 @@ int px_res_load_pal(const char* pyxres_path, uint32_t* colors, int max) {
 }
 
 // ---------------------------------------------------------------------------
+// .pyxres writing: TOML laid out as the toml crate serializes ResourceData
+// ---------------------------------------------------------------------------
+typedef struct {
+    unsigned char* p;
+    size_t n, cap;
+    bool oom;
+} outbuf;
+
+static void out_bytes(outbuf* o, const void* s, size_t n) {
+    if (o->oom) return;
+    if (o->n + n > o->cap) {
+        size_t ncap = o->cap ? o->cap : 4096;
+        while (ncap < o->n + n) ncap *= 2;
+        unsigned char* g = (unsigned char*)realloc(o->p, ncap);
+        if (!g) { o->oom = true; return; }
+        o->p = g;
+        o->cap = ncap;
+    }
+    memcpy(o->p + o->n, s, n);
+    o->n += n;
+}
+
+static void out_str(outbuf* o, const char* s) {
+    out_bytes(o, s, strlen(s));
+}
+
+static void out_uint(outbuf* o, uint32_t v) {
+    char b[10];
+    int k = (int)sizeof(b);
+    do {
+        b[--k] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v);
+    out_bytes(o, b + k, sizeof(b) - (size_t)k);
+}
+
+// "data = [[...], ...]" after utils.rs compress_vec2: the rows after the last
+// one that differs from the final row are dropped, and each row loses the
+// values after the last one that differs from its final value. Tilemap rows
+// are the (tx, ty) pairs flattened. data == NULL is an all-zero grid.
+static void out_grid(outbuf* o, const void* data, int w, int h, bool tiles) {
+    size_t row_bytes = (size_t)w * (tiles ? sizeof(uint16_t) : 1);
+    int rows = 1;
+    if (data) {
+        const unsigned char* d = (const unsigned char*)data;
+        const unsigned char* last = d + (size_t)(h - 1) * row_bytes;
+        int r = h - 2;
+        while (r >= 0 && memcmp(d + (size_t)r * row_bytes, last, row_bytes) == 0) r--;
+        rows = r + 2;
+    }
+    uint16_t* row = (uint16_t*)malloc(sizeof(uint16_t) * (size_t)w * 2);
+    if (!row) { o->oom = true; return; }
+    out_str(o, "data = [");
+    for (int y = 0; y < rows; y++) {
+        int n = 0;
+        if (!data) {
+            row[n++] = 0;
+        } else if (tiles) {
+            const uint16_t* t = (const uint16_t*)data + (size_t)y * (size_t)w;
+            for (int x = 0; x < w; x++) {
+                row[n++] = PX_TILE_X(t[x]);
+                row[n++] = PX_TILE_Y(t[x]);
+            }
+        } else {
+            const uint8_t* p = (const uint8_t*)data + (size_t)y * (size_t)w;
+            for (int x = 0; x < w; x++) row[n++] = p[x];
+        }
+        int k = n - 2;
+        while (k >= 0 && row[k] == row[n - 1]) k--;
+        n = k + 2;
+        out_str(o, y ? ", [" : "[");
+        for (int i = 0; i < n; i++) {
+            if (i) out_str(o, ", ");
+            out_uint(o, row[i]);
+        }
+        out_str(o, "]");
+    }
+    out_str(o, "]\n");
+    free(row);
+}
+
+static void out_table_head(outbuf* o, const char* table, const px_canvas* cv) {
+    out_str(o, "\n[[");
+    out_str(o, table);
+    out_str(o, "]]\nwidth = ");
+    out_uint(o, (uint32_t)cv->w);
+    out_str(o, "\nheight = ");
+    out_uint(o, (uint32_t)cv->h);
+    out_str(o, "\n");
+}
+
+static void put16(unsigned char* p, uint32_t v) {
+    p[0] = (unsigned char)v;
+    p[1] = (unsigned char)(v >> 8);
+}
+
+static void put32(unsigned char* p, uint32_t v) {
+    put16(p, v);
+    put16(p + 2, v >> 16);
+}
+
+// ZIP headers for one stored entry: version 2.0, time 00:00, date 1980-01-01.
+static void zip_entry_header(unsigned char* p, bool central, uint32_t crc, uint32_t size,
+                             const char* name, size_t name_len) {
+    int o = central ? 2 : 0;          // the central header adds "version made by"
+    put32(p, central ? 0x02014b50u : 0x04034b50u);
+    if (central) put16(p + 4, 20);
+    put16(p + 4 + o, 20);             // version needed to extract
+    put16(p + 6 + o, 0);              // flags
+    put16(p + 8 + o, 0);              // method: stored
+    put16(p + 10 + o, 0);             // time
+    put16(p + 12 + o, 0x21);          // date
+    put32(p + 14 + o, crc);
+    put32(p + 18 + o, size);          // compressed
+    put32(p + 22 + o, size);          // uncompressed
+    put16(p + 26 + o, (uint32_t)name_len);
+    put16(p + 28 + o, 0);             // extra field length
+    if (central) memset(p + 32, 0, 14);   // comment, disk, attributes, local header offset 0
+    memcpy(p + (central ? 46 : 30), name, name_len);
+}
+
+unsigned char* px_res_build(px_image* const* images, int nimages, px_tilemap* const* tilemaps,
+                            int ntilemaps, const char* sounds_toml, const char* musics_toml,
+                            size_t* out_size) {
+    static const char NAME[] = "pyxel_resource.toml";
+    const size_t name_len = sizeof(NAME) - 1;
+    const size_t local_len = 30 + name_len;
+    const size_t central_len = 46 + name_len;
+    unsigned char head[46 + sizeof(NAME) + 22];
+    memset(head, 0, sizeof(head));
+
+    outbuf o = { NULL, 0, 0, false };
+    out_bytes(&o, head, local_len);   // local header, filled in once the CRC is known
+    size_t start = o.n;
+    out_str(&o, "format_version = 1\n");
+    if (nimages == 0) out_str(&o, "images = []\n");
+    if (ntilemaps == 0) out_str(&o, "tilemaps = []\n");
+    if (!sounds_toml[0]) out_str(&o, "sounds = []\n");
+    if (!musics_toml[0]) out_str(&o, "musics = []\n");
+    for (int i = 0; i < nimages; i++) {
+        out_table_head(&o, "images", &images[i]->cv);
+        out_grid(&o, images[i]->cv.data, images[i]->cv.w, images[i]->cv.h, false);
+    }
+    for (int i = 0; i < ntilemaps; i++) {
+        const px_tilemap* tm = tilemaps[i];
+        out_table_head(&o, "tilemaps", &tm->cv);
+        out_str(&o, "imgsrc = ");
+        out_uint(&o, tm->imgsrc < 0 ? 0 : (uint32_t)tm->imgsrc);
+        out_str(&o, "\n");
+        out_grid(&o, tm->cv.data, tm->cv.w, tm->cv.h, true);
+    }
+    out_str(&o, sounds_toml);
+    out_str(&o, musics_toml);
+    if (o.oom) { free(o.p); return NULL; }
+
+    size_t toml_len = o.n - start;
+    uint32_t crc = lodepng_crc32(o.p + start, toml_len);
+    zip_entry_header(head, true, crc, (uint32_t)toml_len, NAME, name_len);
+    unsigned char* end = head + central_len;
+    put32(end, 0x06054b50u);
+    put16(end + 4, 0);                // this disk
+    put16(end + 6, 0);                // disk with the central directory
+    put16(end + 8, 1);                // entries on this disk
+    put16(end + 10, 1);               // entries
+    put32(end + 12, (uint32_t)central_len);
+    put32(end + 16, (uint32_t)o.n);   // central directory offset
+    put16(end + 20, 0);               // comment length
+    out_bytes(&o, head, central_len + 22);
+    if (o.oom) { free(o.p); return NULL; }
+    zip_entry_header(o.p, false, crc, (uint32_t)toml_len, NAME, name_len);
+    *out_size = o.n;
+    return o.p;
+}
+
+// ---------------------------------------------------------------------------
+// TMX (tmx_parser.rs)
+// ---------------------------------------------------------------------------
+
+// Start of the next element named `name` at or after p ("<name" followed by
+// whitespace, '>' or '/'), or NULL.
+static const char* xml_find(const char* p, const char* end, const char* name) {
+    size_t n = strlen(name);
+    for (; p + n + 1 < end; p++) {
+        if (p[0] != '<' || memcmp(p + 1, name, n) != 0) continue;
+        char c = p[1 + n];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '>' || c == '/') return p;
+    }
+    return NULL;
+}
+
+// Value of attribute `name` in the tag starting at tag, copied into out.
+static bool xml_attr(const char* tag, const char* end, const char* name, char* out, size_t cap) {
+    const char* close = tag;
+    while (close < end && *close != '>') close++;
+    size_t n = strlen(name);
+    for (const char* p = tag + 1; p + n + 2 < close; p++) {
+        if ((p[-1] != ' ' && p[-1] != '\t' && p[-1] != '\r' && p[-1] != '\n') ||
+            memcmp(p, name, n) != 0 || p[n] != '=')
+            continue;
+        char q = p[n + 1];
+        if (q != '"' && q != '\'') continue;
+        const char* v = p + n + 2;
+        const char* ve = v;
+        while (ve < close && *ve != q) ve++;
+        size_t len = (size_t)(ve - v) < cap - 1 ? (size_t)(ve - v) : cap - 1;
+        memcpy(out, v, len);
+        out[len] = 0;
+        return true;
+    }
+    return false;
+}
+
+static bool xml_attr_u32(const char* tag, const char* end, const char* name, uint32_t* out) {
+    char buf[24];
+    if (!xml_attr(tag, end, name, buf, sizeof(buf))) return false;
+    char* e;
+    unsigned long v = strtoul(buf, &e, 10);
+    if (e == buf || *e) return false;
+    *out = (uint32_t)v;
+    return true;
+}
+
+uint16_t* px_tmx_load(const char* path, int layer, int* out_w, int* out_h, char* err, size_t errlen) {
+    size_t n = 0;
+    char* text = px_vfs_read(path, &n);
+    if (!text) { snprintf(err, errlen, "Failed to open file '%s'", path); return NULL; }
+    const char* end = text + n;
+    uint16_t* tiles = NULL;
+
+    uint32_t tw, th, firstgid, columns, w, h;
+    const char* map = xml_find(text, end, "map");
+    if (!map || !xml_attr_u32(map, end, "tilewidth", &tw) || !xml_attr_u32(map, end, "tileheight", &th)) {
+        snprintf(err, errlen, "Failed to parse file '%s'", path);
+        goto done;
+    }
+    if (tw != PX_TILE_SIZE || th != PX_TILE_SIZE) {
+        snprintf(err, errlen, "Invalid tile size in file '%s'", path);
+        goto done;
+    }
+    const char* ts = xml_find(map, end, "tileset");
+    if (!ts || !xml_attr_u32(ts, end, "firstgid", &firstgid)) {
+        snprintf(err, errlen, "No tileset found in file '%s'", path);
+        goto done;
+    }
+    if (!xml_attr_u32(ts, end, "columns", &columns) || columns == 0) {
+        snprintf(err, errlen, "No embedded tileset in file '%s'", path);
+        goto done;
+    }
+    const char* ly = map;
+    for (int i = 0; i <= layer; i++) {
+        ly = xml_find(ly + 1, end, "layer");
+        if (!ly) break;
+    }
+    if (layer < 0 || !ly) {
+        snprintf(err, errlen, "Layer %d not found in file '%s'", layer, path);
+        goto done;
+    }
+    const char* data = xml_find(ly, end, "data");
+    char enc[16];
+    if (!xml_attr_u32(ly, end, "width", &w) || !xml_attr_u32(ly, end, "height", &h) || !data ||
+        !xml_attr(data, end, "encoding", enc, sizeof(enc))) {
+        snprintf(err, errlen, "Failed to parse file '%s'", path);
+        goto done;
+    }
+    if (strcmp(enc, "csv") != 0) {
+        snprintf(err, errlen, "Unsupported encoding in file '%s'", path);
+        goto done;
+    }
+    if (w == 0 || h == 0 || (uint64_t)w * h > 16u * 1024 * 1024) {
+        snprintf(err, errlen, "Layer dimensions are too large in file '%s'", path);
+        goto done;
+    }
+    tiles = (uint16_t*)calloc((size_t)w * h, sizeof(uint16_t));
+    if (!tiles) { snprintf(err, errlen, "out of memory"); goto done; }
+    const char* p = data;
+    while (p < end && *p != '>') p++;
+    p++;
+    size_t count = 0;
+    while (p < end && *p != '<') {
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ',')) p++;
+        if (p >= end || *p == '<') break;
+        char* e;
+        unsigned long gid = strtoul(p, &e, 10);
+        if (e == p) {
+            snprintf(err, errlen, "Failed to parse file '%s'", path);
+            free(tiles);
+            tiles = NULL;
+            goto done;
+        }
+        p = e;
+        uint32_t id = (uint32_t)gid & 0x0FFFFFFFu;
+        id = id > firstgid ? id - firstgid : 0;
+        uint32_t tx = id % columns, ty = id / columns;
+        if (tx > 255 || ty > 255) {
+            snprintf(err, errlen, "Tile (%u, %u) in '%s' is beyond 255", (unsigned)tx, (unsigned)ty, path);
+            free(tiles);
+            tiles = NULL;
+            goto done;
+        }
+        if (count < (size_t)w * h) tiles[count] = PX_TILE(tx, ty);
+        count++;
+    }
+    *out_w = (int)w;
+    *out_h = (int)h;
+done:
+    free(text);
+    return tiles;
+}
+
+// ---------------------------------------------------------------------------
 // PNG (image.rs Image::from_image; GIF/JPEG are not decoded here)
 // ---------------------------------------------------------------------------
 px_image* px_image_decode_png(const char* path, bool include_colors, char* err, size_t errlen) {

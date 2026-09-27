@@ -48,15 +48,17 @@
 // the hash (and potentially some linear probing) in the case of a regular
 // map. Note the same cache is shared across all maps.
 
-// Gets the index into the cache for this index. Shift down by two to remove
-// mp_obj_t tag bits.
-#define MAP_CACHE_OFFSET(index) ((((uintptr_t)(index)) >> 2) % MICROPY_OPT_MAP_LOOKUP_CACHE_SIZE)
+// Gets the index into the cache for this index.
+// MESHPUNK: bits 16 and up of a Fibonacci multiply (upstream: the index
+// shifted down by two, which leaves every other entry unused for qstrs).
+#define MAP_CACHE_OFFSET(index) ((((uint32_t)(uintptr_t)(index) * 2654435761u) >> 16) % MICROPY_OPT_MAP_LOOKUP_CACHE_SIZE)
 // Gets the map cache entry for the corresponding index.
 #define MAP_CACHE_ENTRY(index) (MP_STATE_VM(map_lookup_cache)[MAP_CACHE_OFFSET(index)])
 // Retrieve the mp_obj_t at the location suggested by the cache.
 #define MAP_CACHE_GET(map, index) (&(map)->table[MAP_CACHE_ENTRY(index) % (map)->alloc])
 // Update the cache for this index.
-#define MAP_CACHE_SET(index, pos) MAP_CACHE_ENTRY(index) = (pos) & 0xff;
+// MESHPUNK: 16-bit entries (py/mpstate.h), so slots past 255 are cached too.
+#define MAP_CACHE_SET(index, pos) MAP_CACHE_ENTRY(index) = (uint16_t)(pos);
 #else
 #define MAP_CACHE_SET(index, pos)
 #endif
@@ -71,6 +73,11 @@ static const uint16_t hash_allocation_sizes[] = {
     97, 127, 167, 223, 293, 389, 521, 691, 919, 1223, 1627, 2161, // *1.33
     3229, 4831, 7243, 10861, 16273, 24407, 36607, 54907, // *1.5
 };
+
+// MESHPUNK: the first slot probed for a hash. qstr hashes of names that share
+// a prefix (KEY_A, KEY_B) differ only in their low bits; a Fibonacci multiply
+// spreads them over the table instead of into one run of linear probes.
+#define MAP_POS(hash, alloc) ((size_t)(((uint32_t)(hash) * 2654435761u) % (uint32_t)(alloc)))
 
 static size_t get_hash_alloc_greater_or_equal_to(size_t x) {
     for (size_t i = 0; i < MP_ARRAY_SIZE(hash_allocation_sizes); i++) {
@@ -249,7 +256,7 @@ mp_map_elem_t *MICROPY_WRAP_MP_MAP_LOOKUP(mp_map_lookup)(mp_map_t * map, mp_obj_
         hash = MP_OBJ_SMALL_INT_VALUE(mp_unary_op(MP_UNARY_OP_HASH, index));
     }
 
-    size_t pos = hash % map->alloc;
+    size_t pos = MAP_POS(hash, map->alloc);
     size_t start_pos = pos;
     mp_map_elem_t *avail_slot = NULL;
     for (;;) {
@@ -312,7 +319,7 @@ mp_map_elem_t *MICROPY_WRAP_MP_MAP_LOOKUP(mp_map_lookup)(mp_map_t * map, mp_obj_
                     // not enough room in table, rehash it
                     mp_map_rehash(map);
                     // restart the search for the new element
-                    start_pos = pos = hash % map->alloc;
+                    start_pos = pos = MAP_POS(hash, map->alloc);
                 }
             } else {
                 return NULL;

@@ -140,7 +140,8 @@ static mp_fp_as_int_class_t mp_classify_fp_as_int(mp_float_t val) {
 #undef MP_FLOAT_SIGN_SHIFT_I32
 #undef MP_FLOAT_EXP_SHIFT_I32
 
-mp_obj_t mp_obj_new_int_from_float(mp_float_t val) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+PX_IRAM mp_obj_t mp_obj_new_int_from_float(mp_float_t val) {
     mp_float_union_t u = {val};
     // IEEE-754: if biased exponent is all 1 bits...
     if (u.p.exp == ((1 << MP_FLOAT_EXP_BITS) - 1)) {

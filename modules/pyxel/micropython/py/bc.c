@@ -124,7 +124,8 @@ static void dump_args(const mp_obj_t *a, size_t sz) {
 //    - code_state->ip should contain a pointer to the beginning of the prelude
 //    - code_state->sp should be: &code_state->state[0] - 1
 //    - code_state->n_state should be the number of objects in the local state
-static void mp_setup_code_state_helper(mp_code_state_t *code_state, size_t n_args, size_t n_kw, const mp_obj_t *args) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+static PX_IRAM void mp_setup_code_state_helper(mp_code_state_t *code_state, size_t n_args, size_t n_kw, const mp_obj_t *args) {
     // This function is pretty complicated.  It's main aim is to be efficient in speed and RAM
     // usage for the common case of positional only args.
 
@@ -319,7 +320,8 @@ static void mp_setup_code_state_helper(mp_code_state_t *code_state, size_t n_arg
 // contain the following valid entries:
 //    - code_state->fun_bc should contain a pointer to the function object
 //    - code_state->n_state should be the number of objects in the local state
-void mp_setup_code_state(mp_code_state_t *code_state, size_t n_args, size_t n_kw, const mp_obj_t *args) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+PX_IRAM void mp_setup_code_state(mp_code_state_t *code_state, size_t n_args, size_t n_kw, const mp_obj_t *args) {
     code_state->ip = code_state->fun_bc->bytecode;
     code_state->sp = &code_state->state[0] - 1;
     #if MICROPY_STACKLESS

@@ -59,7 +59,8 @@ static void module_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kin
 
 static void module_attr_try_delegation(mp_obj_t self_in, qstr attr, mp_obj_t *dest);
 
-static void module_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+static PX_IRAM void module_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
     mp_obj_module_t *self = MP_OBJ_TO_PTR(self_in);
     if (dest[0] == MP_OBJ_NULL) {
         // load attribute

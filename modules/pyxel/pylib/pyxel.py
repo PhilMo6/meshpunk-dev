@@ -6,6 +6,8 @@
 # Key codes match upstream below 0x80; upstream's 0x4000_00nn keys are
 # 0x10000 + nn here and its 0x5000_0000 + n keys are 0x20000 + n.
 
+import io
+
 import _pyxel as _p
 
 VERSION = "2.9.9"
@@ -239,18 +241,96 @@ MOUSE_BUTTON_RIGHT = 0x20106
 MOUSE_BUTTON_X1 = 0x20107
 MOUSE_BUTTON_X2 = 0x20108
 
-_PAD_KEYS = (
-    "AXIS_LEFTX", "AXIS_LEFTY", "AXIS_RIGHTX", "AXIS_RIGHTY",
-    "AXIS_TRIGGERLEFT", "AXIS_TRIGGERRIGHT",
-    "BUTTON_A", "BUTTON_B", "BUTTON_X", "BUTTON_Y", "BUTTON_BACK", "BUTTON_GUIDE",
-    "BUTTON_START", "BUTTON_LEFTSTICK", "BUTTON_RIGHTSTICK", "BUTTON_LEFTSHOULDER",
-    "BUTTON_RIGHTSHOULDER", "BUTTON_DPAD_UP", "BUTTON_DPAD_DOWN", "BUTTON_DPAD_LEFT",
-    "BUTTON_DPAD_RIGHT",
-)
-_g = globals()
-for _n in range(4):
-    for _i in range(len(_PAD_KEYS)):
-        _g["GAMEPAD%d_%s" % (_n + 1, _PAD_KEYS[_i])] = 0x20200 + 0x100 * _n + _i
+# Module-level names must be plain assignments: a key stored through globals()
+# is not interned, and one such key makes every lookup in this module's dict
+# compare strings (py/map.c all_keys_are_qstrs).
+GAMEPAD1_AXIS_LEFTX = 0x20200
+GAMEPAD1_AXIS_LEFTY = 0x20201
+GAMEPAD1_AXIS_RIGHTX = 0x20202
+GAMEPAD1_AXIS_RIGHTY = 0x20203
+GAMEPAD1_AXIS_TRIGGERLEFT = 0x20204
+GAMEPAD1_AXIS_TRIGGERRIGHT = 0x20205
+GAMEPAD1_BUTTON_A = 0x20206
+GAMEPAD1_BUTTON_B = 0x20207
+GAMEPAD1_BUTTON_X = 0x20208
+GAMEPAD1_BUTTON_Y = 0x20209
+GAMEPAD1_BUTTON_BACK = 0x2020A
+GAMEPAD1_BUTTON_GUIDE = 0x2020B
+GAMEPAD1_BUTTON_START = 0x2020C
+GAMEPAD1_BUTTON_LEFTSTICK = 0x2020D
+GAMEPAD1_BUTTON_RIGHTSTICK = 0x2020E
+GAMEPAD1_BUTTON_LEFTSHOULDER = 0x2020F
+GAMEPAD1_BUTTON_RIGHTSHOULDER = 0x20210
+GAMEPAD1_BUTTON_DPAD_UP = 0x20211
+GAMEPAD1_BUTTON_DPAD_DOWN = 0x20212
+GAMEPAD1_BUTTON_DPAD_LEFT = 0x20213
+GAMEPAD1_BUTTON_DPAD_RIGHT = 0x20214
+
+GAMEPAD2_AXIS_LEFTX = 0x20300
+GAMEPAD2_AXIS_LEFTY = 0x20301
+GAMEPAD2_AXIS_RIGHTX = 0x20302
+GAMEPAD2_AXIS_RIGHTY = 0x20303
+GAMEPAD2_AXIS_TRIGGERLEFT = 0x20304
+GAMEPAD2_AXIS_TRIGGERRIGHT = 0x20305
+GAMEPAD2_BUTTON_A = 0x20306
+GAMEPAD2_BUTTON_B = 0x20307
+GAMEPAD2_BUTTON_X = 0x20308
+GAMEPAD2_BUTTON_Y = 0x20309
+GAMEPAD2_BUTTON_BACK = 0x2030A
+GAMEPAD2_BUTTON_GUIDE = 0x2030B
+GAMEPAD2_BUTTON_START = 0x2030C
+GAMEPAD2_BUTTON_LEFTSTICK = 0x2030D
+GAMEPAD2_BUTTON_RIGHTSTICK = 0x2030E
+GAMEPAD2_BUTTON_LEFTSHOULDER = 0x2030F
+GAMEPAD2_BUTTON_RIGHTSHOULDER = 0x20310
+GAMEPAD2_BUTTON_DPAD_UP = 0x20311
+GAMEPAD2_BUTTON_DPAD_DOWN = 0x20312
+GAMEPAD2_BUTTON_DPAD_LEFT = 0x20313
+GAMEPAD2_BUTTON_DPAD_RIGHT = 0x20314
+
+GAMEPAD3_AXIS_LEFTX = 0x20400
+GAMEPAD3_AXIS_LEFTY = 0x20401
+GAMEPAD3_AXIS_RIGHTX = 0x20402
+GAMEPAD3_AXIS_RIGHTY = 0x20403
+GAMEPAD3_AXIS_TRIGGERLEFT = 0x20404
+GAMEPAD3_AXIS_TRIGGERRIGHT = 0x20405
+GAMEPAD3_BUTTON_A = 0x20406
+GAMEPAD3_BUTTON_B = 0x20407
+GAMEPAD3_BUTTON_X = 0x20408
+GAMEPAD3_BUTTON_Y = 0x20409
+GAMEPAD3_BUTTON_BACK = 0x2040A
+GAMEPAD3_BUTTON_GUIDE = 0x2040B
+GAMEPAD3_BUTTON_START = 0x2040C
+GAMEPAD3_BUTTON_LEFTSTICK = 0x2040D
+GAMEPAD3_BUTTON_RIGHTSTICK = 0x2040E
+GAMEPAD3_BUTTON_LEFTSHOULDER = 0x2040F
+GAMEPAD3_BUTTON_RIGHTSHOULDER = 0x20410
+GAMEPAD3_BUTTON_DPAD_UP = 0x20411
+GAMEPAD3_BUTTON_DPAD_DOWN = 0x20412
+GAMEPAD3_BUTTON_DPAD_LEFT = 0x20413
+GAMEPAD3_BUTTON_DPAD_RIGHT = 0x20414
+
+GAMEPAD4_AXIS_LEFTX = 0x20500
+GAMEPAD4_AXIS_LEFTY = 0x20501
+GAMEPAD4_AXIS_RIGHTX = 0x20502
+GAMEPAD4_AXIS_RIGHTY = 0x20503
+GAMEPAD4_AXIS_TRIGGERLEFT = 0x20504
+GAMEPAD4_AXIS_TRIGGERRIGHT = 0x20505
+GAMEPAD4_BUTTON_A = 0x20506
+GAMEPAD4_BUTTON_B = 0x20507
+GAMEPAD4_BUTTON_X = 0x20508
+GAMEPAD4_BUTTON_Y = 0x20509
+GAMEPAD4_BUTTON_BACK = 0x2050A
+GAMEPAD4_BUTTON_GUIDE = 0x2050B
+GAMEPAD4_BUTTON_START = 0x2050C
+GAMEPAD4_BUTTON_LEFTSTICK = 0x2050D
+GAMEPAD4_BUTTON_RIGHTSTICK = 0x2050E
+GAMEPAD4_BUTTON_LEFTSHOULDER = 0x2050F
+GAMEPAD4_BUTTON_RIGHTSHOULDER = 0x20510
+GAMEPAD4_BUTTON_DPAD_UP = 0x20511
+GAMEPAD4_BUTTON_DPAD_DOWN = 0x20512
+GAMEPAD4_BUTTON_DPAD_LEFT = 0x20513
+GAMEPAD4_BUTTON_DPAD_RIGHT = 0x20514
 
 # ---------------------------------------------------------------------------
 # Graphics and audio constants
@@ -413,11 +493,11 @@ class Image:
     def bltm(self, x, y, tm, u, v, w, h, colkey=None, rotate=None, scale=None):
         _p.i_bltm(self, x, y, tm, u, v, w, h, colkey, rotate, scale)
 
-    def blt3d(self, *args, **kwargs):
-        raise NotImplementedError("blt3d is not supported")
+    def blt3d(self, x, y, w, h, img, pos, rot, fov=60, colkey=None):
+        _p.i_blt3d(self, x, y, w, h, img, pos, rot, fov, colkey)
 
-    def bltm3d(self, *args, **kwargs):
-        raise NotImplementedError("bltm3d is not supported")
+    def bltm3d(self, x, y, w, h, tm, pos, rot, fov=60, colkey=None):
+        _p.i_bltm3d(self, x, y, w, h, tm, pos, rot, fov, colkey)
 
     def text(self, x, y, s, col, font=None):
         _p.i_text(self, x, y, s, col, font)
@@ -434,7 +514,10 @@ class Tilemap:
 
     @staticmethod
     def from_tmx(filename, layer):
-        raise NotImplementedError("TMX tilemaps are not supported yet")
+        tm = Tilemap(0, 0, 0, -1)
+        tm._h = None
+        tm._st, tm._buf = _p.tilemap_from_tmx(filename, layer)
+        return tm
 
     @property
     def width(self):
@@ -465,7 +548,7 @@ class Tilemap:
         _p.t_set(self, x, y, data)
 
     def load(self, x, y, filename, layer):
-        raise NotImplementedError("TMX tilemaps are not supported yet")
+        _p.t_load(self, x, y, filename, layer)
 
     def data_ptr(self):
         raise NotImplementedError("Tilemap.data_ptr is not supported")
@@ -519,7 +602,7 @@ class Tilemap:
         _p.t_blt(self, x, y, tm, u, v, w, h, tilekey, rotate, scale)
 
     def collide(self, x, y, w, h, dx, dy, walls):
-        raise NotImplementedError("Tilemap.collide is not supported yet")
+        return _p.t_collide(self, x, y, w, h, dx, dy, walls)
 
 
 _NOTE_BASE = {"c": 0, "d": 2, "e": 4, "f": 5, "g": 7, "a": 9, "b": 11}
@@ -535,6 +618,7 @@ class Sound:
         self.effects = []
         self.speed = 30
         self._mml = None
+        self._mml_old = False
         self._pcm = None
 
     def set(self, notes, tones, volumes, effects, speed):
@@ -602,19 +686,36 @@ class Sound:
                 raise ValueError("Invalid sound effect '%s'" % c)
         self.effects = out
 
+    # MML mode: code is parsed now (errors raise here) and again at play time.
     def mml(self, code=None):
-        self._mml = code
-        if code is not None:
-            self._pcm = None
+        self._set_mml(code, False)
 
+    def old_mml(self, code=None):
+        self._set_mml(code, True)
+
+    def _set_mml(self, code, old):
+        if code is not None:
+            _p.mml_check(code, old)
+            self._release_pcm()
+        self._mml = code
+        self._mml_old = old
+
+    # PCM mode: a WAV file decoded to 22050 Hz mono.
     def pcm(self, filename=None):
-        self._pcm = filename
-        if filename is not None:
+        handle = None if filename is None else _p.pcm_load(filename)
+        self._release_pcm()
+        self._pcm = handle
+        if handle is not None:
             self._mml = None
 
+    def _release_pcm(self):
+        if self._pcm is not None:
+            _p.pcm_release(self._pcm)
+            self._pcm = None
+
     def total_sec(self):
-        if not self.notes:
-            return 0.0
+        if self._pcm is not None or self._mml is not None:
+            return _p.sound_total_sec(self)
         return len(self.notes) * self.speed / 120.0
 
     def save(self, filename, sec, ffmpeg=False):
@@ -633,10 +734,33 @@ class Music:
 
 
 class Channel:
+    # gain and detune apply from the next note, as upstream.
     def __init__(self, _index=None):
         self._index = _index
-        self.gain = 0.125
-        self.detune = 0
+        self._gain = 0.125
+        self._detune = 0
+
+    def _sync(self):
+        if self._index is not None:
+            _p.channel_set(self._index, self._gain, self._detune)
+
+    @property
+    def gain(self):
+        return self._gain
+
+    @gain.setter
+    def gain(self, value):
+        self._gain = value
+        self._sync()
+
+    @property
+    def detune(self):
+        return self._detune
+
+    @detune.setter
+    def detune(self, value):
+        self._detune = value
+        self._sync()
 
     def play(self, snd, sec=None, loop=False, resume=False):
         play(self._index, snd, sec, loop, resume)
@@ -658,15 +782,23 @@ class Tone:
 
 
 class Font:
+    # BDF bitmap fonts; font_size applies to OTF/TTF only, which are not supported.
     def __init__(self, filename, font_size=10.0):
-        raise NotImplementedError("custom fonts are not supported yet")
+        if not filename.lower().endswith(".bdf"):
+            raise NotImplementedError("only BDF fonts are supported, not '%s'" % filename)
+        self._font = _p.font_load(filename)
+
+    def text_width(self, s):
+        return _p.font_text_width(self._font, s)
 
 
 # ---------------------------------------------------------------------------
 # Banks and runtime variables (frame_count, mouse_x, ... are updated by _pyxel)
 # ---------------------------------------------------------------------------
-images = [Image(IMAGE_SIZE, IMAGE_SIZE, i) for i in range(NUM_IMAGES)]
-tilemaps = [Tilemap(TILEMAP_SIZE, TILEMAP_SIZE, 0, i) for i in range(NUM_TILEMAPS)]
+_bank_images = [Image(IMAGE_SIZE, IMAGE_SIZE, i) for i in range(NUM_IMAGES)]
+_bank_tilemaps = [Tilemap(TILEMAP_SIZE, TILEMAP_SIZE, 0, i) for i in range(NUM_TILEMAPS)]
+images = list(_bank_images)
+tilemaps = list(_bank_tilemaps)
 screen = Image(0, 0, 3)
 cursor = Image(8, 8, 4)
 font = None
@@ -708,11 +840,129 @@ screen_mode = _p.screen_mode
 perf_monitor = _p.perf_monitor
 integer_scale = _p.integer_scale
 
-load = _p.load
-save = _p.save
+# load()/save(): a deprecated excl_* argument, when given, overrides its exclude_* one.
+def _excludes(exclude, excl):
+    return [e if x is None else x for e, x in zip(exclude, excl)]
+
+
+def load(filename, exclude_images=False, exclude_tilemaps=False, exclude_sounds=False,
+         exclude_musics=False, excl_images=None, excl_tilemaps=None, excl_sounds=None,
+         excl_musics=None):
+    ex_img, ex_tm, ex_snd, ex_mus = _excludes(
+        (exclude_images, exclude_tilemaps, exclude_sounds, exclude_musics),
+        (excl_images, excl_tilemaps, excl_sounds, excl_musics))
+    _p.load(filename, ex_img, ex_tm, ex_snd, ex_mus)
+    # The loaded data lives in the banks; as upstream, the lists name them again.
+    if not ex_img:
+        images[:] = _bank_images
+    if not ex_tm:
+        tilemaps[:] = _bank_tilemaps
+
+
+def _toml_ints(values):
+    return "[" + ", ".join(str(int(v)) for v in values) + "]"
+
+
+# save(): the [[sounds]] / [[musics]] tables of pyxel_resource.toml. Musics
+# drop trailing empty sequences (resource_data.rs MusicData::from_music).
+def _sound_tables():
+    return "".join(
+        "\n[[sounds]]\nnotes = %s\ntones = %s\nvolumes = %s\neffects = %s\nspeed = %d\n"
+        % (_toml_ints(s.notes), _toml_ints(s.tones), _toml_ints(s.volumes),
+           _toml_ints(s.effects), int(s.speed))
+        for s in sounds)
+
+
+def _music_tables():
+    out = []
+    for m in musics:
+        seqs = list(m.seqs)
+        while seqs and not seqs[-1]:
+            seqs.pop()
+        out.append("\n[[musics]]\nseqs = [%s]\n" % ", ".join(_toml_ints(q) for q in seqs))
+    return "".join(out)
+
+
+def save(filename, exclude_images=False, exclude_tilemaps=False, exclude_sounds=False,
+         exclude_musics=False, excl_images=None, excl_tilemaps=None, excl_sounds=None,
+         excl_musics=None):
+    ex_img, ex_tm, ex_snd, ex_mus = _excludes(
+        (exclude_images, exclude_tilemaps, exclude_sounds, exclude_musics),
+        (excl_images, excl_tilemaps, excl_sounds, excl_musics))
+    _p.save(filename, [] if ex_img else images, [] if ex_tm else tilemaps,
+            "" if ex_snd else _sound_tables(), "" if ex_mus else _music_tables())
+
+
 load_pal = _p.load_pal
-save_pal = _p.save_pal
-user_data_dir = _p.user_data_dir
+
+
+def save_pal(filename):
+    if filename.lower().endswith(".pyxres"):
+        filename = filename[:-7] + ".pyxpal"
+    with open(filename, "w") as f:
+        f.write("".join("%06x\n" % c for c in colors))
+
+
+# Upstream: ~/.pyxel/<vendor>/<app>/, each name lowercased with spaces as "_"
+# and only letters, digits, "_" and "-" kept. Here the kept characters are
+# ASCII only and the directories are under /sd/pyxel/save/; they are created
+# by the first file written into them.
+_DIR_NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789_-"
+
+
+def _dir_name(name):
+    return "".join(c for c in name.lower().replace(" ", "_") if c in _DIR_NAME_CHARS)
+
+
+def user_data_dir(vendor_name, app_name):
+    return "/sd/pyxel/save/%s/%s/" % (_dir_name(vendor_name), _dir_name(app_name))
+
+
+class _WFile(io.IOBase):
+    # What open() returns for modes "w", "a" and "x". _pyxel holds the
+    # contents (handle _h) and writes the whole file on flush() and close(),
+    # and at exit for files left open.
+    def __init__(self, h, name, mode):
+        self._h = h
+        self.name = name
+        self.mode = mode
+
+    @property
+    def closed(self):
+        return self._h is None
+
+    def _check_open(self):
+        if self._h is None:
+            raise ValueError("I/O operation on closed file")
+
+    def write(self, data):
+        self._check_open()
+        if isinstance(data, str) and "b" in self.mode:
+            raise TypeError("a bytes-like object is required, not 'str'")
+        _p.file_write(self._h, data)
+        return len(data)
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def flush(self):
+        self._check_open()
+        _p.file_flush(self._h, self.name)
+
+    def close(self):
+        if self._h is not None:
+            h = self._h
+            self._h = None
+            _p.file_close(h, self.name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
 screenshot = _p.screenshot
 screencast = _p.screencast
 reset_screencast = _p.reset_screencast
@@ -750,7 +1000,9 @@ def play(ch, snd, sec=None, loop=False, resume=False, tick=None):
     if tick is not None:
         sec = tick / 120.0
     if isinstance(snd, str):
-        raise NotImplementedError("MML sounds are not supported yet")
+        mml_sound = Sound()
+        mml_sound.mml(snd)
+        snd = mml_sound
     if isinstance(snd, (int, Sound)):
         snd = [snd]
     seq = [sounds[s] if isinstance(s, int) else s for s in snd]

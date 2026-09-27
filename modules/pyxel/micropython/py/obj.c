@@ -164,7 +164,8 @@ void mp_obj_print_exception(const mp_print_t *print, mp_obj_t exc) {
     mp_print_str(print, "\n");
 }
 
-bool mp_obj_is_true(mp_obj_t arg) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+PX_IRAM bool mp_obj_is_true(mp_obj_t arg) {
     if (arg == mp_const_false) {
         return 0;
     } else if (arg == mp_const_true) {
@@ -303,7 +304,8 @@ bool mp_obj_equal(mp_obj_t o1, mp_obj_t o2) {
     return mp_obj_is_true(mp_obj_equal_not_equal(MP_BINARY_OP_EQUAL, o1, o2));
 }
 
-mp_int_t mp_obj_get_int(mp_const_obj_t arg) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+PX_IRAM mp_int_t mp_obj_get_int(mp_const_obj_t arg) {
     // This function essentially performs implicit type conversion to int
     // Note that Python does NOT provide implicit type conversion from
     // float to int in the core expression language, try some_list[1.0].
@@ -376,7 +378,8 @@ bool mp_obj_get_int_maybe(mp_const_obj_t arg, mp_int_t *value) {
 }
 
 #if MICROPY_PY_BUILTINS_FLOAT
-bool mp_obj_get_float_maybe(mp_obj_t arg, mp_float_t *value) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+PX_IRAM bool mp_obj_get_float_maybe(mp_obj_t arg, mp_float_t *value) {
     mp_float_t val;
 
     if (arg == mp_const_false) {
@@ -403,7 +406,8 @@ bool mp_obj_get_float_maybe(mp_obj_t arg, mp_float_t *value) {
     return true;
 }
 
-mp_float_t mp_obj_get_float(mp_obj_t arg) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+PX_IRAM mp_float_t mp_obj_get_float(mp_obj_t arg) {
     mp_float_t val;
 
     if (!mp_obj_get_float_maybe(arg, &val)) {

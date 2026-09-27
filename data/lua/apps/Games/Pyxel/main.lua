@@ -224,7 +224,8 @@ local function create_help_screen()
                 .. "Tap the y key (Quit in Controls) to leave\n"
                 .. "a game, or hold ALT + Backspace for 1.5 s.\n\n"
                 .. "The Sound button turns game sound on\n"
-                .. "or off. MML music is not supported yet.",
+                .. "or off. Games that save keep their\n"
+                .. "saves in /pyxel/save on the SD card.",
             text_font = FONT, text_color = "#CCCCCC",
             w = lvgl.PCT(100), h = lvgl.SIZE_CONTENT,
         }

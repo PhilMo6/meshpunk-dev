@@ -134,7 +134,8 @@ struct class_lookup_data {
     bool is_type;
 };
 
-static void mp_obj_class_lookup(struct class_lookup_data *lookup, const mp_obj_type_t *type) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+static PX_IRAM void mp_obj_class_lookup(struct class_lookup_data *lookup, const mp_obj_type_t *type) {
     assert(lookup->dest[0] == MP_OBJ_NULL);
     assert(lookup->dest[1] == MP_OBJ_NULL);
     for (;;) {
@@ -584,7 +585,8 @@ static mp_obj_t instance_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t 
     return res;
 }
 
-static void mp_obj_instance_load_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+static PX_IRAM void mp_obj_instance_load_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
     // logic: look in instance members then class locals
     assert(mp_obj_is_instance_type(mp_obj_get_type(self_in)));
     mp_obj_instance_t *self = MP_OBJ_TO_PTR(self_in);
@@ -811,7 +813,8 @@ skip_special_accessors:
     }
 }
 
-static void mp_obj_instance_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+static PX_IRAM void mp_obj_instance_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
     if (dest[0] == MP_OBJ_NULL) {
         mp_obj_instance_load_attr(self_in, attr, dest);
     } else {

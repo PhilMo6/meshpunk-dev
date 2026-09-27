@@ -907,6 +907,10 @@ extern const mp_obj_type_t mp_type_MemoryError;
 extern const mp_obj_type_t mp_type_NameError;
 extern const mp_obj_type_t mp_type_NotImplementedError;
 extern const mp_obj_type_t mp_type_OSError;
+// MESHPUNK: OSError subclasses defined in objexcept.c.
+extern const mp_obj_type_t mp_type_FileExistsError;
+extern const mp_obj_type_t mp_type_FileNotFoundError;
+extern const mp_obj_type_t mp_type_IsADirectoryError;
 extern const mp_obj_type_t mp_type_OverflowError;
 extern const mp_obj_type_t mp_type_RuntimeError;
 extern const mp_obj_type_t mp_type_StopAsyncIteration;

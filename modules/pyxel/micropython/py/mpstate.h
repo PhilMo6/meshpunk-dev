@@ -276,7 +276,8 @@ typedef struct _mp_state_vm_t {
 
     #if MICROPY_OPT_MAP_LOOKUP_CACHE
     // See mp_map_lookup.
-    uint8_t map_lookup_cache[MICROPY_OPT_MAP_LOOKUP_CACHE_SIZE];
+    // MESHPUNK: uint16_t (upstream uint8_t, which cannot name slots past 255).
+    uint16_t map_lookup_cache[MICROPY_OPT_MAP_LOOKUP_CACHE_SIZE];
     #endif
 } mp_state_vm_t;
 

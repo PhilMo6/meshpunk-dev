@@ -40,14 +40,18 @@ $LDFLAGS = @(
 $hot = @(
     "vm.c", "runtime.c", "map.c", "obj.c", "objfun.c", "objtype.c", "objlist.c",
     "objint.c", "objfloat.c", "objdict.c", "gc.c", "qstr.c", "nativeglue.c",
-    "gfx.c", "display.c", "api.c", "input.c", "audio.c"
+    "bc.c", "argcheck.c", "objmodule.c", "objtuple.c",
+    "gfx.c", "display.c", "api.c", "input.c", "audio.c", "sound.c"
 )
 
-# Files holding .iram.text functions (MICROPY_WRAP_* in mpconfigport.h). The
-# section is copied to internal SRAM as a unit, so its literal pools must live
-# inside it (-mtext-section-literals), and switch tables must not be emitted
-# into it (-fno-jump-tables). Audited after linking.
-$iram_files = @("vm.c", "map.c", "runtime.c", "obj.c")
+# Files holding .iram.text functions (MICROPY_WRAP_* and PX_IRAM in
+# mpconfigport.h). The section is copied to internal SRAM as a unit, so its
+# literal pools must live inside it (-mtext-section-literals), and switch
+# tables must not be emitted into it (-fno-jump-tables). Audited after linking.
+$iram_files = @(
+    "vm.c", "map.c", "runtime.c", "obj.c", "objfun.c", "objtype.c", "objint.c",
+    "objfloat.c", "objtuple.c", "objmodule.c", "gc.c", "qstr.c", "bc.c", "argcheck.c"
+)
 
 $sources = @()
 $sources += Get-ChildItem "$MP\py\*.c" | ForEach-Object { $_.FullName }
@@ -80,9 +84,13 @@ foreach ($src in $sources) {
     $srcname = [System.IO.Path]::GetFileName($src)
     $opt = if ($hot -contains $srcname) { "-O2" } else { "-Os" }
     $lang = if ($srcname -eq "lodepng.cpp") { @("-x", "c") } else { @() }
-    $extra = if (($iram_files -contains $srcname) -and ($dir -eq "py")) {
-        @("-mtext-section-literals", "-fno-jump-tables")
-    } else { @() }
+    # src/: no fused multiply-add (madd.s), so float rounding matches upstream's
+    # (Rust never contracts) and blit transforms pick the same source pixels.
+    $extra = @(if (($iram_files -contains $srcname) -and ($dir -eq "py")) {
+        "-mtext-section-literals", "-fno-jump-tables"
+    } elseif ($dir -eq "src") {
+        "-ffp-contract=off"
+    })
     Write-Host "  CC $srcname ($opt)"
     & $CC $CFLAGS $opt @lang @extra -c -o $obj $src
     if ($LASTEXITCODE -ne 0) {

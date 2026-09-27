@@ -888,7 +888,8 @@ void gc_weakref_mark(void *ptr) {
 }
 #endif
 
-void *gc_alloc(size_t n_bytes, unsigned int alloc_flags) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+PX_IRAM void *gc_alloc(size_t n_bytes, unsigned int alloc_flags) {
     bool has_finaliser = alloc_flags & GC_ALLOC_FLAG_HAS_FINALISER;
     size_t n_blocks = ((n_bytes + BYTES_PER_BLOCK - 1) & (~(BYTES_PER_BLOCK - 1))) / BYTES_PER_BLOCK;
     DEBUG_printf("gc_alloc(" UINT_FMT " bytes -> " UINT_FMT " blocks)\n", n_bytes, n_blocks);

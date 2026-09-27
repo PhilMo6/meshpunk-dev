@@ -21,6 +21,9 @@ extern void     host_trackball_read(int* dx, int* dy, int* click);
 extern int      host_trackball_button(void);
 extern int      host_should_exit(void);
 extern void     host_log(const char* msg);
+// Whole-file write under the SD bus lock; creates missing parent directories.
+// 0 on success, -1 on failure.
+extern int      host_write_file(const char* path, const void* data, uint32_t size);
 
 // ---------------------------------------------------------------------------
 // Constants (settings.rs)
@@ -126,6 +129,11 @@ void px_image_blt(px_image* dst, float x, float y, px_image* src, float u, float
 void px_image_bltm(px_image* dst, float x, float y, px_tilemap* tm, px_image* tm_img,
                    float u, float v, float w, float h, int colkey, float rotate, float scale);
 void px_image_text(px_image* dst, float x, float y, const char* s, size_t len, int col);
+// Perspective blits: pos = camera (x, y, z), rot = degrees (x, y, z), fov degrees.
+void px_image_blt3d(px_image* dst, float x, float y, float w, float h, px_image* src,
+                    const float pos[3], const float rot[3], float fov, int colkey);
+void px_image_bltm3d(px_image* dst, float x, float y, float w, float h, px_tilemap* tm,
+                     px_image* tm_img, const float pos[3], const float rot[3], float fov, int colkey);
 
 void px_tilemap_init(px_tilemap* tm, int w, int h, uint16_t* data, int imgsrc);
 
@@ -227,6 +235,20 @@ const char* px_vfs_cwd(void);
 // Resolve `path` against the cwd into `out` (normalized, absolute).
 void  px_vfs_resolve(const char* path, char* out, size_t cap);
 void  px_path_dirname(const char* path, char* out, size_t cap);
+// Write a whole file. A path inside the mounted .pyxapp replaces or adds that
+// archive entry for the rest of the run (upstream runs a .pyxapp from a
+// temporary extracted copy); a path under /sd/ goes to host_write_file.
+// Returns 0 or an errno value.
+int   px_vfs_write(const char* path, const void* data, size_t n);
+// Files open for writing (open() modes "w", "a", "x"): the contents are held
+// in memory and written with px_vfs_write by flush and close. Functions
+// return 0 or an errno value; px_wfile_open returns a handle, or -1 with *err set.
+int   px_wfile_open(const char* path, char mode, int* err);
+int   px_wfile_write(int h, const void* data, size_t n);
+int   px_wfile_flush(int h);
+int   px_wfile_close(int h);
+// Close every open write file, writing its contents (failures are logged).
+void  px_wfile_close_all(void);
 // Raw DEFLATE -> malloc'd buffer (lodepng).
 unsigned char* px_inflate(const unsigned char* in, size_t in_size, size_t expect, size_t* out_size);
 
@@ -267,9 +289,35 @@ bool px_res_load(const char* path, bool ex_img, bool ex_tm, bool ex_snd, bool ex
                  const px_res_sink* sink, char* err, size_t errlen);
 // Parse a .pyxpal next to `pyxres_path`, if present. Returns the color count (0 = none).
 int  px_res_load_pal(const char* pyxres_path, uint32_t* colors, int max);
+// A .pyxres archive (resource.rs save_resource): the TOML resource_data.rs
+// writes, as the one stored entry of a ZIP. A bank with count 0 is written
+// as an empty array. sounds_toml / musics_toml hold the finished [[sounds]] /
+// [[musics]] tables ("" = empty array). Returns a malloc'd archive, or NULL
+// when out of memory.
+unsigned char* px_res_build(px_image* const* images, int nimages, px_tilemap* const* tilemaps,
+                            int ntilemaps, const char* sounds_toml, const char* musics_toml,
+                            size_t* out_size);
 // Decode a PNG to a new image (nearest palette color per pixel, or the file's
 // own colors as the new palette when include_colors).
 px_image* px_image_decode_png(const char* path, bool include_colors, char* err, size_t errlen);
+// One layer of a Tiled TMX map (tmx_parser.rs): CSV-encoded layers, 8x8
+// tiles, tile coordinates from the first tileset's column count. Returns a
+// malloc'd w*h tile array.
+uint16_t* px_tmx_load(const char* path, int layer, int* w, int* h, char* err, size_t errlen);
+
+// Tilemap.collide (tilemap.rs): the (dx, dy) that stops the w x h pixel
+// rectangle at (x, y) at the first wall tile.
+void px_tilemap_collide(const px_tilemap* tm, float x, float y, float w, float h,
+                        float* dx, float* dy, const uint16_t* walls, int nwalls);
+
+// ---------------------------------------------------------------------------
+// BDF fonts (font.c)
+// ---------------------------------------------------------------------------
+int  px_font_load(const char* path, char* err, size_t errlen);   // handle, -1 on error
+bool px_font_valid(int handle);
+void px_font_draw(int handle, px_image* dst, float x, float y, const char* s, size_t len, int col);
+int  px_font_text_width(int handle, const char* s, size_t len);
+void px_font_shutdown(void);
 
 // ---------------------------------------------------------------------------
 // Audio (audio.c)
@@ -277,24 +325,86 @@ px_image* px_image_decode_png(const char* path, bool include_colors, char* err, 
 #define PX_NUM_CHANNELS     4
 #define PX_NUM_TONES        4
 #define PX_TONE_MAX_SAMPLES 256
+#define PX_AUDIO_CLOCK_RATE 1789773u      // NTSC NES APU clock (settings.rs)
+#define PX_AUDIO_RATE       22050u
+#define PX_AUTO             0xFFFFFFFFu   // glide parameter taken from the note
+
+// Sound commands (mml_command.rs). Every sound compiles to a list of these:
+// classic note/tone/volume/effect sounds exactly as sound.rs emit_commands,
+// MML through mml_parser.rs / old_mml_parser.rs.
+enum {
+    PX_CMD_TEMPO,         // u = clocks per tick
+    PX_CMD_QUANTIZE,      // f = gate ratio
+    PX_CMD_TONE,          // u = tone
+    PX_CMD_VOLUME,        // f = level
+    PX_CMD_TRANSPOSE,     // f = semitones
+    PX_CMD_DETUNE,        // f = semitones
+    PX_CMD_ENVELOPE,      // u = slot (0 = off)
+    PX_CMD_ENVELOPE_SET,  // u = slot, f = initial level, seg/nseg = segments
+    PX_CMD_VIBRATO,       // u = slot
+    PX_CMD_VIBRATO_SET,   // u = slot, ticks = delay, period, f = depth (semitones)
+    PX_CMD_GLIDE,         // u = slot
+    PX_CMD_GLIDE_SET,     // u = slot, f = offset (NAN = auto), ticks = duration (PX_AUTO)
+    PX_CMD_NOTE,          // u = MIDI note, ticks = duration
+    PX_CMD_REST,          // ticks = duration
+    PX_CMD_REPEAT_START,
+    PX_CMD_REPEAT_END,    // u = play count (0 = forever)
+};
 
 typedef struct {
-    int8_t note;         // -1 = rest
-    uint8_t tone, vol, fx;
-} px_note_ev;
+    uint32_t ticks;
+    float level;
+} px_env_seg;
 
 typedef struct {
-    px_note_ev* ev;      // malloc'd, owned by the channel once played
-    int n;
-    int speed;           // ticks per note, 120 ticks per second
+    uint8_t type;
+    uint32_t u;
+    uint32_t ticks;
+    uint32_t period;
+    uint32_t seg, nseg;   // envelope segments in the sound's segment pool
+    float f;
+} px_cmd;
+
+typedef struct {
+    px_cmd* cmds;
+    int ncmd, capcmd;
+    px_env_seg* segs;
+    int nseg, capseg;
+    int pcm;              // PCM handle, -1 = none
+    bool empty;           // nothing to play (no notes, no MML commands, no PCM)
 } px_snd;
 
+// sound.c
+void px_snd_init(px_snd* s);
+void px_snd_free(px_snd* s);
+// tone_modes: mode of each of the n_tones tones (0 wavetable, 1/2 noise).
+bool px_snd_from_legacy(px_snd* s, const int* notes, int nn, const int* tones, int nt,
+                        const int* vols, int nv, const int* fxs, int nf, int speed,
+                        const int* tone_modes, int n_tones);
+// force_old: the old syntax (Sound.old_mml); otherwise code containing 'x',
+// 'X' or '~' is old syntax, as Sound.mml decides upstream.
+bool px_snd_from_mml(px_snd* s, const char* code, bool force_old, const int* tone_modes,
+                     int n_tones, char* err, size_t errlen);
+void px_snd_from_pcm(px_snd* s, int handle);
+// Total clocks, false when the sound repeats forever.
+bool px_snd_total_clocks(const px_snd* s, uint64_t* clocks);
+uint32_t px_bpm_to_clocks_per_tick(uint32_t bpm);
+
+// PCM: WAV decoded to mono 16-bit at PX_AUDIO_RATE (pcm_decoder.rs).
+int  px_pcm_load(const char* path, char* err, size_t errlen);   // handle with one reference
+void px_pcm_ref(int handle);
+void px_pcm_unref(int handle);
+const int16_t* px_pcm_samples(int handle, uint32_t* n);
+void px_pcm_shutdown(void);
+
+// audio.c
 void px_audio_init(bool enabled);
 void px_audio_shutdown(void);
 void px_audio_set_tone(int i, int mode, const uint32_t* table, int len, int sample_bits, float gain);
-// Takes ownership of `snds` (malloc'd array) and each ev array in it.
-void px_audio_play(int ch, px_snd* snds, int n, float sec, bool loop, bool resume,
-                   float gain, float detune);
+int  px_audio_tone_mode(int i);
+void px_audio_set_channel(int ch, float gain, int detune_cents);
+// Takes ownership of `snds` (malloc'd array of n compiled sounds).
+void px_audio_play(int ch, px_snd* snds, int n, float sec, bool loop, bool resume);
 void px_audio_stop(int ch);          // -1 = all channels
 bool px_audio_pos(int ch, int* sound_index, float* sec);
 void px_audio_service(void);

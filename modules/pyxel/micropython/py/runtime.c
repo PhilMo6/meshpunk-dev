@@ -705,7 +705,8 @@ mp_obj_t mp_call_function_2(mp_obj_t fun, mp_obj_t arg1, mp_obj_t arg2) {
 }
 
 // args contains, eg: arg0  arg1  key0  value0  key1  value1
-mp_obj_t mp_call_function_n_kw(mp_obj_t fun_in, size_t n_args, size_t n_kw, const mp_obj_t *args) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+PX_IRAM mp_obj_t mp_call_function_n_kw(mp_obj_t fun_in, size_t n_args, size_t n_kw, const mp_obj_t *args) {
     // TODO improve this: fun object can specify its type and we parse here the arguments,
     // passing to the function arrays of fixed and keyword arguments
 
@@ -729,7 +730,8 @@ mp_obj_t mp_call_function_n_kw(mp_obj_t fun_in, size_t n_args, size_t n_kw, cons
 
 // args contains: fun  self/NULL  arg(0)  ...  arg(n_args-2)  arg(n_args-1)  kw_key(0)  kw_val(0)  ... kw_key(n_kw-1)  kw_val(n_kw-1)
 // if n_args==0 and n_kw==0 then there are only fun and self/NULL
-mp_obj_t mp_call_method_n_kw(size_t n_args, size_t n_kw, const mp_obj_t *args) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+PX_IRAM mp_obj_t mp_call_method_n_kw(size_t n_args, size_t n_kw, const mp_obj_t *args) {
     DEBUG_OP_printf("call method (fun=%p, self=%p, n_args=" UINT_FMT ", n_kw=" UINT_FMT ", args=%p)\n", args[0], args[1], n_args, n_kw, args);
     int adjust = (args[1] == MP_OBJ_NULL) ? 0 : 1;
     return mp_call_function_n_kw(args[0], n_args + adjust, n_kw, args + 2 - adjust);
@@ -1054,7 +1056,8 @@ too_short:
     #endif
 }
 
-mp_obj_t mp_load_attr(mp_obj_t base, qstr attr) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+PX_IRAM mp_obj_t mp_load_attr(mp_obj_t base, qstr attr) {
     DEBUG_OP_printf("load attr %p.%s\n", base, qstr_str(attr));
     // use load_method
     mp_obj_t dest[2];
@@ -1117,7 +1120,8 @@ static mp_obj_t mp_obj_new_checked_fun(const mp_obj_type_t *type, mp_obj_t fun) 
 // Conversion means dealing with static/class methods, callables, and values.
 // see http://docs.python.org/3/howto/descriptor.html
 // and also https://mail.python.org/pipermail/python-dev/2015-March/138950.html
-void mp_convert_member_lookup(mp_obj_t self, const mp_obj_type_t *type, mp_obj_t member, mp_obj_t *dest) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+PX_IRAM void mp_convert_member_lookup(mp_obj_t self, const mp_obj_type_t *type, mp_obj_t member, mp_obj_t *dest) {
     if (mp_obj_is_obj(member)) {
         const mp_obj_type_t *m_type = ((mp_obj_base_t *)MP_OBJ_TO_PTR(member))->type;
         if (m_type->flags & MP_TYPE_FLAG_BINDS_SELF) {
@@ -1175,7 +1179,8 @@ void mp_convert_member_lookup(mp_obj_t self, const mp_obj_type_t *type, mp_obj_t
 // no attribute found, returns:     dest[0] == MP_OBJ_NULL, dest[1] == MP_OBJ_NULL
 // normal attribute found, returns: dest[0] == <attribute>, dest[1] == MP_OBJ_NULL
 // method attribute found, returns: dest[0] == <method>,    dest[1] == <self>
-void mp_load_method_maybe(mp_obj_t obj, qstr attr, mp_obj_t *dest) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+PX_IRAM void mp_load_method_maybe(mp_obj_t obj, qstr attr, mp_obj_t *dest) {
     // clear output to indicate no attribute/method found yet
     dest[0] = MP_OBJ_NULL;
     dest[1] = MP_OBJ_NULL;
@@ -1225,7 +1230,8 @@ void mp_load_method_maybe(mp_obj_t obj, qstr attr, mp_obj_t *dest) {
     }
 }
 
-void mp_load_method(mp_obj_t base, qstr attr, mp_obj_t *dest) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+PX_IRAM void mp_load_method(mp_obj_t base, qstr attr, mp_obj_t *dest) {
     DEBUG_OP_printf("load method %p.%s\n", base, qstr_str(attr));
 
     mp_load_method_maybe(base, attr, dest);

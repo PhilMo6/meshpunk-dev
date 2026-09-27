@@ -187,7 +187,8 @@ void qstr_init(void) {
     #endif
 }
 
-static const qstr_pool_t *find_qstr(qstr *q) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+static PX_IRAM const qstr_pool_t *find_qstr(qstr *q) {
     // search pool for this qstr
     // total_prev_len==0 in the final pool, so the loop will always terminate
     const qstr_pool_t *pool = MP_STATE_VM(last_pool);
@@ -390,7 +391,8 @@ qstr qstr_from_strn_static(const char *str, size_t len) {
 }
 #endif
 
-mp_uint_t qstr_hash(qstr q) {
+// MESHPUNK: internal SRAM (PX_IRAM, mpconfigport.h).
+PX_IRAM mp_uint_t qstr_hash(qstr q) {
     const qstr_pool_t *pool = find_qstr(&q);
     #if MICROPY_QSTR_BYTES_IN_HASH
     return pool->hashes[q];

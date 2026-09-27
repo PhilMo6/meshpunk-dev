@@ -5,6 +5,10 @@ Plays games made with Pyxel, the Python retro game engine. It runs the game's ow
 
 GAMES
 .pyxapp files, or a folder holding a main.py, in /pyxel on the SD card.
+]]
+
+if caps.trackball then
+    body = body .. [[
 
 DEFAULT KEYS
 The keys drive a virtual gamepad, which every Pyxel game reads.
@@ -14,13 +18,41 @@ B - X
 X - C,  Y - V
 Start - P
 Quit - y
+]]
+else
+    body = body .. [[
+
+DEFAULT KEYS]] .. (caps.keyboard and "" or " (USB keyboard)") .. [[
+
+The keys drive a virtual gamepad, which every Pyxel game reads.
+D-pad - W A S D
+A - Space
+B - X
+X - C,  Y - V
+Start - P
+Quit - y
+]]
+end
+
+body = body .. [[
 
 Keys that are not bound type straight into the game, so Enter and the letter keys a game names on screen still work. Change any binding in Controls.
+]]
+
+if caps.trackball then
+    body = body .. [[
 
 In games that show a mouse pointer, the trackball moves the pointer and its click is the left mouse button.
+]]
+end
+
+body = body .. [[
 
 SOUND
-The Sound button turns game sound on or off. Music written in MML is not supported yet.
+The Sound button turns game sound on or off.
+
+SAVES
+Games that save high scores or progress keep them in /pyxel/save on the SD card. A game that saves into its own .pyxapp file keeps that data only until it closes.
 ]]
 
 if not caps.keyboard then

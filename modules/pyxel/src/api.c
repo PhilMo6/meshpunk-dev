@@ -4,6 +4,7 @@
 // Names are interned at runtime (qstr_from_str) rather than listed in genhdr,
 // so this file needs no MicroPython code generation step.
 
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,8 +34,8 @@ px_state_t px;
     X(input_keys) X(input_text) \
     X(title) X(fps) X(quit_key) X(display_scale) X(capture_scale) X(capture_sec) X(headless) \
     X(exclude_images) X(exclude_tilemaps) X(exclude_sounds) X(exclude_musics) X(include_colors) \
-    X(hold) X(repeat) X(colkey) X(tilekey) X(rotate) X(scale) X(font) \
-    X(channels) X(sample_bits) X(wavetable) X(gain) X(detune) X(_mml) X(_pcm)
+    X(hold) X(repeat) X(colkey) X(tilekey) X(rotate) X(scale) X(font) X(fov) \
+    X(sample_bits) X(wavetable) X(gain) X(_mml) X(_mml_old) X(_pcm) X(_font) X(_WFile)
 
 #define QENUM(n) Q_##n,
 #define QNAME(n) #n,
@@ -77,6 +78,27 @@ static void raise_msg(const char* msg) {
     mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("%s"), msg);
 }
 
+// OSError for an errno.h value from vfs.c, as CPython's subclass where one
+// exists, with args (errno, "<description>: '<path>'").
+static MP_NORETURN void raise_file_error(int e, const char* path) {
+    const mp_obj_type_t* type = &mp_type_OSError;
+    const char* what;
+    switch (e) {
+    case ENOENT: type = &mp_type_FileNotFoundError; what = "No such file or directory"; break;
+    case EEXIST: type = &mp_type_FileExistsError; what = "File exists"; break;
+    case EISDIR: type = &mp_type_IsADirectoryError; what = "Is a directory"; break;
+    case EROFS:  what = "Read-only file system"; break;
+    case EMFILE: what = "Too many open files"; break;
+    case ENOMEM: what = "Out of memory"; break;
+    case EBADF:  what = "Bad file descriptor"; break;
+    default:     what = "Input/output error"; break;
+    }
+    char msg[320];
+    snprintf(msg, sizeof(msg), "%s: '%s'", what, path);
+    mp_obj_t args[2] = { MP_OBJ_NEW_SMALL_INT(e), mp_obj_new_str(msg, strlen(msg)) };
+    nlr_raise(mp_obj_exception_make_new(type, 2, 0, args));
+}
+
 #define QOBJ_IDX(q) MP_OBJ_NEW_QSTR(Q[q])
 
 static void dict_set(int q, mp_obj_t v) {
@@ -99,7 +121,10 @@ static uint16_t tile_of(mp_obj_t o) {
     mp_obj_t* items;
     mp_obj_get_array(o, &n, &items);
     if (n != 2) mp_raise_ValueError(MP_ERROR_TEXT("tile must be (image_tx, image_ty)"));
-    return PX_TILE(I(items[0]), I(items[1]));
+    int tx = I(items[0]), ty = I(items[1]);
+    if (tx < 0 || ty < 0 || tx > 255 || ty > 255)
+        mp_raise_ValueError(MP_ERROR_TEXT("tile coordinates must be 0-255"));
+    return PX_TILE(tx, ty);
 }
 
 // ---------------------------------------------------------------------------
@@ -133,11 +158,24 @@ static void* buf_ptr(mp_obj_t o, size_t min_len) {
     return bi.buf;
 }
 
+// A number names an entry of pyxel.images / pyxel.tilemaps, which a game may
+// have replaced with its own object (as upstream, where the lists hold the
+// objects the number resolves to).
+static mp_obj_t list_entry(int q, mp_obj_t index) {
+    mp_obj_t lst = dict_get(q);
+    return lst == MP_OBJ_NULL ? MP_OBJ_NULL : mp_obj_subscr(lst, index, MP_OBJ_SENTINEL);
+}
+
 static px_image* resolve_image(mp_obj_t o) {
     if (mp_obj_is_small_int(o)) {
-        px_image* img = px_bank_image(MP_OBJ_SMALL_INT_VALUE(o));
-        if (!img) mp_raise_ValueError(MP_ERROR_TEXT("image bank out of range"));
-        return img;
+        mp_obj_t e = list_entry(Q_images, o);
+        if (e != MP_OBJ_NULL) {
+            o = e;
+        } else {
+            px_image* img = px_bank_image(MP_OBJ_SMALL_INT_VALUE(o));
+            if (!img) mp_raise_ValueError(MP_ERROR_TEXT("image bank out of range"));
+            return img;
+        }
     }
     mp_obj_t h = mp_load_attr(o, Q[Q__h]);
     if (h != mp_const_none) {
@@ -155,14 +193,15 @@ static px_image* resolve_image(mp_obj_t o) {
 
 static px_tilemap* resolve_tilemap(mp_obj_t o, mp_obj_t* obj_out) {
     if (mp_obj_is_small_int(o)) {
-        int i = MP_OBJ_SMALL_INT_VALUE(o);
-        px_tilemap* tm = px_bank_tilemap(i);
-        if (!tm) mp_raise_ValueError(MP_ERROR_TEXT("tilemap out of range"));
-        if (obj_out) {
-            mp_obj_t lst = dict_get(Q_tilemaps);
-            *obj_out = lst ? mp_obj_subscr(lst, o, MP_OBJ_SENTINEL) : MP_OBJ_NULL;
+        mp_obj_t e = list_entry(Q_tilemaps, o);
+        if (e != MP_OBJ_NULL) {
+            o = e;
+        } else {
+            px_tilemap* tm = px_bank_tilemap(MP_OBJ_SMALL_INT_VALUE(o));
+            if (!tm) mp_raise_ValueError(MP_ERROR_TEXT("tilemap out of range"));
+            if (obj_out) *obj_out = MP_OBJ_NULL;
+            return tm;
         }
-        return tm;
     }
     if (obj_out) *obj_out = o;
     mp_obj_t h = mp_load_attr(o, Q[Q__h]);
@@ -180,11 +219,7 @@ static px_tilemap* resolve_tilemap(mp_obj_t o, mp_obj_t* obj_out) {
 // The image a tilemap draws from: its bank index, or the Image object the
 // game assigned to imgsrc (kept on the Python object as _imgsrc_obj).
 static px_image* tilemap_source(px_tilemap* tm, mp_obj_t tm_obj) {
-    if (tm->imgsrc >= 0) {
-        px_image* img = px_bank_image(tm->imgsrc);
-        if (!img) mp_raise_ValueError(MP_ERROR_TEXT("tilemap imgsrc out of range"));
-        return img;
-    }
+    if (tm->imgsrc >= 0) return resolve_image(MP_OBJ_NEW_SMALL_INT(tm->imgsrc));
     if (tm_obj == MP_OBJ_NULL) mp_raise_ValueError(MP_ERROR_TEXT("tilemap has no image source"));
     return resolve_image(mp_load_attr(tm_obj, Q[Q__imgsrc_obj]));
 }
@@ -278,10 +313,28 @@ static void state_alloc(void) {
 }
 
 void px_api_shutdown(void) {
+    px_wfile_close_all();
     px_audio_shutdown();
+    px_font_shutdown();
     state_free();
     s_pyxel_dict = NULL;
 }
+
+// Font(filename) handle / Font.text_width(s)
+static mp_obj_t f_font_load(mp_obj_t fn) {
+    char err[160];
+    int h = px_font_load(mp_obj_str_get_str(fn), err, sizeof(err));
+    if (h < 0) raise_msg(err);
+    return MP_OBJ_NEW_SMALL_INT(h);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(f_font_load_obj, f_font_load);
+
+static mp_obj_t f_font_text_width(mp_obj_t h, mp_obj_t s) {
+    size_t len;
+    const char* str = mp_obj_str_get_data(s, &len);
+    return MP_OBJ_NEW_SMALL_INT(px_font_text_width((int)mp_obj_get_int(h), str, len));
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(f_font_text_width_obj, f_font_text_width);
 
 // ---------------------------------------------------------------------------
 // Frame loop (system.rs)
@@ -366,6 +419,11 @@ static void run_draw(mp_obj_t draw) {
 
 #define MAX_FRAME_DELAY_MS 100
 
+// Frame waits sleep at most this long at a time, with px_audio_service()
+// between sleeps: the audio ring runs 75 ms ahead of real time, so a single
+// sleep for a whole frame (100 ms at fps=10) lets it run dry.
+#define SLEEP_SLICE_MS 10
+
 static mp_obj_t f_run(mp_obj_t update, mp_obj_t draw) {
     need_init();
     uint32_t frame_us = 1000000u / (uint32_t)px.fps;
@@ -377,7 +435,10 @@ static mp_obj_t f_run(mp_obj_t update, mp_obj_t draw) {
         int32_t wait = (int32_t)(next - now);
         if (wait > 0) {
             px_audio_service();
-            if (wait >= 2000) host_sleep_ms((uint32_t)wait / 1000 - 1);
+            if (wait >= 2000) {
+                uint32_t ms = (uint32_t)wait / 1000 - 1;
+                host_sleep_ms(ms < SLEEP_SLICE_MS ? ms : SLEEP_SLICE_MS);
+            }
             continue;
         }
         uint32_t delta_us = now - last;
@@ -409,8 +470,12 @@ static mp_obj_t f_flip(void) {
     px_audio_service();
     uint32_t now = host_get_ticks_us();
     if ((int32_t)(s_flip_next - now) > 0) {
-        uint32_t wait = s_flip_next - now;
-        if (wait >= 1000) host_sleep_ms(wait / 1000);
+        int32_t wait;
+        while ((wait = (int32_t)(s_flip_next - host_get_ticks_us())) >= 1000) {
+            uint32_t ms = (uint32_t)wait / 1000;
+            host_sleep_ms(ms < SLEEP_SLICE_MS ? ms : SLEEP_SLICE_MS);
+            px_audio_service();
+        }
         s_flip_next += frame_us;
     } else {
         s_flip_next = now + frame_us;
@@ -509,13 +574,6 @@ static mp_obj_t f_bind(mp_obj_t globals) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(f_bind_obj, f_bind);
 
-static mp_obj_t f_unsupported(size_t n, const mp_obj_t* a, mp_map_t* kw) {
-    (void)n; (void)a; (void)kw;
-    mp_raise_NotImplementedError(MP_ERROR_TEXT("not supported by the Meshpunk Pyxel player"));
-    return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_KW(f_unsupported_obj, 0, f_unsupported);
-
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
@@ -593,6 +651,78 @@ static mp_obj_t f_load_pal(mp_obj_t fn) {
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(f_load_pal_obj, f_load_pal);
+
+// A pyxel.tilemaps entry for saving. An unused bank has no tile data yet;
+// px_res_build writes that as all zero tiles.
+static px_tilemap* save_tilemap(mp_obj_t o) {
+    mp_obj_t h = mp_load_attr(o, Q[Q__h]);
+    if (h == mp_const_none) return resolve_tilemap(o, NULL);
+    int i = I(h);
+    if (i < 0 || i >= PX_NUM_TILEMAPS) mp_raise_ValueError(MP_ERROR_TEXT("tilemap out of range"));
+    return px.tilemaps[i];
+}
+
+// save(filename, images, tilemaps, sounds_toml, musics_toml): pyxel.save
+// passes an empty list for an excluded image/tilemap bank and "" for
+// excluded sounds/musics.
+static mp_obj_t f_save(size_t n, const mp_obj_t* a) {
+    (void)n;
+    need_init();
+    const char* path = mp_obj_str_get_str(a[0]);
+    size_t ni, nt;
+    mp_obj_t* io;
+    mp_obj_t* to;
+    mp_obj_get_array(a[1], &ni, &io);
+    mp_obj_get_array(a[2], &nt, &to);
+    px_image** imgs = m_new(px_image*, ni + 1);
+    px_tilemap** tms = m_new(px_tilemap*, nt + 1);
+    for (size_t i = 0; i < ni; i++) {
+        imgs[i] = resolve_image(io[i]);
+        if (imgs[i]->cv.w <= 0 || imgs[i]->cv.h <= 0)
+            mp_raise_ValueError(MP_ERROR_TEXT("cannot save an image with no pixels"));
+    }
+    for (size_t i = 0; i < nt; i++) {
+        tms[i] = save_tilemap(to[i]);
+        if (tms[i]->cv.w <= 0 || tms[i]->cv.h <= 0)
+            mp_raise_ValueError(MP_ERROR_TEXT("cannot save a tilemap with no tiles"));
+    }
+    size_t zn = 0;
+    unsigned char* z = px_res_build(imgs, (int)ni, tms, (int)nt, mp_obj_str_get_str(a[3]),
+                                    mp_obj_str_get_str(a[4]), &zn);
+    m_del(px_image*, imgs, ni + 1);
+    m_del(px_tilemap*, tms, nt + 1);
+    if (!z) mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("resource file"));
+    int e = px_vfs_write(path, z, zn);
+    free(z);
+    if (e) raise_file_error(e, path);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(f_save_obj, 5, 5, f_save);
+
+// Files open()ed for writing (pyxel._WFile); h is the px_wfile handle.
+static mp_obj_t f_file_write(mp_obj_t h, mp_obj_t data) {
+    mp_buffer_info_t bi;
+    mp_get_buffer_raise(data, &bi, MP_BUFFER_READ);
+    int e = px_wfile_write(I(h), bi.buf, bi.len);
+    if (e == ENOMEM) mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("file contents"));
+    if (e) raise_file_error(e, "");
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(f_file_write_obj, f_file_write);
+
+static mp_obj_t f_file_flush(mp_obj_t h, mp_obj_t name) {
+    int e = px_wfile_flush(I(h));
+    if (e) raise_file_error(e, mp_obj_str_get_str(name));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(f_file_flush_obj, f_file_flush);
+
+static mp_obj_t f_file_close(mp_obj_t h, mp_obj_t name) {
+    int e = px_wfile_close(I(h));
+    if (e) raise_file_error(e, mp_obj_str_get_str(name));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(f_file_close_obj, f_file_close);
 
 // ---------------------------------------------------------------------------
 // Input
@@ -738,11 +868,16 @@ static mp_obj_t g_bltm(px_image* d, size_t n, const mp_obj_t* a, mp_map_t* kw) {
 // text(x, y, s, col, font=None)
 static mp_obj_t g_text(px_image* d, size_t n, const mp_obj_t* a, mp_map_t* kw) {
     if (n < 4) mp_raise_TypeError(MP_ERROR_TEXT("text() needs x, y, s, col"));
-    if (argkw(n, a, kw, 4, Q_font, mp_const_none) != mp_const_none)
-        mp_raise_NotImplementedError(MP_ERROR_TEXT("custom fonts are not supported yet"));
+    mp_obj_t font = argkw(n, a, kw, 4, Q_font, mp_const_none);
     size_t len;
     const char* s = mp_obj_str_get_data(a[2], &len);
-    px_image_text(d, F(a[0]), F(a[1]), s, len, I(a[3]));
+    if (font != mp_const_none) {
+        int h = I(mp_load_attr(font, Q[Q__font]));
+        if (!px_font_valid(h)) mp_raise_ValueError(MP_ERROR_TEXT("invalid font"));
+        px_font_draw(h, d, F(a[0]), F(a[1]), s, len, I(a[3]));
+    } else {
+        px_image_text(d, F(a[0]), F(a[1]), s, len, I(a[3]));
+    }
     return mp_const_none;
 }
 
@@ -755,6 +890,45 @@ static mp_obj_t g_text(px_image* d, size_t n, const mp_obj_t* a, mp_map_t* kw) {
 BIND_KW(blt, 7)
 BIND_KW(bltm, 7)
 BIND_KW(text, 4)
+
+static void vec3(mp_obj_t o, float out[3]) {
+    size_t n;
+    mp_obj_t* items;
+    mp_obj_get_array(o, &n, &items);
+    if (n != 3) mp_raise_ValueError(MP_ERROR_TEXT("expected (x, y, z)"));
+    for (int i = 0; i < 3; i++) out[i] = F(items[i]);
+}
+
+// blt3d(x, y, w, h, img, pos, rot, fov=60, colkey=None)
+static mp_obj_t g_blt3d(px_image* d, size_t n, const mp_obj_t* a, mp_map_t* kw) {
+    if (n < 7) mp_raise_TypeError(MP_ERROR_TEXT("blt3d() needs x, y, w, h, img, pos, rot"));
+    float pos[3], rot[3];
+    vec3(a[5], pos);
+    vec3(a[6], rot);
+    px_image* src = resolve_image(a[4]);
+    px_image_blt3d(d, F(a[0]), F(a[1]), F(a[2]), F(a[3]), src, pos, rot,
+                   optf(argkw(n, a, kw, 7, Q_fov, mp_const_none), 60.0f),
+                   colkey_of(argkw(n, a, kw, 8, Q_colkey, mp_const_none)));
+    return mp_const_none;
+}
+
+// bltm3d(x, y, w, h, tm, pos, rot, fov=60, colkey=None)
+static mp_obj_t g_bltm3d(px_image* d, size_t n, const mp_obj_t* a, mp_map_t* kw) {
+    if (n < 7) mp_raise_TypeError(MP_ERROR_TEXT("bltm3d() needs x, y, w, h, tm, pos, rot"));
+    float pos[3], rot[3];
+    vec3(a[5], pos);
+    vec3(a[6], rot);
+    mp_obj_t tm_obj = MP_OBJ_NULL;
+    px_tilemap* tm = resolve_tilemap(a[4], &tm_obj);
+    px_image* src = tilemap_source(tm, tm_obj);
+    px_image_bltm3d(d, F(a[0]), F(a[1]), F(a[2]), F(a[3]), tm, src, pos, rot,
+                    optf(argkw(n, a, kw, 7, Q_fov, mp_const_none), 60.0f),
+                    colkey_of(argkw(n, a, kw, 8, Q_colkey, mp_const_none)));
+    return mp_const_none;
+}
+
+BIND_KW(blt3d, 7)
+BIND_KW(bltm3d, 7)
 
 // ---------------------------------------------------------------------------
 // Image objects
@@ -829,6 +1003,7 @@ static mp_obj_t f_i_load(size_t n, const mp_obj_t* a) {
     px_image* d = resolve_image(a[0]);
     bool include = n > 4 && mp_obj_is_true(a[4]);
     char err[160];
+    colors_from_python();
     px_image* img = px_image_decode_png(mp_obj_str_get_str(a[3]), include, err, sizeof(err));
     if (!img) raise_msg(err);
     px_image_blt(d, (float)I(a[1]), (float)I(a[2]), img, 0.0f, 0.0f,
@@ -842,6 +1017,7 @@ static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(f_i_load_obj, 4, 5, f_i_load);
 // Image.from_image(filename, include_colors) -> (st, buf) for a new Image.
 static mp_obj_t f_image_from_file(mp_obj_t fn, mp_obj_t inc) {
     char err[160];
+    colors_from_python();
     px_image* img = px_image_decode_png(mp_obj_str_get_str(fn), mp_obj_is_true(inc), err, sizeof(err));
     if (!img) raise_msg(err);
     void *st, *buf;
@@ -866,6 +1042,62 @@ static mp_obj_t f_tilemap_alloc(mp_obj_t wo, mp_obj_t ho, mp_obj_t src) {
     return pair;
 }
 static MP_DEFINE_CONST_FUN_OBJ_3(f_tilemap_alloc_obj, f_tilemap_alloc);
+
+// Tilemap.from_tmx(filename, layer) -> (st, buf) for a new Tilemap on bank 0.
+static mp_obj_t f_tilemap_from_tmx(mp_obj_t fn, mp_obj_t layer) {
+    char err[160];
+    int w = 0, h = 0;
+    uint16_t* tiles = px_tmx_load(mp_obj_str_get_str(fn), I(layer), &w, &h, err, sizeof(err));
+    if (!tiles) raise_msg(err);
+    void *st, *buf;
+    nlr_buf_t nlr;
+    mp_obj_t pair = MP_OBJ_NULL;
+    if (nlr_push(&nlr) == 0) {
+        pair = alloc_pair(sizeof(px_tilemap), (size_t)w * (size_t)h * sizeof(uint16_t), &st, &buf);
+        nlr_pop();
+    } else {
+        free(tiles);
+        nlr_jump(nlr.ret_val);
+    }
+    memcpy(buf, tiles, (size_t)w * (size_t)h * sizeof(uint16_t));
+    free(tiles);
+    px_tilemap_init((px_tilemap*)st, w, h, (uint16_t*)buf, 0);
+    return pair;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(f_tilemap_from_tmx_obj, f_tilemap_from_tmx);
+
+// Tilemap.load(x, y, filename, layer): the TMX layer drawn into this tilemap at (x, y).
+static mp_obj_t t_load(size_t n, const mp_obj_t* a) {
+    (void)n;
+    px_tilemap* tm = resolve_tilemap(a[0], NULL);
+    char err[160];
+    int w = 0, h = 0;
+    uint16_t* tiles = px_tmx_load(mp_obj_str_get_str(a[3]), I(a[4]), &w, &h, err, sizeof(err));
+    if (!tiles) raise_msg(err);
+    px_canvas src;
+    px_canvas_init(&src, w, h, tiles);
+    px_blit_u16(&tm->cv, (float)I(a[1]), (float)I(a[2]), &src, 0.0f, 0.0f, (float)w, (float)h, -1, NULL);
+    free(tiles);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(t_load_obj, 5, 5, t_load);
+
+// Tilemap.collide(x, y, w, h, dx, dy, walls) -> (dx, dy)
+static mp_obj_t t_collide(size_t n, const mp_obj_t* a) {
+    (void)n;
+    px_tilemap* tm = resolve_tilemap(a[0], NULL);
+    size_t nw;
+    mp_obj_t* items;
+    mp_obj_get_array(a[7], &nw, &items);
+    uint16_t walls[64];
+    if (nw > 64) mp_raise_ValueError(MP_ERROR_TEXT("at most 64 wall tiles"));
+    for (size_t i = 0; i < nw; i++) walls[i] = tile_of(items[i]);
+    float dx = F(a[5]), dy = F(a[6]);
+    px_tilemap_collide(tm, F(a[1]), F(a[2]), F(a[3]), F(a[4]), &dx, &dy, walls, (int)nw);
+    mp_obj_t out[2] = { mp_obj_new_float(dx), mp_obj_new_float(dy) };
+    return mp_obj_new_tuple(2, out);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(t_collide_obj, 8, 8, t_collide);
 
 static mp_obj_t f_t_size(mp_obj_t o) {
     px_tilemap* tm = resolve_tilemap(o, NULL);
@@ -1142,36 +1374,131 @@ static void compile_tones(void) {
     }
 }
 
-// Element i of `lst` cycled, or `def` when the list is empty (sound.rs cycled_or).
-static int cycled(size_t n, const mp_obj_t* items, size_t i, int def) {
-    return n ? I(items[i % n]) : def;
+static void tone_modes(int* modes) {
+    for (int i = 0; i < PX_NUM_TONES; i++) modes[i] = px_audio_tone_mode(i);
 }
 
+// A Python list of ints as a malloc'd C array (freed by the caller).
+static int* int_array(mp_obj_t lst, int* n_out) {
+    size_t n;
+    mp_obj_t* items;
+    mp_obj_get_array(lst, &n, &items);
+    int* v = (int*)malloc(sizeof(int) * (n ? n : 1));
+    if (!v) mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("sound"));
+    for (size_t i = 0; i < n; i++) v[i] = (int)mp_obj_get_int(items[i]);
+    *n_out = (int)n;
+    return v;
+}
+
+static void compile_mml(const char* code, bool old, px_snd* out) {
+    int modes[PX_NUM_TONES];
+    tone_modes(modes);
+    char err[160];
+    err[0] = 0;
+    if (!px_snd_from_mml(out, code, old, modes, PX_NUM_TONES, err, sizeof(err))) raise_msg(err);
+}
+
+// A Sound object (pyxel.py) as a command list: its PCM, its MML, or its notes.
 static void compile_sound(mp_obj_t s, px_snd* out) {
-    if (attr(s, Q__mml) != mp_const_none)
-        mp_raise_NotImplementedError(MP_ERROR_TEXT("MML sounds are not supported yet"));
-    if (attr(s, Q__pcm) != mp_const_none)
-        mp_raise_NotImplementedError(MP_ERROR_TEXT("PCM sounds are not supported yet"));
-    size_t nn, nt, nv, ne;
-    mp_obj_t *notes, *tones, *vols, *fxs;
-    mp_obj_get_array(attr(s, Q_notes), &nn, &notes);
-    mp_obj_get_array(attr(s, Q_tones), &nt, &tones);
-    mp_obj_get_array(attr(s, Q_volumes), &nv, &vols);
-    mp_obj_get_array(attr(s, Q_effects), &ne, &fxs);
-    out->speed = I(attr(s, Q_speed));
-    if (out->speed <= 0) mp_raise_ValueError(MP_ERROR_TEXT("speed must be greater than 0"));
-    out->n = (int)nn;
-    out->ev = (px_note_ev*)malloc(sizeof(px_note_ev) * (nn ? nn : 1));
-    if (!out->ev) mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("sound"));
-    for (size_t i = 0; i < nn; i++) {
-        int note = I(notes[i]);
-        px_note_ev* e = &out->ev[i];
-        e->note = (int8_t)(note < 0 ? -1 : note > 127 ? 127 : note);
-        e->tone = (uint8_t)cycled(nt, tones, i, 0);
-        e->vol = (uint8_t)cycled(nv, vols, i, 7);
-        e->fx = (uint8_t)cycled(ne, fxs, i, 0);
+    mp_obj_t pcm = attr(s, Q__pcm);
+    if (pcm != mp_const_none) {
+        px_snd_from_pcm(out, I(pcm));
+        return;
+    }
+    mp_obj_t mml = attr(s, Q__mml);
+    if (mml != mp_const_none) {
+        compile_mml(mp_obj_str_get_str(mml), mp_obj_is_true(attr(s, Q__mml_old)), out);
+        return;
+    }
+    int speed = I(attr(s, Q_speed));
+    if (speed <= 0) mp_raise_ValueError(MP_ERROR_TEXT("speed must be greater than 0"));
+    int nn = 0, nt = 0, nv = 0, nf = 0;
+    int* notes = int_array(attr(s, Q_notes), &nn);
+    int* tones = NULL;
+    int* vols = NULL;
+    int* fxs = NULL;
+    nlr_buf_t nlr;
+    if (nlr_push(&nlr) == 0) {
+        tones = int_array(attr(s, Q_tones), &nt);
+        vols = int_array(attr(s, Q_volumes), &nv);
+        fxs = int_array(attr(s, Q_effects), &nf);
+        nlr_pop();
+    } else {
+        free(notes);
+        free(tones);
+        free(vols);
+        nlr_jump(nlr.ret_val);
+    }
+    int modes[PX_NUM_TONES];
+    tone_modes(modes);
+    bool ok = px_snd_from_legacy(out, notes, nn, tones, nt, vols, nv, fxs, nf, speed, modes, PX_NUM_TONES);
+    free(notes);
+    free(tones);
+    free(vols);
+    free(fxs);
+    if (!ok) {
+        px_snd_free(out);
+        mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("sound"));
     }
 }
+
+static px_snd* compile_sounds(size_t ns, const mp_obj_t* sounds) {
+    compile_tones();
+    px_snd* snds = (px_snd*)calloc(ns ? ns : 1, sizeof(px_snd));
+    if (!snds) mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("sound"));
+    for (size_t i = 0; i < ns; i++) px_snd_init(&snds[i]);
+    nlr_buf_t nlr;
+    if (nlr_push(&nlr) == 0) {
+        for (size_t i = 0; i < ns; i++) compile_sound(sounds[i], &snds[i]);
+        nlr_pop();
+    } else {
+        for (size_t i = 0; i < ns; i++) px_snd_free(&snds[i]);
+        free(snds);
+        nlr_jump(nlr.ret_val);
+    }
+    return snds;
+}
+
+// Sound.mml(code) validates at call time, as upstream parses it then.
+static mp_obj_t f_mml_check(mp_obj_t code, mp_obj_t old) {
+    px_snd s;
+    px_snd_init(&s);
+    compile_mml(mp_obj_str_get_str(code), mp_obj_is_true(old), &s);
+    px_snd_free(&s);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(f_mml_check_obj, f_mml_check);
+
+static mp_obj_t f_pcm_load(mp_obj_t fn) {
+    char err[160];
+    int h = px_pcm_load(mp_obj_str_get_str(fn), err, sizeof(err));
+    if (h < 0) raise_msg(err);
+    return MP_OBJ_NEW_SMALL_INT(h);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(f_pcm_load_obj, f_pcm_load);
+
+static mp_obj_t f_pcm_release(mp_obj_t h) {
+    px_pcm_unref(I(h));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(f_pcm_release_obj, f_pcm_release);
+
+// Sound.total_sec() for MML and PCM sounds (None when it repeats forever).
+static mp_obj_t f_sound_total_sec(mp_obj_t s) {
+    px_snd* snd = compile_sounds(1, &s);
+    uint64_t clocks = 0;
+    bool finite = px_snd_total_clocks(snd, &clocks);
+    px_snd_free(snd);
+    free(snd);
+    return finite ? mp_obj_new_float((mp_float_t)((double)clocks / PX_AUDIO_CLOCK_RATE)) : mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(f_sound_total_sec_obj, f_sound_total_sec);
+
+static mp_obj_t f_channel_set(mp_obj_t ch, mp_obj_t gain, mp_obj_t detune) {
+    px_audio_set_channel(I(ch), F(gain), I(detune));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_3(f_channel_set_obj, f_channel_set);
 
 // play(ch, [Sound...], sec, loop, resume): pyxel.py resolves every snd form.
 static mp_obj_t f_play(size_t n, const mp_obj_t* a) {
@@ -1184,26 +1511,8 @@ static mp_obj_t f_play(size_t n, const mp_obj_t* a) {
     mp_obj_t* sounds;
     mp_obj_get_array(a[1], &ns, &sounds);
     if (ns == 0) return mp_const_none;
-    compile_tones();
-    px_snd* snds = (px_snd*)calloc(ns, sizeof(px_snd));
-    if (!snds) mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("sound"));
-    nlr_buf_t nlr;
-    if (nlr_push(&nlr) == 0) {
-        for (size_t i = 0; i < ns; i++) compile_sound(sounds[i], &snds[i]);
-        nlr_pop();
-    } else {
-        for (size_t i = 0; i < ns; i++) free(snds[i].ev);
-        free(snds);
-        nlr_jump(nlr.ret_val);
-    }
-    float gain = 0.125f, detune = 0.0f;
-    mp_obj_t chans = dict_get(Q_channels);
-    if (chans != MP_OBJ_NULL) {
-        mp_obj_t c = mp_obj_subscr(chans, MP_OBJ_NEW_SMALL_INT(ch), MP_OBJ_SENTINEL);
-        gain = F(attr(c, Q_gain));
-        detune = F(attr(c, Q_detune));
-    }
-    px_audio_play(ch, snds, (int)ns, sec, mp_obj_is_true(a[3]), mp_obj_is_true(a[4]), gain, detune);
+    px_snd* snds = compile_sounds(ns, sounds);
+    px_audio_play(ch, snds, (int)ns, sec, mp_obj_is_true(a[3]), mp_obj_is_true(a[4]));
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(f_play_obj, 5, 5, f_play);
@@ -1242,8 +1551,9 @@ static const px_fn FUNCS[] = {
     { "screenshot", &f_window_noop_obj }, { "screencast", &f_window_noop_obj },
     { "reset_screencast", &f_window_noop_obj },
     { "load", &f_load_obj }, { "load_pal", &f_load_pal_obj },
-    { "save", &f_unsupported_obj }, { "save_pal", &f_unsupported_obj },
-    { "user_data_dir", &f_unsupported_obj },
+    { "save", &f_save_obj },
+    { "file_write", &f_file_write_obj }, { "file_flush", &f_file_flush_obj },
+    { "file_close", &f_file_close_obj },
     { "btn", &f_btn_obj }, { "btnp", &f_btnp_obj }, { "btnr", &f_btnr_obj },
     { "btnv", &f_btnv_obj }, { "mouse", &f_mouse_obj },
     { "cls", &s_cls_obj }, { "pget", &s_pget_obj }, { "pset", &s_pset_obj },
@@ -1253,7 +1563,8 @@ static const px_fn FUNCS[] = {
     { "fill", &s_fill_obj }, { "dither", &s_dither_obj }, { "clip", &s_clip_obj },
     { "camera", &s_camera_obj }, { "pal", &s_pal_obj }, { "blt", &s_blt_obj },
     { "bltm", &s_bltm_obj }, { "text", &s_text_obj },
-    { "blt3d", &f_unsupported_obj }, { "bltm3d", &f_unsupported_obj },
+    { "blt3d", &s_blt3d_obj }, { "bltm3d", &s_bltm3d_obj },
+    { "i_blt3d", &i_blt3d_obj }, { "i_bltm3d", &i_bltm3d_obj },
     { "i_cls", &i_cls_obj }, { "i_pget", &i_pget_obj }, { "i_pset", &i_pset_obj },
     { "i_line", &i_line_obj }, { "i_rect", &i_rect_obj }, { "i_rectb", &i_rectb_obj },
     { "i_circ", &i_circ_obj }, { "i_circb", &i_circb_obj }, { "i_elli", &i_elli_obj },
@@ -1271,12 +1582,18 @@ static const px_fn FUNCS[] = {
     { "t_ellib", &t_ellib_obj }, { "t_tri", &t_tri_obj }, { "t_trib", &t_trib_obj },
     { "t_fill", &t_fill_obj }, { "t_clip", &t_clip_obj }, { "t_camera", &t_camera_obj },
     { "t_blt", &t_blt_obj }, { "t_set", &t_set_obj },
+    { "tilemap_from_tmx", &f_tilemap_from_tmx_obj }, { "t_load", &t_load_obj },
+    { "t_collide", &t_collide_obj },
     { "ceil", &f_ceil_obj }, { "floor", &f_floor_obj }, { "sqrt", &f_sqrt_obj },
     { "sin", &f_sin_obj }, { "cos", &f_cos_obj }, { "atan2", &f_atan2_obj },
     { "sgn", &f_sgn_obj }, { "clamp", &f_clamp_obj }, { "rseed", &f_rseed_obj },
     { "rndi", &f_rndi_obj }, { "rndf", &f_rndf_obj }, { "nseed", &f_nseed_obj },
     { "noise", &f_noise_obj },
     { "play", &f_play_obj }, { "stop", &f_stop_obj }, { "play_pos", &f_play_pos_obj },
+    { "mml_check", &f_mml_check_obj }, { "pcm_load", &f_pcm_load_obj },
+    { "pcm_release", &f_pcm_release_obj }, { "sound_total_sec", &f_sound_total_sec_obj },
+    { "channel_set", &f_channel_set_obj },
+    { "font_load", &f_font_load_obj }, { "font_text_width", &f_font_text_width_obj },
 };
 
 void px_api_register(void) {
@@ -1314,7 +1631,8 @@ mp_lexer_t* mp_lexer_new_from_file(qstr filename) {
     return mp_lexer_new_from_str_len(filename, src, n, n ? n : 1);
 }
 
-// Read-only open(): the whole file becomes a StringIO ("r") or BytesIO ("rb").
+// open(): a read returns the whole file as a StringIO ("r") or BytesIO ("rb");
+// modes "w", "a" and "x" return a pyxel._WFile.
 extern const mp_obj_type_t mp_type_stringio;
 extern const mp_obj_type_t mp_type_bytesio;
 
@@ -1322,11 +1640,21 @@ mp_obj_t mp_builtin_open(size_t n_args, const mp_obj_t* args, mp_map_t* kwargs) 
     const char* path = mp_obj_str_get_str(args[0]);
     mp_obj_t m = argkw(n_args, args, kwargs, 1, Q_mode, mp_const_none);
     const char* mode = m == mp_const_none ? "r" : mp_obj_str_get_str(m);
-    if (strchr(mode, 'w') || strchr(mode, 'a') || strchr(mode, '+') || strchr(mode, 'x'))
-        mp_raise_OSError(MP_EROFS);
+    if (strchr(mode, '+')) mp_raise_ValueError(MP_ERROR_TEXT("open() modes with '+' are not supported"));
+    char kind = strchr(mode, 'w') ? 'w' : strchr(mode, 'a') ? 'a' : strchr(mode, 'x') ? 'x' : 'r';
+    if (kind != 'r') {
+        mp_obj_t cls = dict_get(Q__WFile);
+        if (cls == MP_OBJ_NULL)
+            mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("open() for writing needs pyxel imported"));
+        int e = 0;
+        int h = px_wfile_open(path, kind, &e);
+        if (h < 0) raise_file_error(e, path);
+        mp_obj_t a[3] = { MP_OBJ_NEW_SMALL_INT(h), args[0], m };
+        return mp_call_function_n_kw(cls, 3, 0, a);
+    }
     size_t n = 0;
     char* data = px_vfs_read(path, &n);
-    if (!data) mp_raise_OSError(MP_ENOENT);
+    if (!data) raise_file_error(px_vfs_stat(path) == 2 ? EISDIR : ENOENT, path);
     bool binary = strchr(mode, 'b') != NULL;
     mp_obj_t contents = binary ? mp_obj_new_bytes((const byte*)data, n) : mp_obj_new_str(data, n);
     free(data);

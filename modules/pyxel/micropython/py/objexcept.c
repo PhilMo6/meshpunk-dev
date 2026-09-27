@@ -347,6 +347,11 @@ MP_DEFINE_EXCEPTION(Exception, BaseException)
     MP_DEFINE_EXCEPTION(FileNotFoundError, OSError)
     MP_DEFINE_EXCEPTION(ReferenceError, Exception)
     */
+    // MESHPUNK: the OSError subclasses the Pyxel player's open() raises; the
+    // builtins table lists them through MICROPY_PORT_BUILTINS (mpconfigport.h).
+    MP_DEFINE_EXCEPTION(FileExistsError, OSError)
+    MP_DEFINE_EXCEPTION(FileNotFoundError, OSError)
+    MP_DEFINE_EXCEPTION(IsADirectoryError, OSError)
   MP_DEFINE_EXCEPTION(RuntimeError, Exception)
     MP_DEFINE_EXCEPTION(NotImplementedError, RuntimeError)
   MP_DEFINE_EXCEPTION(SyntaxError, Exception)
