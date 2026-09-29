@@ -161,6 +161,11 @@ mp_obj_t mp_obj_int_unary_op(mp_unary_op_t op, mp_obj_t o_in) {
         }
         case MP_UNARY_OP_INT_MAYBE:
             return o_in;
+        #if MICROPY_PY_BUILTINS_FLOAT
+        // MESHPUNK: reached through a class derived from int (float(x)).
+        case MP_UNARY_OP_FLOAT_MAYBE:
+            return mp_obj_new_float(mpz_as_float(&o->mpz));
+        #endif
         default:
             return MP_OBJ_NULL;      // op not supported
     }

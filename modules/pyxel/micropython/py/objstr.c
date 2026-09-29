@@ -1395,6 +1395,20 @@ static vstr_t mp_obj_str_format_helper(const char *str, const char *top, int *ar
             arg = mp_obj_new_str_type_from_vstr(&mp_type_str, &arg_vstr);
         }
 
+        // MESHPUNK: with a format spec, an instance of a class derived from
+        // int or float is formatted as its int or float value.
+        if (mp_obj_get_type(arg)->flags & MP_TYPE_FLAG_INSTANCE_TYPE) {
+            mp_obj_t native = mp_obj_cast_to_native_base(arg, MP_OBJ_FROM_PTR(&mp_type_int));
+            #if MICROPY_PY_BUILTINS_FLOAT
+            if (native == MP_OBJ_NULL) {
+                native = mp_obj_cast_to_native_base(arg, MP_OBJ_FROM_PTR(&mp_type_float));
+            }
+            #endif
+            if (native != MP_OBJ_NULL) {
+                arg = native;
+            }
+        }
+
         char fill = '\0';
         char align = '\0';
         int width = -1;

@@ -234,6 +234,11 @@ void  px_vfs_set_cwd(const char* dir);
 const char* px_vfs_cwd(void);
 // Resolve `path` against the cwd into `out` (normalized, absolute).
 void  px_vfs_resolve(const char* path, char* out, size_t cap);
+// Names in a directory of the mounted .pyxapp, one callback per archive entry
+// below it (the same name repeats for each file of a subdirectory). Returns 0,
+// ENOTDIR, ENOENT, or -1 for a path outside the archive (the firmware exports
+// no directory listing).
+int   px_vfs_listdir(const char* path, void (*cb)(void* ctx, const char* name, size_t len), void* ctx);
 void  px_path_dirname(const char* path, char* out, size_t cap);
 // Write a whole file. A path inside the mounted .pyxapp replaces or adds that
 // archive entry for the rest of the run (upstream runs a .pyxapp from a
@@ -416,3 +421,14 @@ extern uint32_t px_audio_samples, px_audio_underruns, px_audio_us;
 // ---------------------------------------------------------------------------
 void px_api_register(void);
 extern bool px_sound_enabled;       // -sound 0 on the command line turns synthesis off
+extern bool px_kbtoggle;            // -kbtoggle given: Alt+Enter switches the key bindings off for typing
+extern int64_t px_clock_epoch;      // -clock: device clock (UTC seconds) at launch, 0 if not given
+extern int px_clock_tzmin;          // -clock: UTC offset in minutes
+
+// Console (main.c): what the game prints goes to the serial log, and its last
+// PX_CONSOLE_LINES lines, wrapped at PX_CONSOLE_COLS, are kept for input().
+#define PX_CONSOLE_LINES 32
+#define PX_CONSOLE_COLS  79
+void px_console_write(const char* s, size_t n);
+const char* px_console_line(int back);          // back 0 = newest complete line; NULL past the oldest
+const char* px_console_partial(size_t* len);    // the line still being printed

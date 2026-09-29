@@ -40,11 +40,16 @@ typedef long mp_off_t;
 #define MICROPY_KBD_EXCEPTION                   (0)
 #define MICROPY_PY_UCTYPES                      (0)
 
-// OSError subclasses (py/objexcept.c MESHPUNK patch) as builtins.
+// Builtins: the OSError subclasses (py/objexcept.c MESHPUNK patch), exit()
+// and quit() (sys.exit, as CPython's site builtins), and input() (src/api.c).
+extern const struct _mp_obj_fun_builtin_var_t px_builtin_input_obj;
 #define MICROPY_PORT_BUILTINS \
     { MP_ROM_QSTR(MP_QSTR_FileExistsError), MP_ROM_PTR(&mp_type_FileExistsError) }, \
     { MP_ROM_QSTR(MP_QSTR_FileNotFoundError), MP_ROM_PTR(&mp_type_FileNotFoundError) }, \
-    { MP_ROM_QSTR(MP_QSTR_IsADirectoryError), MP_ROM_PTR(&mp_type_IsADirectoryError) },
+    { MP_ROM_QSTR(MP_QSTR_IsADirectoryError), MP_ROM_PTR(&mp_type_IsADirectoryError) }, \
+    { MP_ROM_QSTR(MP_QSTR_exit), MP_ROM_PTR(&mp_sys_exit_obj) }, \
+    { MP_ROM_QSTR(MP_QSTR_quit), MP_ROM_PTR(&mp_sys_exit_obj) }, \
+    { MP_ROM_QSTR(MP_QSTR_input), MP_ROM_PTR(&px_builtin_input_obj) },
 
 // The ESP32-S3 uses the windowed register ABI: nlrxtensa.c is call0-only, so
 // NLR and the GC register capture both go through setjmp.
@@ -79,12 +84,15 @@ typedef long mp_off_t;
 #define MICROPY_WRAP_MP_OBJ_GET_TYPE(f)         PX_IRAM f
 
 // Every 64 branches/returns the VM calls px_audio_poll() (src/audio.c), which
-// keeps the audio ring fed while Python code runs.
+// keeps the audio ring fed while Python code runs. The count runs across all
+// bytecode in one global (px_vm_hook_divisor, src/main.c): a counter local to
+// mp_execute_bytecode restarts at every function call.
 void px_audio_poll(void);
+extern unsigned int px_vm_hook_divisor;
 #define MICROPY_VM_HOOK_COUNT                   (64)
-#define MICROPY_VM_HOOK_INIT                    unsigned int vm_hook_divisor = MICROPY_VM_HOOK_COUNT;
-#define MICROPY_VM_HOOK_POLL                    if (--vm_hook_divisor == 0) { \
-        vm_hook_divisor = MICROPY_VM_HOOK_COUNT; \
+#define MICROPY_VM_HOOK_INIT
+#define MICROPY_VM_HOOK_POLL                    if (--px_vm_hook_divisor == 0) { \
+        px_vm_hook_divisor = MICROPY_VM_HOOK_COUNT; \
         px_audio_poll(); \
 }
 #define MICROPY_VM_HOOK_LOOP                    MICROPY_VM_HOOK_POLL

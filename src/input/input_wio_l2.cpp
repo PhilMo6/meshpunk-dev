@@ -9,8 +9,8 @@
 //   Heltec's USER key).
 //   WAKE button = expander P00, active LOW (Meshtastic WakeKey.cpp: pressed
 //   = !digitalRead) — the aux (input-mode) button. It reaches the ESP32 only
-//   through the expander's open-drain INT on GPIO45, which asserts on any
-//   expander input change and releases when the input port is read.
+//   through the expander's open-drain INT on GPIO45, which goes low when an
+//   expander input changes.
 // No keyboard, no trackball: the keyboard facet reports absent and the
 // legacy-ASCII facet stubs out, as on the Heltec kit.
 //
@@ -44,16 +44,24 @@ static void IRAM_ATTR ISR_user_btn() {
   trackball_click = 1;       // select
 }
 
-// WAKE: the expander INT level is polled (a GPIO read) and the input port is
-// read once the debounce window after INT asserted has passed — the
-// Meshtastic WakeKey timing (25 ms after the edge, then read). INT stays
-// asserted until the port is read or the input returns to its previous
-// level, so any press longer than one poll interval is seen.
+// WAKE: a GT911 touch read on the shared bus also returns the expander INT
+// (GPIO45) high, so the INT level does not hold a pending change. A falling-
+// edge interrupt latches the time of every drop, and the input port is read
+// WAKE_DEBOUNCE_MS after that edge (the Meshtastic WakeKey timing). A poll
+// that finds INT low with no latched edge arms the same read, timed from the
+// poll.
 #define WAKE_DEBOUNCE_MS 25
 
-static bool     s_wake_armed = false;   // INT seen asserted, window running
-static uint32_t s_wake_t0    = 0;
-static bool     s_wake_down  = false;   // last level read: pressed
+static bool              s_wake_armed  = false;   // port read pending
+static uint32_t          s_wake_t0     = 0;       // time the read counts from
+static bool              s_wake_down   = false;   // last level read: pressed
+static volatile bool     s_int_fell    = false;   // ISR: falling edge latched
+static volatile uint32_t s_int_fell_ms = 0;
+
+static void IRAM_ATTR ISR_exp_int() {
+  s_int_fell_ms = millis();
+  s_int_fell    = true;
+}
 
 // ── Touch ──────────────────────────────────────────────────────────────────
 static TouchDrvGT911 touch;
@@ -100,6 +108,7 @@ void input_dev_init(uint8_t kbd_backlight_boot) {
     s_wake_down = !level;
     SLog.printf("[WIO] WAKE button idle level: %s\n", level ? "HIGH" : "LOW (pressed?)");
   }
+  attachInterrupt(WIO_L2_EXP_INT_PIN, ISR_exp_int, FALLING);
 }
 
 // GT911 sleep (command 0x05 with INT low — the expander already holds it
@@ -148,16 +157,16 @@ bool input_dev_nav_click_held(void) {
 }
 
 // WAKE press edge. Callers: loop()'s mode dispatcher, and the ELF input task
-// at 100 Hz while a module runs (never both at once).
+// every 30 ms while a module runs (never both at once).
 bool input_dev_aux_btn_take(void) {
-  uint32_t now = millis();
   if (!s_wake_armed) {
-    if (digitalRead(WIO_L2_EXP_INT_PIN) == HIGH) return false;   // no change
+    bool fell = s_int_fell;
+    if (!fell && digitalRead(WIO_L2_EXP_INT_PIN) == HIGH) return false;   // no change
+    s_int_fell   = false;
     s_wake_armed = true;
-    s_wake_t0 = now;
-    return false;
+    s_wake_t0    = fell ? s_int_fell_ms : millis();
   }
-  if ((uint32_t)(now - s_wake_t0) < WAKE_DEBOUNCE_MS) return false;
+  if ((int32_t)(millis() - s_wake_t0) < WAKE_DEBOUNCE_MS) return false;
   s_wake_armed = false;
 
   bool level = true;

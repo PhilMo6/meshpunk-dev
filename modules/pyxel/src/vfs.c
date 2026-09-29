@@ -158,6 +158,25 @@ int px_vfs_stat(const char* path) {
     return 0;
 }
 
+int px_vfs_listdir(const char* path, void (*cb)(void* ctx, const char* name, size_t len), void* ctx) {
+    char abs[PX_PATH_MAX];
+    px_vfs_resolve(path, abs, sizeof(abs));
+    const char* rel = app_rel(abs);
+    if (!rel) return -1;
+    if (px_vfs_stat(abs) != 2) return px_vfs_stat(abs) == 1 ? ENOTDIR : ENOENT;
+    size_t n = strlen(rel);
+    for (int i = 0; i < s_entry_count; i++) {
+        const char* name = s_entries[i].name;
+        if (n) {
+            if (strncmp(name, rel, n) != 0 || name[n] != '/') continue;
+            name += n + 1;
+        }
+        const char* slash = strchr(name, '/');
+        cb(ctx, name, slash ? (size_t)(slash - name) : strlen(name));
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Writes
 // ---------------------------------------------------------------------------

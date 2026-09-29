@@ -166,13 +166,21 @@ static mp_obj_t list_entry(int q, mp_obj_t index) {
     return lst == MP_OBJ_NULL ? MP_OBJ_NULL : mp_obj_subscr(lst, index, MP_OBJ_SENTINEL);
 }
 
+// An instance of a class derived from int (an IntEnum member) counts as its
+// int value.
+static bool bank_number(mp_obj_t o, mp_obj_t* n) {
+    *n = mp_obj_cast_to_native_base(o, MP_OBJ_FROM_PTR(&mp_type_int));
+    return *n != MP_OBJ_NULL && mp_obj_is_small_int(*n);
+}
+
 static px_image* resolve_image(mp_obj_t o) {
-    if (mp_obj_is_small_int(o)) {
-        mp_obj_t e = list_entry(Q_images, o);
+    mp_obj_t n;
+    if (bank_number(o, &n)) {
+        mp_obj_t e = list_entry(Q_images, n);
         if (e != MP_OBJ_NULL) {
             o = e;
         } else {
-            px_image* img = px_bank_image(MP_OBJ_SMALL_INT_VALUE(o));
+            px_image* img = px_bank_image(MP_OBJ_SMALL_INT_VALUE(n));
             if (!img) mp_raise_ValueError(MP_ERROR_TEXT("image bank out of range"));
             return img;
         }
@@ -192,12 +200,13 @@ static px_image* resolve_image(mp_obj_t o) {
 }
 
 static px_tilemap* resolve_tilemap(mp_obj_t o, mp_obj_t* obj_out) {
-    if (mp_obj_is_small_int(o)) {
-        mp_obj_t e = list_entry(Q_tilemaps, o);
+    mp_obj_t n;
+    if (bank_number(o, &n)) {
+        mp_obj_t e = list_entry(Q_tilemaps, n);
         if (e != MP_OBJ_NULL) {
             o = e;
         } else {
-            px_tilemap* tm = px_bank_tilemap(MP_OBJ_SMALL_INT_VALUE(o));
+            px_tilemap* tm = px_bank_tilemap(MP_OBJ_SMALL_INT_VALUE(n));
             if (!tm) mp_raise_ValueError(MP_ERROR_TEXT("tilemap out of range"));
             if (obj_out) *obj_out = MP_OBJ_NULL;
             return tm;
@@ -320,6 +329,104 @@ void px_api_shutdown(void) {
     s_pyxel_dict = NULL;
 }
 
+// Waits (frame pacing, time.sleep) sleep at most this long at a time, with
+// px_audio_service() between sleeps: the audio ring runs 75 ms ahead of real
+// time, so a single sleep for a whole frame (100 ms at fps=10) lets it run dry.
+#define SLEEP_SLICE_MS 10
+
+// ---------------------------------------------------------------------------
+// For pylib's time, datetime and os modules
+// ---------------------------------------------------------------------------
+static uint64_t s_ticks_total;         // microseconds since the first call
+static uint32_t s_ticks_last;
+static bool s_ticks_started;
+
+// The firmware's 32-bit microsecond tick wraps every 71.6 minutes; this is
+// called every frame (begin_update) so no wrap is missed.
+static uint64_t ticks_us64(void) {
+    uint32_t now = host_get_ticks_us();
+    if (!s_ticks_started) {
+        s_ticks_started = true;
+        s_ticks_last = now;
+    }
+    s_ticks_total += (uint32_t)(now - s_ticks_last);
+    s_ticks_last = now;
+    return s_ticks_total;
+}
+
+// clock() -> (epoch, utc_offset_minutes): the device clock when the game
+// was launched (-clock), epoch 0 when the launcher did not pass one.
+static mp_obj_t f_clock(void) {
+    mp_obj_t items[2] = { mp_obj_new_int_from_ll(px_clock_epoch), MP_OBJ_NEW_SMALL_INT(px_clock_tzmin) };
+    return mp_obj_new_tuple(2, items);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(f_clock_obj, f_clock);
+
+// ticks_us() -> microseconds since the game started, as an int.
+static mp_obj_t f_ticks_us(void) {
+    return mp_obj_new_int_from_ull(ticks_us64());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(f_ticks_us_obj, f_ticks_us);
+
+// sleep(seconds): audio keeps playing; the quit keys still end the game.
+static mp_obj_t f_sleep(mp_obj_t sec_in) {
+    mp_float_t sec = mp_obj_get_float(sec_in);
+    if (sec < 0) mp_raise_ValueError(MP_ERROR_TEXT("sleep length must be non-negative"));
+    uint64_t end = ticks_us64() + (uint64_t)(sec * (mp_float_t)1000000);
+    for (;;) {
+        uint64_t now = ticks_us64();
+        if (now >= end) break;
+        if (host_should_exit()) mp_raise_type(&mp_type_SystemExit);
+        uint64_t ms = (end - now) / 1000;
+        host_sleep_ms(ms < SLEEP_SLICE_MS ? (uint32_t)ms : SLEEP_SLICE_MS);
+        px_audio_service();
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(f_sleep_obj, f_sleep);
+
+static mp_obj_t f_getcwd(void) {
+    const char* cwd = px_vfs_cwd();
+    return mp_obj_new_str(cwd, strlen(cwd));
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(f_getcwd_obj, f_getcwd);
+
+static mp_obj_t f_chdir(mp_obj_t path) {
+    px_vfs_set_cwd(mp_obj_str_get_str(path));
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(f_chdir_obj, f_chdir);
+
+// path_stat(path) -> 0 missing, 1 file, 2 directory (px_vfs_stat).
+static mp_obj_t f_path_stat(mp_obj_t path) {
+    return MP_OBJ_NEW_SMALL_INT(px_vfs_stat(mp_obj_str_get_str(path)));
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(f_path_stat_obj, f_path_stat);
+
+static void listdir_add(void* ctx, const char* name, size_t len) {
+    mp_obj_t lst = MP_OBJ_FROM_PTR(ctx);
+    mp_obj_t s = mp_obj_new_str(name, len);
+    size_t n;
+    mp_obj_t* items;
+    mp_obj_list_get(lst, &n, &items);
+    for (size_t i = 0; i < n; i++)
+        if (mp_obj_equal(items[i], s)) return;
+    mp_obj_list_append(lst, s);
+}
+
+// listdir(path) -> names; inside the mounted .pyxapp only.
+static mp_obj_t f_listdir(mp_obj_t path_in) {
+    const char* path = mp_obj_str_get_str(path_in);
+    mp_obj_t lst = mp_obj_new_list(0, NULL);
+    int e = px_vfs_listdir(path, listdir_add, MP_OBJ_TO_PTR(lst));
+    if (e < 0) {
+        mp_raise_msg_varg(&mp_type_OSError, MP_ERROR_TEXT("listing '%s' is not supported: only folders inside a .pyxapp can be listed"), path);
+    }
+    if (e) raise_file_error(e, path);
+    return lst;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(f_listdir_obj, f_listdir);
+
 // Font(filename) handle / Font.text_width(s)
 static mp_obj_t f_font_load(mp_obj_t fn) {
     char err[160];
@@ -360,6 +467,7 @@ static void publish_frame_state(void) {
 
 // begin_update_frame: poll input, then the quit key and the firmware's exit.
 static void begin_update(void) {
+    ticks_us64();
     px_input_poll();
     publish_frame_state();
     if (px_btnp(px.quit_key, 0, 0) || host_should_exit())
@@ -419,11 +527,6 @@ static void run_draw(mp_obj_t draw) {
 
 #define MAX_FRAME_DELAY_MS 100
 
-// Frame waits sleep at most this long at a time, with px_audio_service()
-// between sleeps: the audio ring runs 75 ms ahead of real time, so a single
-// sleep for a whole frame (100 ms at fps=10) lets it run dry.
-#define SLEEP_SLICE_MS 10
-
 static mp_obj_t f_run(mp_obj_t update, mp_obj_t draw) {
     need_init();
     uint32_t frame_us = 1000000u / (uint32_t)px.fps;
@@ -453,6 +556,9 @@ static mp_obj_t f_run(mp_obj_t update, mp_obj_t draw) {
         }
         run_update(update);
         run_draw(draw);
+        // Fed every frame, not only while waiting for the next one: a game
+        // running behind its frame rate never waits.
+        px_audio_service();
         px.frame_count++;
         report_tick();
     }
@@ -505,6 +611,118 @@ static mp_obj_t f_reset(void) {
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(f_reset_obj, f_reset);
+
+// input([prompt]), the builtin. CPython reads a line from stdin; here the line
+// is typed on input()'s own 320x240 screen in the default palette. It shows
+// the newest console lines (what the game printed, the prompt included), the
+// line being typed and a hint, drawn from the top: a touch keyboard covers the
+// panel below row INPUT_TOP_H, so without -kbtoggle (a board with no keyboard)
+// only that band is used. Keys arrive as typed with the launcher's key
+// bindings off (Alt+Enter, -kbtoggle) or from the touch keyboard. The game's
+// screen, palette and display come back afterwards.
+#define INPUT_LINE_MAX 127
+#define INPUT_TOP_H    60
+// The firmware stamps its touch pad indicators and touch keyboard into each
+// pushed frame, and closing the keyboard leaves its area black until the next
+// frame, so the input screen is pushed every INPUT_FRAME_MS, not only when
+// the text changes.
+#define INPUT_FRAME_MS 33
+
+static void input_draw(px_image* img, const char* line, size_t len) {
+    const int lh = PX_FONT_HEIGHT + 1;
+    int rows = ((px_kbtoggle ? img->cv.h : INPUT_TOP_H) - 2) / lh;
+    int hist = rows - 2;
+    px_clear_u8(&img->cv, 0);
+    int shown = 0;
+    while (shown < hist && px_console_line(shown)) shown++;
+    int y = 2;
+    for (int i = shown - 1; i >= 0; i--, y += lh) {
+        const char* s = px_console_line(i);
+        px_image_text(img, 2.0f, (float)y, s, strlen(s), 7);
+    }
+    // The line still being printed + the typed text + a cursor: its last
+    // PX_CONSOLE_COLS characters.
+    char text[PX_CONSOLE_COLS];
+    size_t plen;
+    const char* part = px_console_partial(&plen);
+    size_t total = plen + len + 1;
+    size_t skip = total > PX_CONSOLE_COLS ? total - PX_CONSOLE_COLS : 0;
+    size_t n = 0;
+    for (size_t i = skip; i < total; i++)
+        text[n++] = i < plen ? part[i] : i < plen + len ? line[i - plen] : '_';
+    px_image_text(img, 2.0f, (float)y, text, n, 11);
+    const char* hint = px_kbtoggle ? "Alt+Enter: typing  Enter: done" : "Enter: done";
+    px_image_text(img, 2.0f, (float)(y + lh), hint, strlen(hint), 13);
+}
+
+static mp_obj_t f_input(size_t n, const mp_obj_t* a) {
+    if (n) {
+        mp_obj_t p = mp_obj_is_str(a[0]) ? a[0] : mp_call_function_1(MP_OBJ_FROM_PTR(&mp_type_str), a[0]);
+        size_t plen;
+        const char* prompt = mp_obj_str_get_data(p, &plen);
+        px_console_write(prompt, plen);
+    }
+    px_image* screen = px_image_new(PX_SCREEN_MAX_W, PX_SCREEN_MAX_H);
+    if (!screen) mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("input screen"));
+    px_image* game_screen = px.screen;
+    uint32_t game_colors[PX_MAX_COLORS];
+    int game_num_colors = px.num_colors;
+    memcpy(game_colors, px.colors, sizeof(game_colors));
+    px.screen = screen;
+    memcpy(px.colors, DEFAULT_COLORS, sizeof(DEFAULT_COLORS));
+    px.num_colors = PX_NUM_COLORS;
+    char err[80] = "";
+    bool shown = px_display_begin(PX_SCREEN_MAX_W, PX_SCREEN_MAX_H, err, sizeof(err));
+    char line[INPUT_LINE_MAX + 1];
+    size_t len = 0;
+    bool enter_down = false, done = !shown, redraw = true, quit = false;
+    uint32_t next_frame = host_get_ticks_ms();
+    while (!done) {
+        if (host_should_exit()) { quit = true; break; }
+        int pressed;
+        unsigned char key;
+        while (!done && host_get_key(&pressed, &key)) {
+            if (key == 0x0D) {                     // finish on Enter's release
+                if (pressed) enter_down = true;
+                else if (enter_down) done = true;
+            } else if (!pressed) {
+            } else if (key == 0x08) {
+                if (len) { len--; redraw = true; }
+            } else if (key >= 0x20 && key < 0x7F && len < INPUT_LINE_MAX) {
+                line[len++] = (char)key;
+                redraw = true;
+            }
+        }
+        uint32_t now = host_get_ticks_ms();
+        if (redraw) {
+            input_draw(screen, line, len);
+            redraw = false;
+            next_frame = now;
+        }
+        if ((int32_t)(now - next_frame) >= 0) {
+            px_display_render();
+            next_frame = now + INPUT_FRAME_MS;
+        }
+        px_audio_service();
+        host_sleep_ms(10);
+    }
+    px.screen = game_screen;
+    memcpy(px.colors, game_colors, sizeof(game_colors));
+    px.num_colors = game_num_colors;
+    px_image_free(screen);
+    char err2[80] = "";
+    bool back = true;
+    if (px.initialized) back = px_display_begin(px.width, px.height, err2, sizeof(err2));
+    else px_display_end();
+    if (!shown) raise_msg(err);
+    if (!back) raise_msg(err2);
+    px_input_reset();
+    if (quit) mp_raise_type(&mp_type_SystemExit);
+    px_console_write(line, len);
+    px_console_write("\n", 1);
+    return mp_obj_new_str(line, len);
+}
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(px_builtin_input_obj, 0, 1, f_input);
 
 // init(width, height, title, fps, quit_key, display_scale, capture_scale,
 //      capture_sec, headless). Like upstream, relative paths from here on
@@ -1254,8 +1472,14 @@ static MP_DEFINE_CONST_FUN_OBJ_1(f_cos_obj, f_cos);
 static mp_obj_t f_atan2(mp_obj_t y, mp_obj_t x) { return mp_obj_new_float(atan2f(F(y), F(x)) / DEG2RAD); }
 static MP_DEFINE_CONST_FUN_OBJ_2(f_atan2_obj, f_atan2);
 
+// An int, a bool, or an instance of a class derived from int (IntEnum).
+static bool int_like(mp_obj_t o) {
+    return mp_obj_is_int(o) || mp_obj_is_bool(o)
+           || mp_obj_cast_to_native_base(o, MP_OBJ_FROM_PTR(&mp_type_int)) != MP_OBJ_NULL;
+}
+
 static mp_obj_t f_sgn(mp_obj_t x) {
-    if (mp_obj_is_int(x)) {
+    if (int_like(x)) {
         mp_int_t v = mp_obj_get_int(x);
         return MP_OBJ_NEW_SMALL_INT(v > 0 ? 1 : v < 0 ? -1 : 0);
     }
@@ -1265,7 +1489,7 @@ static mp_obj_t f_sgn(mp_obj_t x) {
 static MP_DEFINE_CONST_FUN_OBJ_1(f_sgn_obj, f_sgn);
 
 static mp_obj_t f_clamp(mp_obj_t x, mp_obj_t lo, mp_obj_t hi) {
-    if (mp_obj_is_int(x) && mp_obj_is_int(lo) && mp_obj_is_int(hi)) {
+    if (int_like(x) && int_like(lo) && int_like(hi)) {
         mp_int_t v = mp_obj_get_int(x), l = mp_obj_get_int(lo), h = mp_obj_get_int(hi);
         if (l > h) { mp_int_t t = l; l = h; h = t; }
         return mp_obj_new_int(v < l ? l : v > h ? h : v);
@@ -1459,6 +1683,127 @@ static px_snd* compile_sounds(size_t ns, const mp_obj_t* sounds) {
     return snds;
 }
 
+// Sound.set_notes/set_tones/set_volumes/set_effects strings (sound.rs): read
+// after simplify_string, which drops ASCII whitespace and lowercases ASCII.
+typedef struct {
+    const char* p;
+    const char* end;
+    const char* at;     // start of the character last read
+} sound_str_t;
+
+// The next character, lowercased, or -1 at the end. A non-ASCII character is
+// returned as its UTF-8 lead byte, with s->at..s->p spanning all its bytes.
+static int sound_str_next(sound_str_t* s) {
+    while (s->p < s->end) {
+        unsigned char c = (unsigned char)*s->p;
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r') {
+            s->p++;
+            continue;
+        }
+        s->at = s->p++;
+        if (c >= 0x80) {
+            while (s->p < s->end && ((unsigned char)*s->p & 0xC0) == 0x80) s->p++;
+            return c;
+        }
+        return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c;
+    }
+    s->at = s->end;
+    return -1;
+}
+
+// "Invalid sound <what> '<c>'"; the end of the string shows as ''.
+static NORETURN void sound_str_invalid(const char* what, const sound_str_t* s, int c) {
+    if (c >= 0 && c < 0x80)
+        mp_raise_msg_varg(&mp_type_ValueError, MP_ERROR_TEXT("Invalid sound %s '%c'"), what, c);
+    mp_raise_msg_varg(&mp_type_ValueError, MP_ERROR_TEXT("Invalid sound %s '%.*s'"),
+                      what, (int)(s->p - s->at), s->at);
+}
+
+static sound_str_t sound_str(mp_obj_t str) {
+    size_t len;
+    const char* data = mp_obj_str_get_data(str, &len);
+    sound_str_t s = { data, data + len, data };
+    return s;
+}
+
+// Notes: a-g with an optional # or -, then octave 0-4; r is a rest (-1).
+static mp_obj_t f_parse_notes(mp_obj_t str) {
+    static const int8_t BASE[7] = { 9, 11, 0, 2, 4, 5, 7 };    // a b c d e f g
+    sound_str_t s = sound_str(str);
+    mp_obj_t out = mp_obj_new_list(0, NULL);
+    for (int c; (c = sound_str_next(&s)) >= 0;) {
+        int note;
+        if (c >= 'a' && c <= 'g') {
+            note = BASE[c - 'a'];
+            c = sound_str_next(&s);
+            if (c == '#') {
+                note++;
+                c = sound_str_next(&s);
+            } else if (c == '-') {
+                note--;
+                c = sound_str_next(&s);
+            }
+            if (c < '0' || c > '4') sound_str_invalid("note", &s, c);
+            note += (c - '0') * 12;
+        } else if (c == 'r') {
+            note = -1;
+        } else {
+            sound_str_invalid("note", &s, c);
+        }
+        mp_obj_list_append(out, MP_OBJ_NEW_SMALL_INT(note));
+    }
+    return out;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(f_parse_notes_obj, f_parse_notes);
+
+// Tones: t s p n (TONE_TRIANGLE..TONE_NOISE) or a digit (a tones index).
+static mp_obj_t f_parse_tones(mp_obj_t str) {
+    sound_str_t s = sound_str(str);
+    mp_obj_t out = mp_obj_new_list(0, NULL);
+    for (int c; (c = sound_str_next(&s)) >= 0;) {
+        int tone;
+        switch (c) {
+            case 't': tone = 0; break;
+            case 's': tone = 1; break;
+            case 'p': tone = 2; break;
+            case 'n': tone = 3; break;
+            default:
+                if (c < '0' || c > '9') sound_str_invalid("tone", &s, c);
+                tone = c - '0';
+                break;
+        }
+        mp_obj_list_append(out, MP_OBJ_NEW_SMALL_INT(tone));
+    }
+    return out;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(f_parse_tones_obj, f_parse_tones);
+
+// Volumes: 0-7.
+static mp_obj_t f_parse_volumes(mp_obj_t str) {
+    sound_str_t s = sound_str(str);
+    mp_obj_t out = mp_obj_new_list(0, NULL);
+    for (int c; (c = sound_str_next(&s)) >= 0;) {
+        if (c < '0' || c > '7') sound_str_invalid("volume", &s, c);
+        mp_obj_list_append(out, MP_OBJ_NEW_SMALL_INT(c - '0'));
+    }
+    return out;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(f_parse_volumes_obj, f_parse_volumes);
+
+// Effects: n s v f h q (EFFECT_NONE..EFFECT_QUARTER_FADEOUT).
+static mp_obj_t f_parse_effects(mp_obj_t str) {
+    static const char CODES[] = "nsvfhq";
+    sound_str_t s = sound_str(str);
+    mp_obj_t out = mp_obj_new_list(0, NULL);
+    for (int c; (c = sound_str_next(&s)) >= 0;) {
+        const char* hit = c > 0 && c < 0x80 ? strchr(CODES, c) : NULL;
+        if (!hit) sound_str_invalid("effect", &s, c);
+        mp_obj_list_append(out, MP_OBJ_NEW_SMALL_INT(hit - CODES));
+    }
+    return out;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(f_parse_effects_obj, f_parse_effects);
+
 // Sound.mml(code) validates at call time, as upstream parses it then.
 static mp_obj_t f_mml_check(mp_obj_t code, mp_obj_t old) {
     px_snd s;
@@ -1590,10 +1935,15 @@ static const px_fn FUNCS[] = {
     { "rndi", &f_rndi_obj }, { "rndf", &f_rndf_obj }, { "nseed", &f_nseed_obj },
     { "noise", &f_noise_obj },
     { "play", &f_play_obj }, { "stop", &f_stop_obj }, { "play_pos", &f_play_pos_obj },
+    { "parse_notes", &f_parse_notes_obj }, { "parse_tones", &f_parse_tones_obj },
+    { "parse_volumes", &f_parse_volumes_obj }, { "parse_effects", &f_parse_effects_obj },
     { "mml_check", &f_mml_check_obj }, { "pcm_load", &f_pcm_load_obj },
     { "pcm_release", &f_pcm_release_obj }, { "sound_total_sec", &f_sound_total_sec_obj },
     { "channel_set", &f_channel_set_obj },
     { "font_load", &f_font_load_obj }, { "font_text_width", &f_font_text_width_obj },
+    { "clock", &f_clock_obj }, { "ticks_us", &f_ticks_us_obj }, { "sleep", &f_sleep_obj },
+    { "getcwd", &f_getcwd_obj }, { "chdir", &f_chdir_obj }, { "path_stat", &f_path_stat_obj },
+    { "listdir", &f_listdir_obj },
 };
 
 void px_api_register(void) {

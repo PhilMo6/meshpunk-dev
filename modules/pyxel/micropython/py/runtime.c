@@ -330,9 +330,26 @@ mp_obj_t mp_unary_op(mp_unary_op_t op, mp_obj_t arg) {
                 } else {
                     return MP_OBJ_NEW_SMALL_INT(-val);
                 }
-            default:
-                assert(op == MP_UNARY_OP_INVERT);
+            case MP_UNARY_OP_INVERT:
                 return MP_OBJ_NEW_SMALL_INT(~val);
+            // MESHPUNK: the operators below reach a small int through a class
+            // derived from int: float(x) converts, the others are unsupported.
+            #if MICROPY_PY_BUILTINS_FLOAT
+            case MP_UNARY_OP_FLOAT_MAYBE:
+                return mp_obj_new_float((mp_float_t)val);
+            #if MICROPY_PY_BUILTINS_COMPLEX
+            case MP_UNARY_OP_COMPLEX_MAYBE:
+                return MP_OBJ_NULL;
+            #endif
+            #endif
+            default:
+                #if MICROPY_ERROR_REPORTING <= MICROPY_ERROR_REPORTING_TERSE
+                mp_raise_TypeError(MP_ERROR_TEXT("unsupported type for operator"));
+                #else
+                mp_raise_msg_varg(&mp_type_TypeError,
+                    MP_ERROR_TEXT("unsupported type for %q: '%s'"),
+                    mp_unary_op_method_name[op], mp_obj_get_type_str(arg));
+                #endif
         }
     } else if (op == MP_UNARY_OP_HASH && mp_obj_is_str_or_bytes(arg)) {
         // fast path for hashing str/bytes
@@ -644,6 +661,24 @@ generic_binary_op:
     if (op >= MP_BINARY_OP_INPLACE_OR && op <= MP_BINARY_OP_INPLACE_POWER) {
         op += MP_BINARY_OP_OR - MP_BINARY_OP_INPLACE_OR;
         goto generic_binary_op;
+    }
+
+    // MESHPUNK: reflected comparisons, as in CPython: when the left operand's
+    // type does not support <, >, <= or >=, the right operand's type is asked
+    // for the swapped comparison (a < b becomes b > a).
+    if (op == MP_BINARY_OP_LESS || op == MP_BINARY_OP_MORE
+        || op == MP_BINARY_OP_LESS_EQUAL || op == MP_BINARY_OP_MORE_EQUAL) {
+        const mp_obj_type_t *rtype = mp_obj_get_type(rhs);
+        if (MP_OBJ_TYPE_HAS_SLOT(rtype, binary_op)) {
+            mp_binary_op_t rop = op == MP_BINARY_OP_LESS ? MP_BINARY_OP_MORE
+                : op == MP_BINARY_OP_MORE ? MP_BINARY_OP_LESS
+                : op == MP_BINARY_OP_LESS_EQUAL ? MP_BINARY_OP_MORE_EQUAL
+                : MP_BINARY_OP_LESS_EQUAL;
+            mp_obj_t result = MP_OBJ_TYPE_GET_SLOT(rtype, binary_op)(rop, rhs, lhs);
+            if (result != MP_OBJ_NULL) {
+                return result;
+            }
+        }
     }
 
     #if MICROPY_PY_REVERSE_SPECIAL_METHODS

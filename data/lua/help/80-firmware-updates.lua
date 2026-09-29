@@ -1,9 +1,8 @@
 local _, dev = ...
 
--- Release artifacts are meshpunk-<board>-<version>-{merged,firmware,
--- littlefs}.bin, and dev.name is the same board slug the filenames carry.
--- The Launcher image is T-Deck only and keeps its own unslugged name
--- (its LauncherHub catalog entry downloads it by explicit URL).
+-- Release artifacts are meshpunk-<board>-<version>-<kind>.bin, the T-Deck's
+-- Launcher image included, and dev.name is the same board slug the filenames
+-- carry.
 local build = dev.name ~= "" and dev.name or "your device"
 
 local body = [[

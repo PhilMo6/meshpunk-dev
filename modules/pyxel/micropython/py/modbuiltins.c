@@ -52,6 +52,18 @@ static mp_obj_t mp_builtin___build_class__(size_t n_args, const mp_obj_t *args) 
     // set the new classes __locals__ object
     mp_obj_dict_t *old_locals = mp_locals_get();
     mp_obj_t class_locals = mp_obj_new_dict(0);
+    // MESHPUNK: when a base class has a true _ordered_namespace_ attribute,
+    // the class body's names are kept in definition order (an ordered map).
+    for (size_t i = 2; i < n_args; i++) {
+        if (mp_obj_is_type(args[i], &mp_type_type)) {
+            mp_obj_t dest[2];
+            mp_load_method_maybe(args[i], MP_QSTR__ordered_namespace_, dest);
+            if (dest[0] != MP_OBJ_NULL && mp_obj_is_true(dest[0])) {
+                ((mp_obj_dict_t *)MP_OBJ_TO_PTR(class_locals))->map.is_ordered = 1;
+                break;
+            }
+        }
+    }
     mp_locals_set(MP_OBJ_TO_PTR(class_locals));
 
     // call the class code

@@ -565,7 +565,14 @@ static mp_obj_t instance_binary_op(mp_binary_op_t op, mp_obj_t lhs_in, mp_obj_t 
 
     mp_obj_t res;
     if (dest[0] == MP_OBJ_SENTINEL) {
-        res = mp_binary_op(op, lhs->subobj[0], rhs_in);
+        // MESHPUNK: a reversed operator on a native base (1 + x, where x's
+        // class derives from int) is the forward operator on the native
+        // value, with the operands in source order.
+        if (op >= MP_BINARY_OP_REVERSE_OR) {
+            res = mp_binary_op(op - (MP_BINARY_OP_REVERSE_OR - MP_BINARY_OP_OR), rhs_in, lhs->subobj[0]);
+        } else {
+            res = mp_binary_op(op, lhs->subobj[0], rhs_in);
+        }
     } else if (dest[0] != MP_OBJ_NULL) {
         dest[2] = rhs_in;
         res = mp_call_method_n_kw(1, 0, dest);
@@ -1158,6 +1165,52 @@ static void type_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest) {
     }
 }
 
+// MESHPUNK: class-level hooks. A class or one of its bases can define the
+// classmethods __class_getitem__ (cls[key]), __class_iter__ (iter(cls)) and
+// __class_len__ (len(cls)). A class without them is not subscriptable or
+// iterable and has no len(). bool() of a class is True and hash() is its
+// identity.
+static mp_obj_t type_unary_op(mp_unary_op_t op, mp_obj_t self_in) {
+    switch (op) {
+        case MP_UNARY_OP_BOOL:
+            return mp_const_true;
+        case MP_UNARY_OP_HASH:
+            return MP_OBJ_NEW_SMALL_INT((mp_uint_t)self_in);
+        case MP_UNARY_OP_LEN: {
+            mp_obj_t dest[2];
+            mp_load_method_maybe(self_in, MP_QSTR___class_len__, dest);
+            if (dest[0] == MP_OBJ_NULL) {
+                return MP_OBJ_NULL;
+            }
+            return mp_call_method_n_kw(0, 0, dest);
+        }
+        default:
+            return MP_OBJ_NULL;
+    }
+}
+
+static mp_obj_t type_subscr(mp_obj_t self_in, mp_obj_t index, mp_obj_t value) {
+    if (value != MP_OBJ_SENTINEL) {
+        return MP_OBJ_NULL;
+    }
+    mp_obj_t dest[3];
+    mp_load_method_maybe(self_in, MP_QSTR___class_getitem__, dest);
+    if (dest[0] == MP_OBJ_NULL) {
+        return MP_OBJ_NULL;
+    }
+    dest[2] = index;
+    return mp_call_method_n_kw(1, 0, dest);
+}
+
+static mp_obj_t type_getiter(mp_obj_t self_in, mp_obj_iter_buf_t *iter_buf) {
+    mp_obj_t dest[2];
+    mp_load_method_maybe(self_in, MP_QSTR___class_iter__, dest);
+    if (dest[0] == MP_OBJ_NULL) {
+        return MP_OBJ_NULL;
+    }
+    return mp_getiter(mp_call_method_n_kw(0, 0, dest), iter_buf);
+}
+
 MP_DEFINE_CONST_OBJ_TYPE(
     mp_type_type,
     MP_QSTR_type,
@@ -1165,6 +1218,9 @@ MP_DEFINE_CONST_OBJ_TYPE(
     make_new, type_make_new,
     print, type_print,
     call, type_call,
+    unary_op, type_unary_op,
+    subscr, type_subscr,
+    iter, type_getiter,
     attr, type_attr
     );
 
@@ -1304,9 +1360,40 @@ static mp_obj_t mp_obj_new_type(qstr name, mp_obj_t bases_tuple, mp_obj_t locals
         }
     }
 
+    // MESHPUNK: __init_subclass__ and __class_getitem__ defined as plain
+    // functions become classmethods, as in CPython.
+    static const uint16_t implicit_classmethods[] = {
+        MP_QSTR___init_subclass__, MP_QSTR___class_getitem__,
+    };
+    for (size_t i = 0; i < MP_ARRAY_SIZE(implicit_classmethods); ++i) {
+        elem = mp_map_lookup(&locals_ptr->map, MP_OBJ_NEW_QSTR(implicit_classmethods[i]), MP_MAP_LOOKUP);
+        if (elem != NULL && mp_obj_is_fun(elem->value)) {
+            elem->value = static_class_method_make_new(&mp_type_classmethod, 1, 0, &elem->value);
+        }
+    }
+
     #if MICROPY_PY_DESCRIPTORS
     setname_consume_call_all(&setname_list, MP_OBJ_FROM_PTR(o));
     #endif
+
+    // MESHPUNK: the first base (searched with its own bases) that has an
+    // __init_subclass__ gets it called with the new class. The new class's
+    // own __init_subclass__ runs only for its subclasses.
+    for (size_t i = 0; i < bases_len; i++) {
+        mp_obj_t dest[2] = {MP_OBJ_NULL, MP_OBJ_NULL};
+        struct class_lookup_data lookup = {
+            .obj = (mp_obj_instance_t *)o,
+            .attr = MP_QSTR___init_subclass__,
+            .slot_offset = 0,
+            .dest = dest,
+            .is_type = true,
+        };
+        mp_obj_class_lookup(&lookup, MP_OBJ_TO_PTR(bases_items[i]));
+        if (dest[0] != MP_OBJ_NULL) {
+            mp_call_method_n_kw(0, 0, dest);
+            break;
+        }
+    }
 
     return MP_OBJ_FROM_PTR(o);
 }

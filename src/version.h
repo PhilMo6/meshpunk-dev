@@ -435,6 +435,14 @@
 //                  so a PNG wallpaper scales to the screen. The caller owns
 //                  the returned buffer (_snapshot_free / _snapshot_attach_
 //                  free). No ELF host_export.
+//                  ALSO this level: lib/keybind `kb:keymap_string(opts)`
+//                  takes optional opts.outs ({[action id] = out code},
+//                  replacing those actions' outs for one launch) and
+//                  opts.skip ({[key code] = true}, keys left unbound on the
+//                  actions opts.outs names). The Pyxel launcher's Match game
+//                  builds its -keymap with it, so Pyxel needs min_fw 15.
+//                  Older launchers call it with no argument and get the
+//                  same string as before. No ELF host_export.
 #define MESHPUNK_FW_API 15
 
 // BLE companion protocol identity (reported in the DEVICE_INFO frame — see

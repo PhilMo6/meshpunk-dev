@@ -369,6 +369,337 @@ static bool parse_resource_toml(const char* text, size_t len, loadctx* c) {
 #undef K
 
 // ---------------------------------------------------------------------------
+// Pre-2.0 .pyxres (old_resource_data.rs): text files under pyxel_resource/.
+// Every bank is parsed twice, first only checking and then applying, so a
+// file with an error changes nothing (upstream stages all banks before
+// committing any).
+// ---------------------------------------------------------------------------
+#define OLD_DIR             "pyxel_resource/"
+#define OLD_CURRENT_VERSION 20909u          // settings.rs VERSION "2.9.9"
+
+typedef struct {
+    const char* want;
+    unsigned char* data;
+    size_t size;
+} oldfind;
+
+static bool old_find(void* ctx, const px_zip_file* f, char* err, size_t errlen) {
+    oldfind* o = (oldfind*)ctx;
+    size_t n = strlen(o->want);
+    if (o->data || (size_t)f->name_len != n || memcmp(f->name, o->want, n) != 0) return true;
+    o->data = px_zip_file_contents(f, &o->size, err, errlen);
+    return o->data != NULL;
+}
+
+// str::lines(): lines split at "\n", a "\r" before the "\n" dropped.
+typedef struct {
+    const char* p;
+    const char* end;
+} lineiter;
+
+static bool next_line(lineiter* it, const char** s, size_t* n) {
+    if (it->p >= it->end) return false;
+    const char* nl = (const char*)memchr(it->p, '\n', (size_t)(it->end - it->p));
+    *s = it->p;
+    *n = (size_t)((nl ? nl : it->end) - it->p);
+    if (nl && *n && (*s)[*n - 1] == '\r') (*n)--;
+    it->p = nl ? nl + 1 : it->end;
+    return true;
+}
+
+static int count_lines(const char* text, size_t size) {
+    lineiter it = { text, text + size };
+    const char* s;
+    size_t n;
+    int count = 0;
+    while (next_line(&it, &s, &n)) count++;
+    return count;
+}
+
+static int hex_val(char ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+// parse_hex_group: `width` hex digits as one value; col = 1-based column of the first.
+static bool hex_group(const char* s, int width, const char* entry, int line, int col, uint32_t* out,
+                      char* err, size_t errlen) {
+    uint32_t v = 0;
+    for (int i = 0; i < width; i++) {
+        int d = hex_val(s[i]);
+        if (d < 0) {
+            snprintf(err, errlen, "invalid hexadecimal digit '%c' in '%s' at line %d, column %d",
+                     s[i], entry, line, col + i);
+            return false;
+        }
+        v = (v << 4) | (uint32_t)d;
+    }
+    *out = v;
+    return true;
+}
+
+// parse_hex_values: a line of `width`-digit groups appended to `out` (to its
+// last row when it has rows). signed8 stores each value as an i8.
+static bool hex_values(const char* s, size_t n, int width, bool signed8, const char* entry, int line,
+                       arrbuf* out, char* err, size_t errlen) {
+    if (n % (size_t)width) {
+        snprintf(err, errlen, "invalid value width in '%s' at line %d: expected groups of %d hexadecimal digits",
+                 entry, line, width);
+        return false;
+    }
+    for (size_t g = 0; g < n / (size_t)width; g++) {
+        uint32_t v;
+        if (!hex_group(s + g * (size_t)width, width, entry, line, (int)(g * (size_t)width) + 1, &v, err, errlen))
+            return false;
+        if (!arr_push(out, signed8 ? (int32_t)(int8_t)v : (int32_t)v)) {
+            snprintf(err, errlen, "out of memory");
+            return false;
+        }
+        if (out->a.rows) out->a.row_len[out->a.rows - 1]++;
+    }
+    return true;
+}
+
+// str::parse::<u32>/<u16>: an optional '+', then decimal digits only.
+static bool parse_dec(const char* s, size_t n, uint32_t max, uint32_t* out) {
+    size_t i = (n && s[0] == '+') ? 1 : 0;
+    if (i == n) return false;
+    uint64_t v = 0;
+    for (; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return false;
+        v = v * 10 + (uint64_t)(s[i] - '0');
+        if (v > max) return false;
+    }
+    *out = (uint32_t)v;
+    return true;
+}
+
+// parse_version_string: whitespace dropped, "a.b.c" read as a*10000 + b*100
+// + c, every part after the first one or two digits long.
+static bool parse_version(const char* s, size_t n, uint32_t* out) {
+    char buf[64];
+    size_t k = 0;
+    for (size_t i = 0; i < n && k < sizeof(buf) - 1; i++) {
+        if (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' || s[i] == '\f') continue;
+        buf[k++] = s[i];
+    }
+    uint64_t v = 0;
+    size_t start = 0;
+    for (int part = 0;; part++) {
+        size_t end = start;
+        while (end < k && buf[end] != '.') end++;
+        uint32_t num;
+        if (part > 0 && end - start != 1 && end - start != 2) return false;
+        if (!parse_dec(buf + start, end - start, 0xFFFFFFFFu, &num)) return false;
+        v = v * 100 + num;
+        if (v > 0xFFFFFFFFu) return false;
+        if (end == k) break;
+        start = end + 1;
+    }
+    *out = (uint32_t)v;
+    return true;
+}
+
+static bool old_image(int index, const char* text, size_t size, const char* entry, bool apply,
+                      char* err, size_t errlen) {
+    px_image* img = px_bank_image(index);
+    int w = img->cv.w, h = img->cv.h;
+    uint8_t* d = (uint8_t*)img->cv.data;
+    lineiter it = { text, text + size };
+    const char* s;
+    size_t n;
+    for (int y = 0; next_line(&it, &s, &n); y++) {
+        if (y >= h) {
+            snprintf(err, errlen, "too many image rows in '%s': got %d, maximum %d",
+                     entry, count_lines(text, size), h);
+            return false;
+        }
+        if ((int)n > w) {
+            snprintf(err, errlen, "too many image columns in '%s' at line %d: got %d, maximum %d",
+                     entry, y + 1, (int)n, w);
+            return false;
+        }
+        for (size_t x = 0; x < n; x++) {
+            int v = hex_val(s[x]);
+            if (v < 0) {
+                snprintf(err, errlen, "invalid hexadecimal digit '%c' in '%s' at line %d, column %d",
+                         s[x], entry, y + 1, (int)x + 1);
+                return false;
+            }
+            if (apply) d[(size_t)y * (size_t)w + x] = (uint8_t)v;
+        }
+    }
+    return true;
+}
+
+static bool old_tilemap(int index, uint32_t version, const char* text, size_t size, const char* entry,
+                        bool apply, char* err, size_t errlen) {
+    px_tilemap* tm = apply ? px_bank_tilemap(index) : px.tilemaps[index];
+    int w = tm->cv.w, h = tm->cv.h;
+    uint16_t* d = (uint16_t*)tm->cv.data;
+    int gw = version < 10500 ? 3 : 4;
+    lineiter it = { text, text + size };
+    const char* s;
+    size_t n;
+    for (int y = 0; next_line(&it, &s, &n); y++) {
+        if (y < PX_TILEMAP_SIZE) {
+            if (n % (size_t)gw) {
+                snprintf(err, errlen, "invalid tile width in '%s' at line %d: expected groups of %d hexadecimal digits",
+                         entry, y + 1, gw);
+                return false;
+            }
+            int tiles = (int)(n / (size_t)gw);
+            if (tiles > w) {
+                snprintf(err, errlen, "too many tiles in '%s' at line %d: got %d, maximum %d",
+                         entry, y + 1, tiles, w);
+                return false;
+            }
+            for (int x = 0; x < tiles; x++) {
+                uint32_t t;
+                if (!hex_group(s + (size_t)x * (size_t)gw, gw, entry, y + 1, x * gw + 1, &t, err, errlen))
+                    return false;
+                uint32_t tx = version < 10500 ? t % 32 : (t >> 8) & 0xff;
+                uint32_t ty = version < 10500 ? t / 32 : t & 0xff;
+                if (apply && y < h) d[(size_t)y * (size_t)w + (size_t)x] = PX_TILE(tx, ty);
+            }
+        } else if (y == PX_TILEMAP_SIZE) {
+            uint32_t src;
+            if (!parse_dec(s, n, 0xFFFFFFFFu, &src)) {
+                snprintf(err, errlen, "invalid decimal value '%.*s' in '%s' at line %d", (int)n, s, entry, y + 1);
+                return false;
+            }
+            if (src >= PX_NUM_IMAGES) {
+                snprintf(err, errlen, "image index %u in '%s' at line %d is out of range 0..%d",
+                         (unsigned)src, entry, y + 1, PX_NUM_IMAGES);
+                return false;
+            }
+            if (apply) tm->imgsrc = (int)src;
+        } else {
+            snprintf(err, errlen, "too many tilemap lines in '%s': got %d, maximum %d",
+                     entry, count_lines(text, size), PX_TILEMAP_SIZE + 1);
+            return false;
+        }
+    }
+    return true;
+}
+
+// text == NULL: the entry is missing and the sound is cleared (speed 30).
+static bool old_sound(int index, const char* text, size_t size, const char* entry, bool apply,
+                      const px_res_sink* sink, char* err, size_t errlen) {
+    arrbuf a[4];
+    memset(a, 0, sizeof(a));
+    uint32_t speed = 30;
+    bool ok = true;
+    lineiter it = { text, text + size };
+    const char* s;
+    size_t n;
+    for (int i = 0; ok && text && next_line(&it, &s, &n); i++) {
+        if (n == 4 && memcmp(s, "none", 4) == 0) continue;
+        if (i <= 3) {
+            ok = hex_values(s, n, i == 0 ? 2 : 1, i == 0, entry, i + 1, &a[i], err, errlen);
+        } else if (i == 4) {
+            if (!parse_dec(s, n, 65535, &speed)) {
+                snprintf(err, errlen, "invalid decimal value '%.*s' in '%s' at line %d", (int)n, s, entry, i + 1);
+                ok = false;
+            } else if (speed == 0) {
+                snprintf(err, errlen, "sound speed %u in '%s' at line %d is out of range 1..65536",
+                         (unsigned)speed, entry, i + 1);
+                ok = false;
+            }
+        }
+    }
+    if (ok && apply && sink && sink->sound)
+        sink->sound(sink->ctx, index, &a[0].a, &a[1].a, &a[2].a, &a[3].a, (int)speed);
+    for (int k = 0; k < 4; k++) arr_free(&a[k]);
+    return ok;
+}
+
+// text == NULL: the entry is missing and the music is cleared (4 empty channels).
+static bool old_music(int index, const char* text, size_t size, const char* entry, bool apply,
+                      const px_res_sink* sink, char* err, size_t errlen) {
+    arrbuf seqs;
+    memset(&seqs, 0, sizeof(seqs));
+    bool ok = true;
+    int i = 0;
+    lineiter it = { text, text + size };
+    const char* s;
+    size_t n;
+    while (ok && text && next_line(&it, &s, &n)) {
+        if (i >= 4) {
+            snprintf(err, errlen, "too many music channels in '%s': got %d, maximum 4",
+                     entry, count_lines(text, size));
+            ok = false;
+            break;
+        }
+        if (!arr_row_begin(&seqs)) { snprintf(err, errlen, "out of memory"); ok = false; break; }
+        if (!(n == 4 && memcmp(s, "none", 4) == 0))
+            ok = hex_values(s, n, 2, false, entry, i + 1, &seqs, err, errlen);
+        i++;
+    }
+    for (; ok && i < 4; i++) {
+        if (!arr_row_begin(&seqs)) { snprintf(err, errlen, "out of memory"); ok = false; }
+    }
+    if (ok && apply && sink && sink->music) sink->music(sink->ctx, index, &seqs.a);
+    arr_free(&seqs);
+    return ok;
+}
+
+static bool old_bank_pass(const unsigned char* z, size_t zn, uint32_t version, bool ex_img, bool ex_tm,
+                          bool ex_snd, bool ex_mus, const px_res_sink* sink, bool apply,
+                          char* err, size_t errlen) {
+    char entry[48];
+    for (int kind = 0; kind < 4; kind++) {
+        bool excluded = kind == 0 ? ex_img : kind == 1 ? ex_tm : kind == 2 ? ex_snd : ex_mus;
+        int count = kind == 0 ? PX_NUM_IMAGES : kind == 1 ? PX_NUM_TILEMAPS : kind == 2 ? 64 : 8;
+        if (excluded) continue;
+        for (int i = 0; i < count; i++) {
+            if (kind == 0) snprintf(entry, sizeof(entry), OLD_DIR "image%d", i);
+            else if (kind == 1) snprintf(entry, sizeof(entry), OLD_DIR "tilemap%d", i);
+            else if (kind == 2) snprintf(entry, sizeof(entry), OLD_DIR "sound%02d", i);
+            else snprintf(entry, sizeof(entry), OLD_DIR "music%d", i);
+            oldfind o = { entry, NULL, 0 };
+            if (!px_zip_walk(z, zn, old_find, &o, err, errlen)) return false;
+            const char* text = (const char*)o.data;
+            bool ok = true;
+            if (kind == 0) {
+                if (text) ok = old_image(i, text, o.size, entry, apply, err, errlen);
+                else if (apply) px_clear_u8(&px_bank_image(i)->cv, 0);
+            } else if (kind == 1) {
+                if (text) ok = old_tilemap(i, version, text, o.size, entry, apply, err, errlen);
+                else if (apply) px_clear_u16(&px_bank_tilemap(i)->cv, PX_TILE(0, 0));
+            } else if (kind == 2) {
+                ok = old_sound(i, text, o.size, entry, apply, sink, err, errlen);
+            } else {
+                ok = old_music(i, text, o.size, entry, apply, sink, err, errlen);
+            }
+            free(o.data);
+            if (!ok) return false;
+        }
+    }
+    return true;
+}
+
+static bool load_old_resource(const unsigned char* z, size_t zn, bool ex_img, bool ex_tm, bool ex_snd,
+                              bool ex_mus, const px_res_sink* sink, char* err, size_t errlen) {
+    oldfind o = { OLD_DIR "version", NULL, 0 };
+    if (!px_zip_walk(z, zn, old_find, &o, err, errlen)) return false;
+    if (!o.data) { snprintf(err, errlen, "failed to open '" OLD_DIR "version'"); return false; }
+    uint32_t version;
+    bool ok = parse_version((const char*)o.data, o.size, &version);
+    if (!ok) snprintf(err, errlen, "invalid version '%.*s'", (int)o.size, (const char*)o.data);
+    else if (version > OLD_CURRENT_VERSION) {
+        snprintf(err, errlen, "unsupported version '%.*s'", (int)o.size, (const char*)o.data);
+        ok = false;
+    }
+    free(o.data);
+    if (!ok) return false;
+    return old_bank_pass(z, zn, version, ex_img, ex_tm, ex_snd, ex_mus, sink, false, err, errlen) &&
+           old_bank_pass(z, zn, version, ex_img, ex_tm, ex_snd, ex_mus, sink, true, err, errlen);
+}
+
+// ---------------------------------------------------------------------------
 // .pyxres
 // ---------------------------------------------------------------------------
 typedef struct {
@@ -385,7 +716,8 @@ static bool find_toml(void* ctx, const px_zip_file* f, char* err, size_t errlen)
         fc->toml = (char*)px_zip_file_contents(f, &fc->size, err, errlen);
         return fc->toml != NULL;
     }
-    if (f->name_len > 15 && memcmp(f->name, "pyxel_resource/", 15) == 0) fc->legacy = true;
+    n = strlen(OLD_DIR "version");
+    if ((size_t)f->name_len == n && memcmp(f->name, OLD_DIR "version", n) == 0) fc->legacy = true;
     return true;
 }
 
@@ -396,11 +728,20 @@ bool px_res_load(const char* path, bool ex_img, bool ex_tm, bool ex_snd, bool ex
     if (!z) { snprintf(err, errlen, "Failed to open file '%s'", path); return false; }
     findctx fc = { NULL, 0, false };
     bool ok = px_zip_walk(z, zn, find_toml, &fc, err, errlen);
+    if (ok && fc.legacy) {
+        // resource.rs load_resource: pyxel_resource/version marks the old format.
+        free(fc.toml);
+        printf("[pyxel] An old Pyxel resource file '%s' is loaded. Please re-save it with the latest Pyxel.\n", path);
+        char detail[160];
+        ok = load_old_resource(z, zn, ex_img, ex_tm, ex_snd, ex_mus, sink, detail, sizeof(detail));
+        if (!ok) snprintf(err, errlen, "Failed to load legacy resource file '%s': %s", path, detail);
+        free(z);
+        return ok;
+    }
     free(z);
     if (!ok) { free(fc.toml); return false; }
     if (!fc.toml) {
-        snprintf(err, errlen, fc.legacy ? "'%s' uses the pre-2.0 resource layout, which is not supported"
-                                        : "'%s' has no pyxel_resource.toml", path);
+        snprintf(err, errlen, "'%s' has no pyxel_resource.toml", path);
         return false;
     }
     loadctx c;

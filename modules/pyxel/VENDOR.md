@@ -8,19 +8,47 @@ MicroPython interpreter plus a C implementation of the `pyxel` API.
 | MicroPython v1.29.0 (`ports/embed` package) | `micropython/py`, `micropython/shared`, `micropython/genhdr`, `micropython/extmod` | MIT, Damien P. George and contributors | Local patches below |
 | Pyxel 2.9.9 engine behaviour | `src/*.c`, `pylib/pyxel.py` | MIT, Takashi Kitao | C port of `crates/pyxel-core`: canvas (including rotate/scale and perspective blits), image, tilemap (`collide`, TMX), input, system, resource loading and saving, the built-in font data, BDF fonts, the sound command model with both MML parsers, WAV decoding, tones, channels and voices. Plus the public API surface |
 | LodePNG | `../pico8/fake08-src/libs/lodepng` (compiled from there, as C) | zlib, Lode Vandevenne | PNG decoding, raw DEFLATE for `.pyxapp` / `.pyxres` ZIPs, CRC-32 for saved `.pyxres` |
-| `pylib/enum.py`, `random.py`, `itertools.py` | `pylib/` | Meshpunk (MIT) | Subsets of the CPython modules the games import |
+| `pylib/` modules: `enum`, `random`, `itertools`, `time`, `datetime`, `os` (with `os.path`), `typing`, `abc`, `copy`, `json`, `collections`, `__future__` | `pylib/` | Meshpunk (MIT) | Written for this module: subsets of the CPython modules the games import. `json` and `collections` extend MicroPython's built-in modules (imported as `ujson` / `ucollections`) |
 | `src/libm_extra.c` | `src/` | Meshpunk (MIT) | Float math the firmware does not export |
+
+License texts: `LICENSE-micropython.txt` (MicroPython v1.29.0) and
+`LICENSE-pyxel.txt` (Pyxel). LodePNG's license is in the header of its source
+files.
 
 Games are supplied by the user; each carries its own license.
 
 ## Local MicroPython patches (tagged `MESHPUNK`)
 
-- `py/objstr.c`: `str.ljust`, `str.rjust`, `str.zfill` (CPython padding methods).
+- `py/objstr.c`: `str.ljust`, `str.rjust`, `str.zfill` (CPython padding
+  methods). With a format spec, an instance of a class derived from int or
+  float is formatted as its native value (`f"{x:03d}"` for an IntEnum member).
 - `py/objlist.c`: slice assignment accepts any iterable (`lst[:] = generator`).
 - `py/objexcept.c`, `py/obj.h`: the OSError subclasses `FileExistsError`,
   `FileNotFoundError` and `IsADirectoryError`. `mpconfigport.h` puts them in
   the builtins through `MICROPY_PORT_BUILTINS`, and genhdr holds their three
   qstrs.
+- `mpconfigport.h` builtins: `input` (the `_pyxel` text-entry screen), and
+  `quit` / `exit` (both `sys.exit`).
+- Class hooks for `pylib/enum.py`:
+  - `py/modbuiltins.c`: `__build_class__` keeps the class body in definition
+    order (an ordered map) when a base class has a true `_ordered_namespace_`.
+  - `py/objtype.c`: `type` has `unary_op`, `subscr` and `iter` slots that call
+    the classmethods `__class_len__`, `__class_getitem__` and `__class_iter__`
+    when a class defines them; `bool()` of a class is True and `hash()` its
+    identity. `__init_subclass__` and `__class_getitem__` written as plain
+    functions become classmethods, and the first base with an
+    `__init_subclass__` has it called with each new class.
+- Subclasses of built-in types (`class C(int)`, IntEnum):
+  - `py/objtype.c` `instance_binary_op`: a reversed operator on a native base
+    (`1 + x`) is the forward operator on the native value.
+  - `py/runtime.c` `mp_binary_op`: reflected comparisons, as in CPython (when
+    the left operand's type does not support `<`, `>`, `<=` or `>=`, the right
+    operand's type gets the swapped comparison).
+  - `py/runtime.c` `mp_unary_op` (small ints) and `py/objint_mpz.c`
+    `mp_obj_int_unary_op`: `float(x)` converts; a small int with another
+    unsupported operator raises TypeError.
+- genhdr qstrs: `__class_getitem__`, `__class_iter__`, `__class_len__`,
+  `__init_subclass__`, `_ordered_namespace_`, `input`, `quit`.
 - `py/map.c`: the first probed slot is a Fibonacci multiply of the hash
   (`MAP_POS`), and the lookup-cache index is a Fibonacci multiply of the key.
 - `py/mpstate.h`: lookup-cache entries are `uint16_t`, not `uint8_t`.

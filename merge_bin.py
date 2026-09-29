@@ -34,12 +34,12 @@ def git_version(project_dir):
 # All release artifacts land here.
 RELEASES_DIR_NAME = "releases"
 
-# Per-board release naming. The slug matches MESHPUNK_BOARD_NAME in
+# Per-board release naming: every artifact, the Launcher image included, is
+# meshpunk-<slug>-<version>-<kind>.bin. The slug matches MESHPUNK_BOARD_NAME in
 # src/boards/board_pins.h, which is also what the on-device guide tells the
-# user to look for. The LAUNCHER artifact is the one exception: its filename
-# pattern predates the slugs and the LauncherHub catalog entry downloads it
-# by explicit URL, so its name must not change shape (T-Deck only - the
-# Launcher firmware does not exist for the Heltec).
+# user to look for. The stable repo's (PhilMo6/meshpunk) LauncherHub entry
+# builds its download URL from the git tag as meshpunk-<tag>-launcher.bin, with
+# no slug, so a stable release carrying only this name 404s in that entry.
 BOARD_SLUG = {
     "meshpunk":               "tdeck",
     "meshpunk_release":       "tdeck",
@@ -227,9 +227,8 @@ def merge_bin(source, target, env):
     shutil.copy2(bins["firmware"], firmware_out)
     print("merge_bin: copied firmware (app) binary to %s" % firmware_out)
 
-    # Launcher image: T-Deck only, and its filename pattern is LOAD-BEARING -
-    # the LauncherHub catalog entry downloads it by explicit URL, so the name
-    # keeps its original versioned shape with no board slug.
+    # Launcher image: only for boards in LAUNCHER_ENVS. Its filename is what a
+    # LauncherHub entry downloads (see BOARD_SLUG above).
     if pioenv not in LAUNCHER_ENVS:
         print("merge_bin: no Launcher firmware for this board -"
               " skipping launcher artifact")
@@ -266,7 +265,8 @@ def merge_bin(source, target, env):
     with open(launcher_table, "wb") as f:
         f.write(build_launcher_partition_table(fs_size))
 
-    launcher_img = os.path.join(releases_dir, "meshpunk-%s-launcher.bin" % version)
+    launcher_img = os.path.join(releases_dir,
+                                "meshpunk-%s-%s-launcher.bin" % (slug, version))
     launcher_cmd = [
         sys.executable, esptool,
         "--chip", "esp32s3",

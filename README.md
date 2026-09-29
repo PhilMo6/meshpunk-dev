@@ -117,7 +117,7 @@ Settings > Firmware updates MeshPunk without a computer:
 
 MeshPunk can also be installed through [bmorcelli's Launcher](https://github.com/bmorcelli/Launcher) — a multi-firmware boot menu that lets you keep several firmwares on one device and choose which to boot. If you run the Launcher, install the **`-launcher.bin`** release, not the other files.
 
-1. Download `meshpunk-<version>-launcher.bin` from the releases page.
+1. Download `meshpunk-tdeck-<version>-launcher.bin` from the releases page.
 2. Install it through the Launcher: from a FAT32 SD card, through the WebUI, or as a direct download URL / OTA.
 3. On the first boot MeshPunk sets up its filesystem and unpacks its bundled files (about a minute). After that it boots normally.
 
@@ -289,11 +289,10 @@ System apps (App Library, Files, Map, Messenger, and the Settings pages) are non
    `pio run -e meshpunk_heltec_updater`): the merged image includes it, and
    the artifact step refuses to run without it.
    Each produces the board's `-merged`, `-firmware`, `-littlefs` and
-   `-updater` binaries; the Launcher image is T-Deck only and keeps its
-   original `meshpunk-<ver>-launcher.bin` name (its LauncherHub catalog entry
-   depends on it). The `-firmware.bin` is also what the on-device updater
-   downloads, by that exact name, so release builds must come from the clean
-   tagged commit. If a build reports missing littlefs, run
+   `-updater` binaries; the T-Deck build also produces the Launcher image,
+   `meshpunk-tdeck-<ver>-launcher.bin`. The `-firmware.bin` is also what the
+   on-device updater downloads, by that exact name, so release builds must
+   come from the clean tagged commit. If a build reports missing littlefs, run
    `pio run [-e <env>] -t buildfs` first; if the firmware was already up to
    date, force the artifact step with `pio run -e <release env> -t mergebin`.
 
@@ -449,6 +448,9 @@ MIT
    Adlib OPL2 via fmopl (LGPL); firmware is SeaBIOS + SeaVGABIOS (LGPL v3)
    The downloadable boot disks are FreeDOS https://www.freedos.org (GPL),
    with HIMEMX, CuteMouse (CTMOUSE) and FreeDOS Edit
+- Pyxel games via a C port of the Pyxel engine by Takashi Kitao https://github.com/kitao/pyxel (MIT)
+   Python by MicroPython (MIT) (c) Damien P. George and contributors https://micropython.org
+   PNG and ZIP support via LodePNG (zlib) by Lode Vandevenne
 
 ## Branch
 This branch of the Meshpunk project focuses on extending functionality.

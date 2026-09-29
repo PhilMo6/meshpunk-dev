@@ -169,5 +169,5 @@ if ($missing.Count -gt 0) {
 if (-not (Test-Path $DEST)) { New-Item -ItemType Directory $DEST | Out-Null }
 if (-not (Test-Path "$DEST\pylib")) { New-Item -ItemType Directory "$DEST\pylib" | Out-Null }
 Copy-Item $OUT "$DEST\pyxel.app.elf" -Force
-Copy-Item "pylib\*.py" "$DEST\pylib\" -Force
+Copy-Item "pylib\*" "$DEST\pylib\" -Recurse -Force
 Write-Host "Installed to $DEST"

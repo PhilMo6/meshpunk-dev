@@ -397,10 +397,6 @@ colors = _Colors(DEFAULT_COLORS)
 # ---------------------------------------------------------------------------
 # Resource classes
 # ---------------------------------------------------------------------------
-def _simplify(s):
-    return "".join(c for c in s.lower() if c not in " \t\r\n")
-
-
 class Image:
     # _h: bank handle (0-2 image banks, 3 screen, 4 cursor) or None for an
     # image created by the game, whose state lives in _st/_buf.
@@ -605,11 +601,6 @@ class Tilemap:
         return _p.t_collide(self, x, y, w, h, dx, dy, walls)
 
 
-_NOTE_BASE = {"c": 0, "d": 2, "e": 4, "f": 5, "g": 7, "a": 9, "b": 11}
-_TONE_CHARS = {"t": 0, "s": 1, "p": 2, "n": 3}
-_EFFECT_CHARS = {"n": 0, "s": 1, "v": 2, "f": 3, "h": 4, "q": 5}
-
-
 class Sound:
     def __init__(self):
         self.notes = []
@@ -630,61 +621,18 @@ class Sound:
             raise ValueError("speed must be greater than 0")
         self.speed = speed
 
+    # The string forms are parsed in C (_pyxel.parse_*, sound.rs rules).
     def set_notes(self, notes):
-        s = _simplify(notes)
-        out = []
-        i = 0
-        while i < len(s):
-            c = s[i]
-            i += 1
-            if c == "r":
-                out.append(-1)
-                continue
-            if c not in _NOTE_BASE:
-                raise ValueError("Invalid sound note '%s'" % c)
-            note = _NOTE_BASE[c]
-            c = s[i] if i < len(s) else ""
-            if c == "#":
-                note += 1
-                i += 1
-            elif c == "-":
-                note -= 1
-                i += 1
-            c = s[i] if i < len(s) else ""
-            if c not in "01234" or c == "":
-                raise ValueError("Invalid sound note '%s'" % c)
-            i += 1
-            out.append(note + int(c) * 12)
-        self.notes = out
+        self.notes = _p.parse_notes(notes)
 
     def set_tones(self, tones):
-        out = []
-        for c in _simplify(tones):
-            if c in _TONE_CHARS:
-                out.append(_TONE_CHARS[c])
-            elif "0" <= c <= "9":
-                out.append(int(c))
-            else:
-                raise ValueError("Invalid sound tone '%s'" % c)
-        self.tones = out
+        self.tones = _p.parse_tones(tones)
 
     def set_volumes(self, volumes):
-        out = []
-        for c in _simplify(volumes):
-            if "0" <= c <= "7":
-                out.append(int(c))
-            else:
-                raise ValueError("Invalid sound volume '%s'" % c)
-        self.volumes = out
+        self.volumes = _p.parse_volumes(volumes)
 
     def set_effects(self, effects):
-        out = []
-        for c in _simplify(effects):
-            if c in _EFFECT_CHARS:
-                out.append(_EFFECT_CHARS[c])
-            else:
-                raise ValueError("Invalid sound effect '%s'" % c)
-        self.effects = out
+        self.effects = _p.parse_effects(effects)
 
     # MML mode: code is parsed now (errors raise here) and again at play time.
     def mml(self, code=None):
