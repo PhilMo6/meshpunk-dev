@@ -41,6 +41,7 @@ typedef struct {
 } board_port_t;
 
 #define HOLD_COUNTDOWN_S 8
+#define RELEASE_COUNTDOWN_S 5
 
 static esp_loader_error_t map_err(esp_err_t err)
 {
@@ -263,6 +264,13 @@ void rung7c_c6_rom(void)
                "the countdown\n");
     }
 
+    // The C6 samples B (GPIO9) at reset: if B is still held, the reset below
+    // re-enters ROM download mode instead of starting the C6's own firmware.
+    printf("[c6rom] >>> RELEASE the B button now (if still held) <<<\n");
+    for (int s = RELEASE_COUNTDOWN_S; s > 0; s--) {
+        printf("[c6rom]     B released? C6 normal reset in %d...\n", s);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
     printf("[c6rom] stage: normal reset (B released) → C6 own firmware\n");
     esp_loader_reset_target(&loader);
     esp_loader_deinit(&loader);
