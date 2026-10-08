@@ -2118,6 +2118,8 @@ static bool wifi_dl_client_open(const char *url) {
     s_dl_http = new HTTPClient();
     s_dl_http->setUserAgent("meshpunk/1.0");
     s_dl_http->setReuse(true);
+    // GitHub release assets answer with a 302 to their storage host.
+    s_dl_http->setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     // Kept across begin(); HTTPClient clears the value before each request.
     static const char *dl_headers[] = { "Transfer-Encoding" };
     s_dl_http->collectHeaders(dl_headers, 1);

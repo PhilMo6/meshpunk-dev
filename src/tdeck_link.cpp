@@ -19,7 +19,7 @@
 
 #define TDL_MAGIC        0xA5
 // 57 makes the largest frame exactly 64 bytes = one full-speed bulk packet,
-// the most the tdeck USB driver's link_send() accepts per pipe transfer
+// the most the espserial USB driver's link_send() accepts per pipe transfer
 // (it rejects anything over the endpoint's 64-byte max packet size). gblink
 // frames stay tiny; the dgram service fills frames to this limit.
 #define TDL_MAX_PAYLOAD  57

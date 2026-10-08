@@ -253,23 +253,56 @@ static void usb_src_armed(void) {
     usb_src_fail("expander write OTG_EN high");
     return;
   }
+  // VBUS trace: VBUSOK and the CC comparator sampled every 1 ms for 500 ms
+  // after OTG_EN high, then printed as ok/LOW runs (first 8) and a result.
+  struct VbusRun { bool ok; uint16_t from, to; };
+  VbusRun  runs[8];
+  int      nruns      = 0;
+  bool     more       = false;
+  int      up_ms      = -1;   // first VBUSOK sample
+  int      cc_lost_ms = -1;   // first COMP sample (the sink's Rd gone)
+  uint32_t dip_ms     = 0;    // time below 4.0 V after up_ms
+  uint32_t prev_t     = 0;
+  bool     prev_ok    = false;
   uint32_t t0 = millis();
   for (;;) {
-    if (!aw35615_status(&vbus, nullptr)) {
+    uint32_t t = millis() - t0;
+    if (t >= 500) break;
+    bool open = false;
+    if (!aw35615_status(&vbus, &open)) {
       usb_src_fail("AW35615 read (STATUS0)");
       return;
     }
-    if (vbus) break;
-    if (millis() - t0 >= 200) {
-      usb_src_fail("VBUS below 4.0 V 200 ms after OTG_EN high");
-      return;
-    }
-    delay(2);
+    if (up_ms >= 0 && !prev_ok) dip_ms += t - prev_t;
+    if (vbus && up_ms < 0) up_ms = (int)t;
+    if (open && cc_lost_ms < 0) cc_lost_ms = (int)t;
+    if (nruns > 0 && runs[nruns - 1].ok == vbus) runs[nruns - 1].to = (uint16_t)t;
+    else if (nruns < 8) runs[nruns++] = { vbus, (uint16_t)t, (uint16_t)t };
+    else more = true;
+    prev_t  = t;
+    prev_ok = vbus;
+    delay(1);
+  }
+
+  usbc_log("VBUS trace CC%u, 500 ms:", (unsigned)cc);
+  for (int i = 0; i < nruns; i++)
+    usbc_log(" %-4s %u-%u", runs[i].ok ? "ok" : "LOW", (unsigned)runs[i].from,
+             (unsigned)runs[i].to);
+  if (more) usbc_log(" (more)");
+  if (cc_lost_ms < 0) usbc_log("CC held whole time");
+  else                usbc_log("CC lost at %d ms", cc_lost_ms);
+  if (up_ms < 0)      usbc_log("RESULT: VBUS never came up");
+  else if (!prev_ok)  usbc_log("RESULT: VBUS stayed low");
+  else if (dip_ms)    usbc_log("RESULT: dip %lu ms, recovered", (unsigned long)dip_ms);
+  else                usbc_log("RESULT: never dipped");
+
+  if (up_ms < 0) {
+    usb_src_fail("VBUS below 4.0 V 500 ms after OTG_EN high");
+    return;
   }
   s_usb_cc    = cc;
   s_usb_state = USB_SRC_SOURCING;
-  usbc_log("device attached (CC%u): 5 V on, VBUS up in %lu ms", (unsigned)cc,
-           (unsigned long)(millis() - t0));
+  usbc_log("device attached (CC%u): 5 V on, VBUS up in %d ms", (unsigned)cc, up_ms);
 }
 
 static void usb_src_sourcing(void) {
