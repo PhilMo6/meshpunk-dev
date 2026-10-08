@@ -391,7 +391,8 @@
 //                  LV_FONT_UNSCII_16 is compiled in (lib/lv_conf.h), so
 //                  lvgl.Font("unscii", 16) resolves — the Web app's
 //                  monospace for pre/code. No ELF host_export.
-// 15 (unreleased since v0.4.3, which shipped level 14): lib/fileman gains
+// 15 (unreleased since v0.4.3, which shipped level 14; the v0.5.0-devN tags
+//                  are dev-channel builds and do not close a level): lib/fileman gains
 //                  `fileman.dofile(path, ...)` — load and RUN a Lua file
 //                  from EITHER drive, returning the chunk's results (or
 //                  nil, err) and passing extra args through. Lua's own
@@ -443,6 +444,29 @@
 //                  builds its -keymap with it, so Pyxel needs min_fw 15.
 //                  Older launchers call it with no argument and get the
 //                  same string as before. No ELF host_export.
+//                  ALSO this level:
+//                  `_usb_drv_write(name, blob) -> bool` — the app-to-driver
+//                  half of the dynamic-driver channel (`_usb_drv_read` is the
+//                  other half). The latest blob, at most 256 bytes, is kept
+//                  per driver name and survives the driver reloading when its
+//                  device re-enumerates; an empty blob clears it. The USB
+//                  driver ABI (src/usb/usb_driver_abi.h) gained a tail on
+//                  UsbHostApi: command() to read that blob, and file access
+//                  (file_open / file_size / file_seek / file_read /
+//                  file_close for reading; file_create / file_write for
+//                  writing, SD only). A driver module that uses the
+//                  tail needs min_fw 15; older modules are unaffected.
+//                  First consumers: the `espserial` driver (peer link +
+//                  ROM-bootloader flasher; it replaces the `tdeck` driver)
+//                  and Tools/Flasher. No ELF host_export.
+//                  ALSO this level: lib/filepick — the shared file / folder
+//                  picker (`filepick.open(root, { mode = "file" | "dir",
+//                  start, exts, filter, on_pick })`), a nav.push'd
+//                  full-screen list over lib/fileman that browses every
+//                  drive and returns one drive-prefixed path. Consumers:
+//                  Tools/Flasher (Browse) and Code Editor 1.1.0 (its whole
+//                  file side), so Code Editor needs min_fw 15. No ELF
+//                  host_export.
 #define MESHPUNK_FW_API 15
 
 // BLE companion protocol identity (reported in the DEVICE_INFO frame — see
