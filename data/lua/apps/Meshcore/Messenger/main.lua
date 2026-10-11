@@ -1262,7 +1262,8 @@ local function build_chat(target)
             if context_menu_open then return end
             context_menu_open = true
             show_msg_info(msg, function(m)
-                textArea.text = "@[" .. (m.from or "?") .. "] "
+                local draft = (textArea.text or ""):gsub("^@%[[^%]]*%] ", "", 1)
+                textArea.text = "@[" .. (m.from or "?") .. "] " .. draft
             end, function()
                 -- show_msg_info already nav.pop()'d back to this chat's scope;
                 -- just clear the menu guard and re-focus the image we acted on.
