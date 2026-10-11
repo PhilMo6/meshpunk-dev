@@ -50,7 +50,8 @@ BOARD_SLUG = {
 }
 RELEASE_ENVS  = {"meshpunk_release", "meshpunk_heltec_release",
                  "meshpunk_wio_l2_release"}
-LAUNCHER_ENVS = {"meshpunk_release"}   # bmorcelli Launcher exists for T-Deck only
+LAUNCHER_ENVS = {"meshpunk_release",   # bmorcelli Launcher exists for these boards
+                 "meshpunk_wio_l2_release"}
 
 # The updater firmware of each board (src/updater/main_updater.cpp), built by
 # its own env and included in merged.bin at OFFSETS["updater"]. A board with
@@ -85,8 +86,9 @@ UPDATER_ENV = {
 #            then repopulates it on first boot.
 #
 # The payload is a SEPARATE littlefs image of data/ sized LAUNCHER_FS_SIZE, not
-# the build's assets image: the Launcher's T-Deck table keeps 0x1A0000 of the
-# 16 MB flash for itself (nvs, otadata, its 1.5 MB app, coredump), so an
+# the build's assets image: the Launcher's 16 MB table (support_files/
+# custom_16Mb.csv, used by its T-Deck and Wio Tracker L2 builds) keeps 0x1A0000
+# of the flash for itself (nvs, otadata, its 1.5 MB app, coredump), so an
 # install has 0xE60000 bytes for our declared 0x580000 app plus this image.
 # 0x600000 fits (0xB80000 total); the CSV's 0x9F0000 assets image does not
 # (0xF70000), and the Launcher then refuses the install for lack of space.
