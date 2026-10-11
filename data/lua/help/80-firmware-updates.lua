@@ -1,8 +1,8 @@
 local _, dev = ...
 
--- Release artifacts are meshpunk-<board>-<version>-<kind>.bin, the T-Deck's
--- Launcher image included, and dev.name is the same board slug the filenames
--- carry.
+-- Release artifacts are meshpunk-<board>-<version>-<kind>.bin, the T-Deck and
+-- Wio L2 Launcher images included, and dev.name is the same board slug the
+-- filenames carry.
 local build = dev.name ~= "" and dev.name or "your device"
 
 local body = [[
@@ -22,10 +22,17 @@ Releases are on the MeshPunk GitHub releases page. Builds are per device: the fi
 
 - Recovery: if the firmware ever fails to start, copy a release -firmware.bin for this device into /meshpunk/ota/ on the SD card and restart. The updater installs it and deletes the file.]]
 
+local launcher_req = nil
 if dev.name == "tdeck" then
+    launcher_req = "2.7.2+"
+elseif dev.name == "wio_l2" then
+    launcher_req = "a release with Wio Tracker L2 support"
+end
+
+if launcher_req then
     body = body .. [[
 
-- Launcher users: with bmorcelli's multi-firmware Launcher (2.7.2+), install the -launcher.bin through the Launcher (FAT32 SD, WebUI, or direct URL/OTA). First boot sets up the filesystem (about a minute). Don't install the -merged.bin through the Launcher - that one is for the web flasher. Updates come through the Launcher too; the Firmware page detects a Launcher install and offers nothing there.]]
+- Launcher users: with bmorcelli's multi-firmware Launcher (]] .. launcher_req .. [[), install the -launcher.bin through the Launcher (FAT32 SD, WebUI, or direct URL/OTA). First boot sets up the filesystem (about a minute). Don't install the -merged.bin through the Launcher - that one is for the web flasher. Updates come through the Launcher too; the Firmware page detects a Launcher install and offers nothing there.]]
 end
 
 return {

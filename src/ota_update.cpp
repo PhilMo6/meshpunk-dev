@@ -712,19 +712,13 @@ static int lua_ota_begin(lua_State* L) {
       session_close_files();
       return push_fail(L, "image larger than the main partition");
     }
-    if (sd_mounted) {
-      sd_spi_take();
-      uint64_t free_bytes = sd_dev_total_bytes() - sd_dev_used_bytes();
-      sd_spi_release();
-      if (free_bytes < (uint64_t)len + 65536) {
+    {
+      uint64_t free_bytes = 0;
+      if (!meshpunk_df(sd_mounted ? MP_SD : MP_FLASH, NULL, &free_bytes)
+          || free_bytes < (uint64_t)len + 65536) {
         session_close_files();
-        return push_fail(L, "not enough free space on the SD card");
-      }
-    } else {
-      size_t total = 0, used = 0;
-      if (!mp_littlefs_df(&total, &used) || total - used < (size_t)len + 65536) {
-        session_close_files();
-        return push_fail(L, "not enough free space on internal flash");
+        return push_fail(L, sd_mounted ? "not enough free space on the SD card"
+                                       : "not enough free space on internal flash");
       }
     }
     meshpunk_mkdirs(path.c_str(), false);

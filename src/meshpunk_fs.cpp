@@ -21,6 +21,27 @@ bool mp_littlefs_df(size_t* total, size_t* used) {
     return true;
 }
 
+bool meshpunk_df(MpDrive drive, uint64_t* total, uint64_t* free_bytes) {
+    uint64_t t = 0, f = 0;
+    if (drive == MP_SD) {
+        if (!sd_mounted) return false;
+        sd_spi_take();
+        t = sd_dev_total_bytes();
+        f = t - sd_dev_used_bytes();
+        sd_spi_release();
+    } else if (drive == MP_USB) {
+        if (!usb_fs_df(&t, &f)) return false;
+    } else {
+        size_t lt = 0, lu = 0;
+        if (!mp_littlefs_df(&lt, &lu)) return false;
+        t = lt;
+        f = lt - lu;
+    }
+    if (total)      *total      = t;
+    if (free_bytes) *free_bytes = f;
+    return true;
+}
+
 // Strip an S:/L:/U: prefix, set *drive accordingly.
 // If no prefix, *drive = default_sd ? MP_SD : MP_FLASH.
 // Also strips leading /sd/ when targeting SD, since sd_dev_fs().open()

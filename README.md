@@ -113,11 +113,11 @@ Settings > Firmware updates MeshPunk without a computer:
 - Only releases from the one that introduced the updater onward can be installed this way. Each image carries a board tag, and the page refuses files built for the other board or from before the tag existed. Older releases still flash by USB.
 - Devices installed through the Launcher update through the Launcher instead; the page says so and offers nothing there.
 
-## Using with the Launcher (optional, T-Deck only)
+## Using with the Launcher (optional, T-Deck and Wio Tracker L2)
 
 MeshPunk can also be installed through [bmorcelli's Launcher](https://github.com/bmorcelli/Launcher) — a multi-firmware boot menu that lets you keep several firmwares on one device and choose which to boot. If you run the Launcher, install the **`-launcher.bin`** release, not the other files.
 
-1. Download `meshpunk-tdeck-<version>-launcher.bin` from the releases page.
+1. Download your device's Launcher image from the releases page: `meshpunk-tdeck-<version>-launcher.bin` (T-Deck) or `meshpunk-wio_l2-<version>-launcher.bin` (Wio Tracker L2).
 2. Install it through the Launcher: from a FAT32 SD card, through the WebUI, or as a direct download URL / OTA.
 3. On the first boot MeshPunk sets up its filesystem and unpacks its bundled files (about a minute). After that it boots normally.
 
@@ -125,8 +125,8 @@ Notes:
 
 - The MeshPunk app carries its own files and populates its filesystem by itself, so no extra steps are needed in the Launcher. Launcher 2.7.x may ask whether to copy SPIFFS during the install — either answer works.
 - Use `-launcher.bin` only. `-firmware.bin` (the bare app) installs but does not boot: it declares no partition layout, so the Launcher creates no data partition and MeshPunk has nowhere to unpack its files. `-merged.bin` is a full-flash image for the web flasher, not for the Launcher.
-- Works with Launcher 2.7.2 and newer.
-- Updates come through the Launcher too (its LauncherHub entry tracks MeshPunk releases). The on-device Firmware page detects a Launcher install and offers nothing there.
+- T-Deck: works with Launcher 2.7.2 and newer. Wio Tracker L2: needs a Launcher release that includes L2 support.
+- Updates come through the Launcher too (on the T-Deck, its LauncherHub entry tracks MeshPunk releases). The on-device Firmware page detects a Launcher install and offers nothing there.
 - This path is only for devices running the Launcher. For a normal install, use the flasher steps above.
 
 ## Radio protocols
@@ -232,7 +232,7 @@ The App Library (top-level app) installs apps and themes onto your device over W
 
 **[github.com/PhilMo6/meshpunk-apps](https://github.com/PhilMo6/meshpunk-apps)**
 
-Apps are grouped by category; when an installed app is behind the catalog an **Updates** list appears at the top. Themes have their own downloader under Settings > Theme > Get. Every app and theme that ships with the firmware is tracked here too, so even preinstalled ones can be updated OTA. Contributions (your own apps and themes) are welcome via pull request — see that repo's README.
+Apps are grouped by category; when an installed app or theme is behind the catalog an **Updates** list appears at the top. Themes have their own pinned category next to LoRa Protocols, with Apply right in the detail menu (Settings > Theme stays the quick picker for switching). Every app and theme that ships with the firmware is tracked here too, so even preinstalled ones can be updated OTA. Contributions (your own apps and themes) are welcome via pull request — see that repo's README.
 
 System apps (App Library, Files, Map, Messenger, and the Settings pages) are non-removable, but can still be updated.
 
@@ -284,13 +284,14 @@ System apps (App Library, Files, Map, Messenger, and the Settings pages) are non
    ```
    pio run -e meshpunk_release        # T-Deck  -> meshpunk-tdeck-<ver>-*.bin + launcher
    pio run -e meshpunk_heltec_release # Heltec  -> meshpunk-heltec_v4-<ver>-*.bin
+   pio run -e meshpunk_wio_l2_release # Wio L2  -> meshpunk-wio_l2-<ver>-*.bin + launcher
    ```
-   Build the board's updater env first (`pio run -e meshpunk_updater` or
-   `pio run -e meshpunk_heltec_updater`): the merged image includes it, and
-   the artifact step refuses to run without it.
+   Build the board's updater env first (`pio run -e meshpunk_updater`,
+   `pio run -e meshpunk_heltec_updater` or `pio run -e meshpunk_wio_l2_updater`):
+   the merged image includes it, and the artifact step refuses to run without it.
    Each produces the board's `-merged`, `-firmware`, `-littlefs` and
-   `-updater` binaries; the T-Deck build also produces the Launcher image,
-   `meshpunk-tdeck-<ver>-launcher.bin`. The `-firmware.bin` is also what the
+   `-updater` binaries; the T-Deck and Wio L2 builds also produce the Launcher
+   image, `meshpunk-<board>-<ver>-launcher.bin`. The `-firmware.bin` is also what the
    on-device updater downloads, by that exact name, so release builds must
    come from the clean tagged commit. If a build reports missing littlefs, run
    `pio run [-e <env>] -t buildfs` first; if the firmware was already up to

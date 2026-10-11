@@ -2028,6 +2028,10 @@ static int lua_wifi_fetch(lua_State *L) {
 // filepath uses S:/L: prefix convention (see meshpunk_fs).
 // A chunked response (Transfer-Encoding: chunked) is decoded: only the body
 // data reaches the file, and the download ends at the zero-size chunk.
+// A body with a known length is refused ("Not enough free space") before any
+// byte is written when the target drive has less than length + 16KB free; a
+// short file write mid-body fails with "Disk full". Either way the partial
+// file is left for the caller to remove.
 //
 // The HTTPClient (and its TLS session) persists between calls: consecutive
 // downloads from the same host reuse the socket and skip DNS + TCP + TLS
@@ -2195,6 +2199,23 @@ static int lua_wifi_download_file(lua_State *L) {
   int len = chunked ? -1 : s_dl_http->getSize();
   WiFiClient *stream = s_dl_http->getStreamPtr();
 
+  if (len > 0) {
+    // Known length: refuse before opening the file when it cannot fit. An
+    // unmounted drive answers false here and fails at meshpunk_open below.
+    MpDrive drive;
+    meshpunk_parse_drive(filepath, &drive, false);
+    uint64_t free_bytes = 0;
+    if (meshpunk_df(drive, NULL, &free_bytes) &&
+        (uint64_t)len + 16384 > free_bytes) {
+      wifi_dl_client_close();   // unread body: the socket cannot be reused
+      lua_pushboolean(L, 0);
+      lua_setfield(L, -2, "success");
+      lua_pushstring(L, "Not enough free space");
+      lua_setfield(L, -2, "error");
+      return 1;
+    }
+  }
+
   MeshpunkFile mf = meshpunk_open(filepath, "w", false);
   if (!mf.valid) {
     lua_pushboolean(L, 0);
@@ -2237,7 +2258,18 @@ static int lua_wifi_download_file(lua_State *L) {
     int out = chunked ? chunk_decode(&ck, s_dl_buf, rd) : rd;
     if (out > 0) {
       if (mf.is_sd) sd_spi_take();
-      mf.file.write(s_dl_buf, out);
+      size_t wr = mf.file.write(s_dl_buf, out);
+      if (wr != (size_t)out) {
+        // Short write = the drive is full. meshpunk_close releases the SPI
+        // lock taken above; the unread body makes the socket unusable.
+        meshpunk_close(mf);
+        wifi_dl_client_close();
+        lua_pushboolean(L, 0);
+        lua_setfield(L, -2, "success");
+        lua_pushstring(L, "Disk full");
+        lua_setfield(L, -2, "error");
+        return 1;
+      }
       if (mf.is_sd) sd_spi_release();
     }
     total += out;
