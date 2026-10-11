@@ -34,7 +34,7 @@ nav.replace(content, { flags = nav.ROLLOVER + nav.SCROLL_FIRST })
 -- Title
 content:Label { text = "Firmware", w = lvgl.PCT(70), h = 26 }
 local back_btn = content:Button { w = 50, h = 22 }
-back_btn:Label { text = "Home", align = lvgl.ALIGN.CENTER }
+local back_lbl = back_btn:Label { text = "Home", align = lvgl.ALIGN.CENTER }
 
 local status = content:Label { text = "", w = lvgl.PCT(100), h = 16 }
 
@@ -64,6 +64,30 @@ local function show(obj, on)
     else
         obj:add_flag(lvgl.FLAG.HIDDEN)
     end
+end
+
+-- Leaving while a download or verify is stepping aborts it (set_on_close at
+-- the bottom), so Home then wants a second tap within LEAVE_TIMEOUT_MS.
+local LEAVE_TIMEOUT_MS = 8000
+local leave_armed = false
+local leave_timer = nil
+
+local function disarm_leave()
+    leave_armed = false
+    if leave_timer then leave_timer:delete(); leave_timer = nil end
+    back_lbl:set({ text = "Home" })
+end
+
+local function arm_leave()
+    disarm_leave()
+    leave_armed = true
+    back_lbl:set({ text = "Sure?" })
+    leave_timer = apps.add_timer { period = LEAVE_TIMEOUT_MS, cb = function(t)
+        t:delete()
+        leave_timer = nil
+        disarm_leave()
+        status.text = ""
+    end }
 end
 
 -- ── Update over WiFi ────────────────────────────────────────────────────────
@@ -113,7 +137,7 @@ verify_btn:Label { text = "Verify staged image", align = lvgl.ALIGN.CENTER }
 local install_btn = content:Button { w = lvgl.PCT(100), h = 30 }
 local install_lbl = install_btn:Label { text = "Restart to install", align = lvgl.ALIGN.CENTER }
 local cancel_btn = content:Button { w = lvgl.PCT(100), h = 30 }
-cancel_btn:Label { text = "Delete staged image", align = lvgl.ALIGN.CENTER }
+local cancel_lbl = cancel_btn:Label { text = "Delete staged image", align = lvgl.ALIGN.CENTER }
 
 local staged_path = info.staged or ""
 local step_timer = nil
@@ -140,6 +164,8 @@ local function stop_stepping()
         step_timer:delete()
         step_timer = nil
     end
+    disarm_leave()
+    cancel_lbl:set({ text = "Delete staged image" })
 end
 
 local function disarm()
@@ -188,12 +214,14 @@ local function start_stepping()
     show(verify_btn, false)
     show(install_btn, false)
     show(cancel_btn, true)
+    cancel_lbl:set({ text = "Stop update" })
     reveal(cancel_btn)
     step_timer = apps.add_timer { period = 30, cb = function(t)
         local ok, r = pcall(_ota_step)
         if not ok or type(r) ~= "table" then
             step_timer = nil
             t:delete()
+            stop_stepping()
             status.text = "Update step failed: " .. tostring(r)
             return
         end
@@ -250,7 +278,7 @@ check_btn:onClicked(function()
     show(dl_btn, false)
     downloader.wifi_wait(15000, function(connected)
         if not connected then
-            status.text = "WiFi not connected"
+            status.text = "WiFi not connected - check Settings > WiFi"
             return
         end
         status.text = "Checking " .. channel .. " releases..."
@@ -379,9 +407,10 @@ install_btn:onClicked(function()
 end)
 
 cancel_btn:onClicked(function()
+    local was_stepping = step_timer ~= nil
     stop_stepping()
     pcall(_ota_cancel)
-    status.text = "Staged image deleted"
+    status.text = was_stepping and "Update stopped" or "Staged image deleted"
     refresh_staged()
 end)
 
@@ -395,6 +424,11 @@ apps.set_on_close(function()
 end)
 
 back_btn:onClicked(function()
+    if step_timer and not leave_armed then
+        arm_leave()
+        status.text = "Tap Home again to stop the update"
+        return
+    end
     apps.go_home()
 end)
 
