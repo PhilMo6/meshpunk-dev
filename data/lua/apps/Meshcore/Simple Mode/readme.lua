@@ -13,7 +13,7 @@ Apps lists every installed app. A picked app gets a button on the simple home sc
 
 Tap a row to tick it. Ticks are kept while you search and switch pages.
 
-When the right ones are ticked, press Start Simple Mode. The button is at the top of the list and again at the bottom, and the space key does the same from anywhere on the page except while typing in the search box. Starting saves the ticks; Save on its own keeps them without starting. The home screen becomes a list of just those contacts, channels and apps; tapping a chat opens it, with a box to type a message and send it. Nothing else is on the screen.
+When the right ones are ticked, press Start Simple Mode. The button is at the top of the list and again at the bottom, and the space key does the same from anywhere on the page except while typing in the search box. Starting saves the ticks; Save on its own keeps them without starting. The home screen becomes a list of just those contacts, channels and apps; tapping a chat opens it, with a box to type a message and send it. Hold a message, or press it while stepping through messages with the trackball, for its details and a Reply button that puts the sender's name in the box. Nothing else is on the screen.
 
 The message count in the top bar counts only the picked chats. The top bar is loaded once at start-up, so that part of the switch, in either direction, shows after the next restart.
 

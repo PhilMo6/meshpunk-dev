@@ -509,6 +509,8 @@ show_chat = function(target)
     end)
 
     local status_labels = {}   -- own msg table -> its header label (ack updates)
+    local menu_open = false    -- a message popup is up (one at a time)
+    local ta                   -- the input box; built after the list, used by Reply
 
     local function status_word(msg)
         local s = msg.status
@@ -554,6 +556,45 @@ show_chat = function(target)
             text_color = is_me and COL_ME_TX or COL_THEM_TX,
         }
         if is_me and msg.status ~= nil then status_labels[msg] = hdr end
+
+        -- Message popup (the Messenger's scheme): hold a bubble, or press it
+        -- while in message select, for who/when/text, Reply and Close. Reply
+        -- puts an @[name] mention in the input, the Messenger's reply form.
+        local function open_menu()
+            if menu_open then return end
+            menu_open = true
+            modal(function(box, close)
+                local function done()
+                    close()
+                    menu_open = false
+                    if in_msg_select then pcall(nav.set_focused, bubble) end
+                end
+                local who = is_me and "You" or ((not is_channel) and title or sender_name(msg.from))
+                box:Label { text = "From: " .. who, w = lvgl.PCT(100) }
+                box:Label {
+                    text = "Time: " .. (msg.timestamp and utils.clockDateTime(msg.timestamp) or "?"),
+                    w = lvgl.PCT(100), text_color = COL_META,
+                }
+                box:Label { text = msg.text or "", w = lvgl.PCT(100) }
+                if not is_me then
+                    local reply_b = box:Button { w = lvgl.PCT(100), h = 32 }
+                    reply_b:Label { text = "Reply", align = lvgl.ALIGN.CENTER }
+                    reply_b:onevent(lvgl.EVENT.RELEASED, function()
+                        done()
+                        -- Goes in front of whatever is already typed, never over it.
+                        ta.text = "@[" .. (msg.from or "?") .. "] " .. (ta.text or "")
+                        pcall(nav.set_focused, ta)
+                    end)
+                end
+                local close_b = box:Button { w = lvgl.PCT(100), h = 32 }
+                close_b:Label { text = "Close", align = lvgl.ALIGN.CENTER }
+                close_b:onevent(lvgl.EVENT.RELEASED, done)
+            end)
+        end
+        bind_tap(bubble, function()
+            if in_msg_select then open_menu() end
+        end)
+        bubble:onevent(lvgl.EVENT.LONG_PRESSED, open_menu)
         return bubble
     end
 
@@ -618,7 +659,7 @@ show_chat = function(target)
     -- and the ": " count against the cap; a DM gets all of it.
     local max_len = MAX_TEXT_LEN
     if is_channel then max_len = math.max(1, MAX_TEXT_LEN - #me - 2) end
-    local ta = page:Textarea {
+    ta = page:Textarea {
         one_line = true, max_length = max_len,
         w = lvgl.PCT(74), h = 34,
     }
