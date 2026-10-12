@@ -526,7 +526,7 @@ show_chat = function(target)
         -- In a DM the other side is always this contact, so its bubbles carry
         -- the title (nickname); a channel names each sender (see sender_name).
         local who = is_me and "You" or ((not is_channel) and title or sender_name(msg.from))
-        local head = who .. "  " .. utils.clockHM(msg.timestamp)
+        local head = who .. "  " .. utils.chatStamp(msg.timestamp)
         if is_me then
             local w = status_word(msg)
             if w then head = head .. "  " .. w end

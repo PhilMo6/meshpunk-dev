@@ -1205,7 +1205,7 @@ local function build_chat(target)
         bubble:clear_flag(lvgl.FLAG.SCROLLABLE)
 
         local hdr = is_me and "You" or utils.emojiText(msg.from or "?")
-        local meta = utils.clockHM(msg.timestamp)
+        local meta = utils.chatStamp(msg.timestamp)
         -- Show a status word on any own message that has one: DMs/rooms carry an
         -- ack status ("sent"→"delivered"/…); channels get a repeat-until-heard
         -- status only once the poll sets it (nil until then → no word).
