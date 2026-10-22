@@ -1,5 +1,5 @@
-// Rung 7c: C6 ROM download over SDIO — adapter-free flashing feasibility.
-// No flash writes: the C6's own firmware is untouched.
+// Rung 7c: C6 ROM download over SDIO — adapter-free flashing.
+// Rung 7d: writes a C6 firmware image from the SD card over that link.
 //
 // The C6 enters its ROM download mode when its GPIO9 (the C6 "B" button)
 // is low at reset (esptool boot-mode docs; the C6 ROM's download mode
@@ -8,10 +8,17 @@
 // the button is held by hand. Espressif's esp-serial-flasher then connects
 // over the C6 SDIO link: it identifies the chip from the SDIO CIS (vendor
 // 0x0092, device 0x100D = ESP32-C6), loads its flasher stub into the C6's
-// RAM and waits for the stub's "OHAI" packet. Afterwards the probe only
-// reads: the C6's MAC and flash size through the stub. A normal reset
-// (button released) returns the C6 to its own firmware, which rung 7 then
-// checks over AT.
+// RAM and waits for the stub's "OHAI" packet. The stub then reports the
+// C6's MAC and flash size.
+//
+// Rung 7d runs inside that stub session, so only when B was held through
+// the reset. It writes the one .bin in /sdcard/c6 at C6 flash address 0x0
+// after checking that the file is a merged C6 image: an ESP32-C6
+// bootloader header at 0x0, a partition table at 0x8000, a size that fits
+// the C6 flash. The write uses 1 KB blocks (the block size of the
+// library's own SDIO example) and ends with the library's MD5 comparison
+// of the written region. A normal reset (button released) then starts the
+// C6's own firmware, which rung 7 identifies.
 //
 // Port: the library's stock ESP32 SDIO port drives reset/BOOT from plain
 // GPIOs; this board has an expander line and a physical button, so this
@@ -21,12 +28,18 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <strings.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/sdmmc_host.h"
 #include "sdmmc_cmd.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include "esp_app_format.h"
+#include "esp_app_desc.h"
+#include "esp_flash_partitions.h"
 #include "esp_loader.h"
 #include "esp_loader_io.h"
 #include "p4_shared.h"
@@ -42,6 +55,12 @@ typedef struct {
 
 #define HOLD_COUNTDOWN_S 8
 #define RELEASE_COUNTDOWN_S 5
+
+// Rung 7d: image folder on the SD card (mounted by rung 4), the partition
+// table offset in a merged C6 image, and the write block size.
+#define C6_IMAGE_DIR     "/sdcard/c6"
+#define C6_PTABLE_OFFSET 0x8000
+#define C6_WRITE_BLOCK   1024
 
 static esp_loader_error_t map_err(esp_err_t err)
 {
@@ -206,9 +225,179 @@ static const esp_loader_port_ops_t k_board_ops = {
     .sdio_card_init   = board_sdio_card_init,
 };
 
+// Finds the single .bin in C6_IMAGE_DIR and stores its path. false (reason
+// printed) = folder missing, no .bin, or more than one.
+static bool c6_find_image(char *path, size_t path_len)
+{
+    DIR *d = opendir(C6_IMAGE_DIR);
+    if (!d) {
+        printf("[c6rom] no %s folder — nothing to write\n", C6_IMAGE_DIR);
+        return false;
+    }
+    int count = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        size_t n = strlen(e->d_name);
+        if (e->d_type == DT_DIR || n < 4 ||
+            strcasecmp(e->d_name + n - 4, ".bin") != 0) {
+            continue;
+        }
+        printf("[c6rom]   %s/%s\n", C6_IMAGE_DIR, e->d_name);
+        if (count == 0) {
+            snprintf(path, path_len, "%s/%s", C6_IMAGE_DIR, e->d_name);
+        }
+        count++;
+    }
+    closedir(d);
+    if (count == 0) {
+        printf("[c6rom] no .bin in %s — nothing to write\n", C6_IMAGE_DIR);
+        return false;
+    }
+    if (count > 1) {
+        printf("[c6rom] %d .bin files in %s — leave exactly one; nothing "
+               "written\n", count, C6_IMAGE_DIR);
+        return false;
+    }
+    return true;
+}
+
+// Reads the image into PSRAM and checks it is a merged ESP32-C6 image that
+// fits the C6 flash; prints the first app partition's description. NULL =
+// nothing to write (reason printed).
+static uint8_t *c6_load_image(const char *path, uint32_t flash_size,
+                              size_t *size_out)
+{
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        printf("[c6rom] FAIL: stat %s\n", path);
+        return NULL;
+    }
+    size_t size = (size_t)st.st_size;
+    if (size < C6_PTABLE_OFFSET + sizeof(esp_partition_info_t) ||
+        size % 4 != 0 || size > flash_size) {
+        printf("[c6rom] image REJECTED: %u bytes (must reach past 0x%X, be "
+               "a multiple of 4 and fit %lu bytes of flash)\n",
+               (unsigned)size, C6_PTABLE_OFFSET, (unsigned long)flash_size);
+        return NULL;
+    }
+    uint8_t *img = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
+    if (!img) {
+        printf("[c6rom] FAIL: no PSRAM for %u bytes\n", (unsigned)size);
+        return NULL;
+    }
+    FILE *f = fopen(path, "rb");
+    size_t got = f ? fread(img, 1, size, f) : 0;
+    if (f) fclose(f);
+    if (got != size) {
+        printf("[c6rom] FAIL: read %u of %u bytes\n", (unsigned)got,
+               (unsigned)size);
+        heap_caps_free(img);
+        return NULL;
+    }
+
+    esp_image_header_t hdr;
+    esp_partition_info_t part;
+    memcpy(&hdr, img, sizeof(hdr));
+    memcpy(&part, img + C6_PTABLE_OFFSET, sizeof(part));
+    if (hdr.magic != ESP_IMAGE_HEADER_MAGIC ||
+        hdr.chip_id != ESP_CHIP_ID_ESP32C6 ||
+        part.magic != ESP_PARTITION_MAGIC) {
+        printf("[c6rom] image REJECTED: magic 0x%02X, chip id 0x%04X, "
+               "partition magic 0x%04X at 0x%X (a merged ESP32-C6 image has "
+               "0x%02X, 0x%04X, 0x%04X)\n", hdr.magic,
+               (unsigned)hdr.chip_id, part.magic, C6_PTABLE_OFFSET,
+               ESP_IMAGE_HEADER_MAGIC, (unsigned)ESP_CHIP_ID_ESP32C6,
+               ESP_PARTITION_MAGIC);
+        heap_caps_free(img);
+        return NULL;
+    }
+
+    // An app's esp_app_desc_t follows its image header and first segment
+    // header.
+    for (size_t off = C6_PTABLE_OFFSET;
+         off + sizeof(part) <= size &&
+         off + sizeof(part) <= C6_PTABLE_OFFSET + ESP_PARTITION_TABLE_MAX_LEN;
+         off += sizeof(part)) {
+        memcpy(&part, img + off, sizeof(part));
+        if (part.magic != ESP_PARTITION_MAGIC) break;
+        if (part.type != PART_TYPE_APP) continue;
+        size_t d = part.pos.offset + sizeof(esp_image_header_t) +
+                   sizeof(esp_image_segment_header_t);
+        esp_app_desc_t desc;
+        if (d + sizeof(desc) <= size) {
+            memcpy(&desc, img + d, sizeof(desc));
+            if (desc.magic_word == ESP_APP_DESC_MAGIC_WORD) {
+                printf("[c6rom] image app @0x%lX: project '%.32s' version "
+                       "'%.32s' IDF '%.32s'\n",
+                       (unsigned long)part.pos.offset, desc.project_name,
+                       desc.version, desc.idf_ver);
+            }
+        }
+        break;
+    }
+    *size_out = size;
+    return img;
+}
+
+// Writes the image at C6 flash address 0x0 through the stub; the library
+// then compares the MD5 of the written region with the image's.
+static void c6_write_image(esp_loader_t *loader, const uint8_t *img,
+                           size_t size)
+{
+    static uint8_t s_block[C6_WRITE_BLOCK];
+    esp_loader_flash_cfg_t cfg = {
+        .offset = 0,
+        .image_size = size,
+        .block_size = C6_WRITE_BLOCK,
+    };
+    const int64_t t0 = esp_timer_get_time();
+    printf("[c6rom] stage: flash begin 0x0-0x%X\n", (unsigned)size);
+    esp_loader_error_t e = esp_loader_flash_start(loader, &cfg);
+    if (e != ESP_LOADER_SUCCESS) {
+        printf("[c6rom] FAIL: flash begin: %s\n", loader_err_name(e));
+        printf("[c6rom] the C6 flash may be partly erased — hold B through "
+               "the next boot to write it again\n");
+        return;
+    }
+    printf("[c6rom] stage: write %u bytes in %d-byte blocks (flash begin "
+           "took %lld ms)\n", (unsigned)size, C6_WRITE_BLOCK,
+           (long long)((esp_timer_get_time() - t0) / 1000));
+    size_t done = 0;
+    int next_pct = 10;
+    while (done < size) {
+        size_t n = size - done;
+        if (n > C6_WRITE_BLOCK) n = C6_WRITE_BLOCK;
+        memcpy(s_block, img + done, n);
+        e = esp_loader_flash_write(loader, &cfg, s_block, (uint32_t)n);
+        if (e != ESP_LOADER_SUCCESS) {
+            printf("[c6rom] FAIL: write at 0x%X: %s\n", (unsigned)done,
+                   loader_err_name(e));
+            printf("[c6rom] the C6 flash is partly written — hold B through "
+                   "the next boot to write it again\n");
+            return;
+        }
+        done += n;
+        if (done * 100 >= (size_t)next_pct * size) {
+            printf("[c6rom]   %d%% written, %lld ms\n", next_pct,
+                   (long long)((esp_timer_get_time() - t0) / 1000));
+            next_pct += 10;
+        }
+    }
+    e = esp_loader_flash_finish(loader, &cfg);
+    if (e != ESP_LOADER_SUCCESS) {
+        printf("[c6rom] verdict: write NOT verified — flash finish: %s\n",
+               loader_err_name(e));
+        printf("[c6rom] hold B through the next boot to write it again\n");
+        return;
+    }
+    printf("[c6rom] verdict: C6 FLASHED — %u bytes at 0x0, MD5 verified, "
+           "%lld ms\n", (unsigned)size,
+           (long long)((esp_timer_get_time() - t0) / 1000));
+}
+
 void rung7c_c6_rom(void)
 {
-    printf("[c6rom] rung 7c: C6 ROM download over SDIO (no flash writes)\n");
+    printf("[c6rom] rung 7c: C6 ROM download over SDIO\n");
     if (!g_p4_i2c0) {
         printf("[c6rom] SKIP: no expander (rung 2 stopped early)\n");
         return;
@@ -257,6 +446,18 @@ void rung7c_c6_rom(void)
         }
         printf("[c6rom] verdict: ROM download over SDIO WORKS — the P4 can "
                "flash the C6 with no adapter (B button held)\n");
+
+        printf("[c6rom] rung 7d: C6 image from %s\n", C6_IMAGE_DIR);
+        char path[300];
+        size_t size = 0;
+        uint8_t *img = NULL;
+        if (flash_size == 0) {
+            printf("[c6rom] C6 flash size unknown — nothing written\n");
+        } else if (c6_find_image(path, sizeof(path)) &&
+                   (img = c6_load_image(path, flash_size, &size)) != NULL) {
+            c6_write_image(&loader, img, size);
+            heap_caps_free(img);
+        }
     } else {
         printf("[c6rom] verdict: no ROM connection — if B was held through "
                "the reset, the SDIO ROM path failed at the stage the "

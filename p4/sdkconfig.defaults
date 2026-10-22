@@ -48,3 +48,9 @@ CONFIG_FREERTOS_HZ=1000
 # (LilyGo factory, wadamesh) ship. Forcing USB-Serial-JTAG as the PRIMARY
 # console was tried and the boot went silent before the bootloader's first
 # log line on this v1.0 chip; do not reintroduce it without a hw round.
+
+# esp-hosted (rung 8): rung8_wifi.c registers the C6 reset callback (the C6
+# EN line is expander IO14) and then calls esp_hosted_init() itself, so
+# the constructor that would call it before app_main is left out
+# (MESHPUNK option, libraries/esp_hosted/Kconfig).
+CONFIG_ESP_HOSTED_AUTO_INIT=n

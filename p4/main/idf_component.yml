@@ -10,3 +10,10 @@ dependencies:
   # its RAM stub. Its stock SDIO port is off by Kconfig default;
   # rung7c_c6_rom.c supplies the board port.
   espressif/esp-serial-flasher: "^2.0.0"
+  # esp-hosted host side (rung 8): upstream 2.12.13 vendored with the
+  # MESHPUNK reset-callback patch (libraries/esp_hosted/MESHPUNK.md). The
+  # override also serves esp_wifi_remote's esp_hosted dependency.
+  espressif/esp_hosted:
+    override_path: "../libraries/esp_hosted"
+  # esp_wifi_* calls carried to the C6 as esp-hosted RPCs (rung 8).
+  espressif/esp_wifi_remote: "1.6.5"

@@ -1,4 +1,18 @@
 dependencies:
+  espressif/eppp_link:
+    component_hash: c1369b37f2b0b427b198ae14e07e7547d3da92b95fe4dc7f949e5de560b35f21
+    dependencies:
+    - name: espressif/esp_serial_slave_link
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.1.0
+    - name: idf
+      require: private
+      version: '>=5.2'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.1.6
   espressif/esp-serial-flasher:
     component_hash: c86fdf9b4a353782da86870efe922e6c9b4b733a54e009e74c5f74b920bf4062
     dependencies:
@@ -24,6 +38,14 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 2.0.0
+  espressif/esp_hosted:
+    dependencies:
+    - name: idf
+      version: '>=5.3'
+    source:
+      path: C:\Users\noahl\Desktop\claudeStuff\meshpunk\meshpunk-dev\p4\libraries\esp_hosted
+      type: local
+    version: 2.12.13
   espressif/esp_serial_slave_link:
     component_hash: ac1776806de0a6e371c84e87898bb983e19ce62aa7f1e2e5c4a3b0234a575d2c
     dependencies:
@@ -34,6 +56,26 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.1.2
+  espressif/esp_wifi_remote:
+    component_hash: faa185898a843b9d7d0456e4094a3b5f1491a48ddd57ce0e5179e13ac6243f2c
+    dependencies:
+    - name: espressif/esp_hosted
+      registry_url: https://components.espressif.com
+      require: private
+      rules:
+      - if: target in [esp32h2, esp32p4]
+      version: '>=2.11'
+    - name: espressif/wifi_remote_over_eppp
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=0.1'
+    - name: idf
+      require: private
+      version: '>=5.3'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.6.5
   espressif/usb_host_cdc_acm:
     component_hash: 5bc1372b46de79ccae1dd17de48e30dfa1e8ab75269c2ebf54da01370f9e42fb
     dependencies:
@@ -83,6 +125,20 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 2.2.0
+  espressif/wifi_remote_over_eppp:
+    component_hash: 1fd6968af20f0b19e421f6b519b0a8caf81d689afc3783b564c28559e45f66ef
+    dependencies:
+    - name: espressif/eppp_link
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=0.1'
+    - name: idf
+      require: private
+      version: '>=5.3'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 0.3.3
   idf:
     source:
       type: idf
@@ -99,9 +155,11 @@ dependencies:
     version: 7.7.1
 direct_dependencies:
 - espressif/esp-serial-flasher
+- espressif/esp_hosted
 - espressif/esp_serial_slave_link
+- espressif/esp_wifi_remote
 - idf
 - jgromes/radiolib
-manifest_hash: 1854a3b8baee0dda6ee3a0c904c471d66d337c5eeb1bf3ff8a48afb2e8c7b944
+manifest_hash: f935a2142f9c88daf1cbbae315a662f6480e5b91e5220d42c6449adf78233ddf
 target: esp32p4
 version: 2.0.0

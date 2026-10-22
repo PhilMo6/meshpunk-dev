@@ -84,12 +84,14 @@ void app_main(void) {
   extern void rung6_lora_rx(void);
   extern void rung7c_c6_rom(void);
   extern void rung7_c6(void);
+  extern void rung8_wifi(void);
   rung3_touch_init();
   rung4_storage();
   rung5_radio();
   rung6_lora_rx();
   rung7c_c6_rom();
   rung7_c6();
+  rung8_wifi();
 
   int t = 0;
   int tick = 0;
