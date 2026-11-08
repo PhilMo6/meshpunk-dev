@@ -6,7 +6,8 @@
 // to the common code: the SPI bus the radio + SD + panel share, and the
 // RadioLib Module constructor.
 //
-// Per-board block below; the board define comes from platformio.ini.
+// Per-board block below; the board define comes from platformio.ini (the S3
+// boards) or p4/CMakeLists.txt (the T-Display P4).
 
 #pragma once
 
@@ -26,6 +27,8 @@ SPIClass& board_sd_spi(void);
 #define MESHPUNK_BOARD_NAME "tdeck"
 // Display form of the same, used to build the default node name.
 #define MESHPUNK_BOARD_LABEL "T-Deck"
+// The SoC, reported to Lua via _device_caps().chip.
+#define MESHPUNK_CHIP_NAME "esp32s3"
 // Meshtastic HardwareModel enum value for this board (forwarded to the
 // mtlite protocol for its NodeInfo broadcasts): T_DECK = 50 in
 // meshtastic/protobufs mesh.proto.
@@ -59,6 +62,8 @@ SPIClass& board_sd_spi(void);
 #define MESHPUNK_BOARD_NAME "heltec_v4"
 // Display form of the same, used to build the default node name.
 #define MESHPUNK_BOARD_LABEL "Heltec V4"
+// The SoC, reported to Lua via _device_caps().chip.
+#define MESHPUNK_CHIP_NAME "esp32s3"
 // Meshtastic HardwareModel enum value for this board (forwarded to the
 // mtlite protocol for its NodeInfo broadcasts): HELTEC_V4_R8 = 132 in
 // meshtastic/protobufs mesh.proto.
@@ -107,6 +112,8 @@ SPIClass& board_sd_spi(void);
 #define MESHPUNK_BOARD_NAME "wio_l2"
 // Display form of the same, used to build the default node name.
 #define MESHPUNK_BOARD_LABEL "Wio L2"
+// The SoC, reported to Lua via _device_caps().chip.
+#define MESHPUNK_CHIP_NAME "esp32s3"
 // Meshtastic HardwareModel enum value for this board (forwarded to the
 // mtlite protocol for its NodeInfo broadcasts): SEEED_WIO_TRACKER_L2 = 137
 // (custom_meshtastic_hw_model in the Meshtastic variant).
@@ -132,6 +139,49 @@ SPIClass& board_sd_spi(void);
 // button sits on the I/O expander (P00), not on a GPIO.
 #define PIN_BOOT_BTN   0
 
+#elif defined(BOARD_TDISPLAY_P4)
+
+// LilyGo T-Display P4 v1 (ESP32-P4 + ESP32-C6 co-processor; LR2021 on this
+// unit, SX1262 on the other SKU). Pin sources: LilyGo's
+// lilygo_device_driver v1 config.h and the T-Display-P4 README hardware
+// table, confirmed by the bring-up rungs in p4/main/
+// (docs/P4_PORT_PLAN_2026-10-12.md §1). Board-only lines (XL9535 expander,
+// the two I2C buses, the DSI panel, SDMMC) live with their backends.
+
+// Board identity, reported to Lua via _device_caps().
+#define MESHPUNK_BOARD_NAME "tdisplay_p4"
+// Display form of the same, used to build the default node name.
+#define MESHPUNK_BOARD_LABEL "T-Display P4"
+// The SoC, reported to Lua via _device_caps().chip.
+#define MESHPUNK_CHIP_NAME "esp32p4"
+// Meshtastic HardwareModel enum value for this board (forwarded to the
+// mtlite protocol for its NodeInfo broadcasts): meshtastic/protobufs
+// mesh.proto has no T-Display P4 entry; PRIVATE_HW = 255 is its value for
+// hardware outside the enum.
+#define MESHPUNK_MT_HW_MODEL 255
+
+// LoRa radio — RadioLib Module pins. CS and BUSY are GPIOs. The radio's
+// RESET and DIO1 are XL9535 expander lines (IO16, IO17), which RadioLib's
+// Module cannot drive, so both are -1 (RADIOLIB_NC, which its Arduino HAL
+// skips): the board layer resets the chip through the expander, and the
+// polled radio HAL reads the chip's IRQ register (radio/punk_polled_radio.h)
+// rather than a DIO1 line. Phase 3 of the port plan wires the chip.
+#define PIN_LORA_CS    24
+#define PIN_LORA_DIO1  -1
+#define PIN_LORA_RST   -1
+#define PIN_LORA_BUSY  6
+
+// Radio SPI bus (the radio has it to itself: the panel is MIPI-DSI and the
+// microSD slot is SDMMC)
+#define PIN_SPI_SCK    2
+#define PIN_SPI_MISO   4
+#define PIN_SPI_MOSI   3
+
+// PIN_SD_CS and PIN_TFT_CS stay undefined: SDMMC slot 0 and a DSI panel.
+
+// BOOT button = GPIO35, active LOW, the board's only button.
+#define PIN_BOOT_BTN   35
+
 #else
-#error "No board selected: define BOARD_<NAME> in platformio.ini build_flags"
+#error "No board selected: define BOARD_<NAME> (platformio.ini build_flags, or p4/CMakeLists.txt for the T-Display P4)"
 #endif

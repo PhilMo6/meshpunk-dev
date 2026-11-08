@@ -24,21 +24,41 @@ class LR1120: public LR11x0 {
 
     /*!
       \brief Initialization method for LoRa modem.
+      \details This method initializes the LoRa modem with the specified configuration.
+      Supports designated initializers when using C++14 or above.
+      \param config Initialization configuration.
+      \returns \ref status_codes
+    */
+    int16_t begin(const ConfigLoRa_t& config);
+
+    /*!
+      \deprecated Use \ref begin(const ConfigLoRa_t& config) instead.
+      \brief Initialization method for LoRa modem.
       \param freq Carrier frequency in MHz. Defaults to 434.0 MHz.
       \param bw LoRa bandwidth in kHz. Defaults to 125.0 kHz.
       \param sf LoRa spreading factor. Defaults to 9.
-      \param cr LoRa coding rate denominator. Defaults to 7 (coding rate 4/7).
+      \param cr LoRa coding rate denominator. Defaults to 7 (coding rate 4/7). Allowed values range from 4 to 8. Note that a value of 4 means no coding,
+      is undocumented and not recommended without your own FEC.
       \param syncWord 1-byte LoRa sync word. Defaults to RADIOLIB_LR11X0_LORA_SYNC_WORD_PRIVATE (0x12).
       \param power Output power in dBm. Defaults to 10 dBm.
       \param preambleLength LoRa preamble length in symbols. Defaults to 8 symbols.
       \param tcxoVoltage TCXO reference voltage to be set. Defaults to 1.6 V.
       If you are seeing -706/-707 error codes, it likely means you are using non-0 value for module with XTAL.
-      To use XTAL, either set this value to 0, or set LR11x0::XTAL to true.
       \returns \ref status_codes
     */
     int16_t begin(float freq = 434.0, float bw = 125.0, uint8_t sf = 9, uint8_t cr = 7, uint8_t syncWord = RADIOLIB_LR11X0_LORA_SYNC_WORD_PRIVATE, int8_t power = 10, uint16_t preambleLength = 8, float tcxoVoltage = 1.6);
 
     /*!
+      \brief Initialization method for GFSK modem.
+      \param config Initialization configuration.
+      \details This method initializes the GFSK modem with the specified configuration.
+      Supports designated initializers when using C++14 or above.
+      \returns \ref status_codes
+    */
+    int16_t beginGFSK(const ConfigFSK_t& config);
+
+    /*!
+      \deprecated Use \ref beginGFSK(const ConfigFSK_t& config) instead.
       \brief Initialization method for FSK modem.
       \param freq Carrier frequency in MHz. Defaults to 434.0 MHz.
       \param br FSK bit rate in kbps. Defaults to 4.8 kbps.
@@ -48,24 +68,32 @@ class LR1120: public LR11x0 {
       \param preambleLength FSK preamble length in bits. Defaults to 16 bits.
       \param tcxoVoltage TCXO reference voltage to be set. Defaults to 1.6 V.
       If you are seeing -706/-707 error codes, it likely means you are using non-0 value for module with XTAL.
-      To use XTAL, either set this value to 0, or set LR11x0::XTAL to true.
       \returns \ref status_codes
     */
     int16_t beginGFSK(float freq = 434.0, float br = 4.8, float freqDev = 5.0, float rxBw = 156.2, int8_t power = 10, uint16_t preambleLength = 16, float tcxoVoltage = 1.6);
-    
+  
     /*!
       \brief Initialization method for LR-FHSS modem.
+      \param config Initialization configuration.
+      \details This method initializes the LR-FHSS modem with the specified configuration.
+      Supports designated initializers when using C++14 or above.
+      \returns \ref status_codes
+    */
+    int16_t beginLRFHSS(const ConfigLRFHSS_t& config);
+
+    /*!
+      \deprecated Use \ref beginLRFHSS(const ConfigLRFHSS_t& config) instead.
+      \brief Initialization method for LR-FHSS modem.
       \param freq Carrier frequency in MHz. Defaults to 434.0 MHz.
-      \param bw LR-FHSS bandwidth, one of RADIOLIB_LR11X0_LR_FHSS_BW_* values. Defaults to 722.66 kHz.
-      \param cr LR-FHSS coding rate, one of RADIOLIB_LR11X0_LR_FHSS_CR_* values. Defaults to 2/3 coding rate.
+      \param bw LR-FHSS bandwidth, one of RADIOLIB_LRXXXX_LR_FHSS_BW_* values. Defaults to 722.66 kHz.
+      \param cr LR-FHSS coding rate, one of RADIOLIB_LRXXXX_LR_FHSS_CR_* values. Defaults to 2/3 coding rate.
       \param narrowGrid Whether to use narrow (3.9 kHz) or wide (25.39 kHz) grid spacing. Defaults to true (narrow/non-FCC) grid.
       \param power Output power in dBm. Defaults to 10 dBm.
       \param tcxoVoltage TCXO reference voltage to be set. Defaults to 1.6 V.
       If you are seeing -706/-707 error codes, it likely means you are using non-0 value for module with XTAL.
-      To use XTAL, either set this value to 0, or set LR11x0::XTAL to true.
       \returns \ref status_codes
     */
-    int16_t beginLRFHSS(float freq = 434.0, uint8_t bw = RADIOLIB_LR11X0_LR_FHSS_BW_722_66, uint8_t cr = RADIOLIB_LR11X0_LR_FHSS_CR_2_3, bool narrowGrid = true, int8_t power = 10, float tcxoVoltage = 1.6);
+    int16_t beginLRFHSS(float freq = 434.0, uint8_t bw = RADIOLIB_LRXXXX_LR_FHSS_BW_722_66, uint8_t cr = RADIOLIB_LRXXXX_LR_FHSS_CR_2_3, bool narrowGrid = true, int8_t power = 10, float tcxoVoltage = 1.6);
 
     // configuration methods
 
@@ -112,9 +140,11 @@ class LR1120: public LR11x0 {
       If set to false, PA will be determined automatically based on configured output power and frequency,
       preferring the low-power PA but always using high-frequency PA in 2.4 GHz band.
       Ignored when operating in 2.4 GHz band.
+      \param rampTimeUs PA power ramping time in microseconds. Provided value is rounded up to the
+      nearest discrete ramp time supported by the PA. Defaults to 48 us.
       \returns \ref status_codes
     */
-    int16_t setOutputPower(int8_t power, bool forceHighPower);
+    int16_t setOutputPower(int8_t power, bool forceHighPower, uint32_t rampTimeUs = 48);
 
     /*!
       \brief Check if output power is configurable.
@@ -147,9 +177,6 @@ class LR1120: public LR11x0 {
 #if !RADIOLIB_GODMODE
   private:
 #endif
-    // flag to determine whether we are in the sub-GHz or 2.4 GHz range
-    // this is needed to automatically detect which PA to use
-    bool highFreq = false;
 
 };
 

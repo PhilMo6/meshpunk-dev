@@ -17,7 +17,11 @@
   requires_protocol (apps only, optional: the LoRa protocol id the app runs
   under — the App Library asks to download it first when it is missing;
   never automatic), apps (protocols only, optional: the protocol's primary
-  app ids, offered for download right after the protocol installs).
+  app ids, offered for download right after the protocol installs),
+  requires (optional: device-requirement tokens that must ALL hold on this
+  device - the "Device requirements" section below), files_xtensa /
+  files_rv32 (optional: files only that build target downloads, on top of
+  files; this device's list is device_files()).
   NOTE: never write double-square-bracket TOML names inside this header —
   it is a Lua long comment and two adjacent closing square brackets in the
   text terminate it early (that exact bug has now happened twice).
@@ -29,8 +33,9 @@
     * staging dirs live OUTSIDE the apps/themes bases (partial downloads must
       never be discovered), on the SAME drive as the destination so the final
       fileman.rename() is one atomic hop;
-    * a .version file (version\nlocation\ncategory[\nlocked]\nid=<id>) inside
-      the installed dir marks it store-managed and drives update detection;
+    * a .version file (version\nlocation\ncategory[\nlocked]\nid=<id>
+      \ntarget=<build target>) inside the installed dir marks it
+      store-managed and drives update detection;
     * callers own any post-install cache refresh (apps.refresh() for apps;
       themes need none — lib/theme rescans on every list/apply).
 
@@ -145,6 +150,30 @@ local function sanitize_list(list)
             else
                 e.drivers = nil
             end
+            -- Optional per-target file lists, validated like files; a bad
+            -- list is dropped, not the entry.
+            for _, key in ipairs({ "files_xtensa", "files_rv32" }) do
+                local extra = e[key]
+                if type(extra) == "table" then
+                    local kept_files = {}
+                    for _, f in ipairs(extra) do
+                        if safe_relpath(f) then kept_files[#kept_files + 1] = f end
+                    end
+                    e[key] = (#kept_files > 0) and kept_files or nil
+                else
+                    e[key] = nil
+                end
+            end
+            -- Optional device requirements: token strings. A token that is
+            -- not a string is kept as text — it matches nothing, so the
+            -- entry reads as not installable here rather than unrestricted.
+            if type(e.requires) == "table" then
+                local toks = {}
+                for _, t in ipairs(e.requires) do toks[#toks + 1] = tostring(t) end
+                e.requires = (#toks > 0) and toks or nil
+            else
+                e.requires = nil
+            end
             kept[#kept + 1] = e
         end
     end
@@ -207,6 +236,133 @@ function M.fw_required(entry)
     return nil
 end
 
+-- ── Device requirements ──────────────────────────────────────────────────────
+-- Catalog entries may carry `requires`: tokens that must ALL hold on this
+-- device (a token may list alternatives with "|", e.g. "keyboard|touch"), and
+-- per-target file lists `files_<target>`. Targets are the build targets of
+-- ELF modules: "xtensa" (the ESP32-S3 boards) and "rv32" (the T-Display P4).
+-- Facts come from _device_caps() and _input_caps(); firmware too old to
+-- report `arch` is an Xtensa build (every released firmware is one), and any
+-- other missing fact is false. A token this code does not know is NOT met:
+-- nothing installs that cannot be checked. The App Library carries its own
+-- copy of this check (same reason as fw_required above).
+--
+--   xtensa | rv32            the module build target     _device_caps().arch
+--   esp32s3 | esp32p4        the SoC                     _device_caps().chip
+--   board:<name>             exact board                 _device_caps().name
+--   keyboard | touch | trackball                         _input_caps()
+--   sound (i2s or buzzer) | i2s                          _device_caps().audio
+--   battery | mic | gps | usb_host                       _device_caps() booleans
+--   psram>=N                 at least N MB PSRAM         _device_caps().psram_mb
+
+-- The build target of this device's ELF modules.
+function M.target()
+    local ok, caps = pcall(_device_caps)
+    local arch = ok and type(caps) == "table" and caps.arch or nil
+    return (arch == "rv32") and "rv32" or "xtensa"
+end
+
+local BOARD_LABEL = { tdeck = "T-Deck", heltec_v4 = "Heltec V4",
+                      wio_l2 = "Wio L2", tdisplay_p4 = "T-Display P4" }
+
+local function device_facts()
+    local okc, caps = pcall(_device_caps)
+    if not okc or type(caps) ~= "table" then caps = {} end
+    local oki, inp = pcall(_input_caps)
+    if not oki or type(inp) ~= "table" then inp = {} end
+    local target = M.target()
+    local f = {
+        [target]  = true,
+        keyboard  = inp.keyboard == true,
+        touch     = inp.touch == true,
+        trackball = inp.trackball == true,
+        sound     = caps.audio == "i2s" or caps.audio == "buzzer",
+        i2s       = caps.audio == "i2s",
+        battery   = caps.battery == true,
+        mic       = caps.mic == true,
+        gps       = caps.gps == true,
+        usb_host  = caps.usb_host == true,
+    }
+    local chip = caps.chip or ((target == "xtensa") and "esp32s3") or nil
+    if chip then f[chip] = true end
+    if type(caps.name) == "string" then f["board:" .. caps.name] = true end
+    return f, caps
+end
+
+local function token_holds(tok, f, caps)
+    local n = tok:match("^psram>=(%d+)$")
+    if n then
+        return type(caps.psram_mb) == "number" and caps.psram_mb >= tonumber(n)
+    end
+    return f[tok] == true
+end
+
+-- The reason one token is not met, for the detail panels.
+local function token_reason(tok)
+    local b = tok:match("^board:(.+)$")
+    if b then return (BOARD_LABEL[b] or b) .. " only" end
+    local n = tok:match("^psram>=(%d+)$")
+    if n then return "needs " .. n .. " MB PSRAM" end
+    local R = {
+        xtensa = "ESP32-S3 devices only", rv32 = "T-Display P4 only",
+        esp32s3 = "ESP32-S3 devices only", esp32p4 = "T-Display P4 only",
+        keyboard = "needs a keyboard", touch = "needs a touch screen",
+        trackball = "needs a trackball", sound = "needs audio out",
+        i2s = "needs a speaker", battery = "needs a battery",
+        mic = "needs a microphone", gps = "needs GPS", usb_host = "needs USB host",
+    }
+    return R[tok] or "needs a newer App Library"
+end
+
+-- nil when every `requires` token holds on this device, else the reason the
+-- first failing token gives (its alternatives joined with " or ").
+function M.requires_unmet(entry)
+    local req = entry and entry.requires
+    if type(req) ~= "table" or #req == 0 then return nil end
+    local f, caps = device_facts()
+    for _, tok in ipairs(req) do
+        local held, reasons = false, {}
+        for alt in tostring(tok):gmatch("[^|]+") do
+            if token_holds(alt, f, caps) then held = true break end
+            reasons[#reasons + 1] = token_reason(alt)
+        end
+        if not held then return table.concat(reasons, " or ") end
+    end
+    return nil
+end
+
+-- Whether a file runs on a build target: ELF modules exist per architecture
+-- (the data_filter.py rules — "*.rv32.elf" is RISC-V; "*.app.elf",
+-- "*.loraproto.elf", "*.bleproto.elf" and "*.drv.elf" are Xtensa).
+local XTENSA_SUFFIXES = { ".app.elf", ".loraproto.elf", ".bleproto.elf", ".drv.elf" }
+
+local function runs_on(target, fname)
+    local n = fname:lower()
+    if n:sub(-9) == ".rv32.elf" then return target == "rv32" end
+    for _, suf in ipairs(XTENSA_SUFFIXES) do
+        if n:sub(-#suf) == suf then return target == "xtensa" end
+    end
+    return true
+end
+
+-- The files this device downloads for an entry: `files` plus
+-- `files_<target>`, minus the files its target cannot run.
+function M.device_files(entry)
+    local target = M.target()
+    local out, seen = {}, {}
+    local function add(list)
+        for _, f in ipairs(list or {}) do
+            if not seen[f] and runs_on(target, f) then
+                seen[f] = true
+                out[#out + 1] = f
+            end
+        end
+    end
+    add(entry.files)
+    add(entry["files_" .. target])
+    return out
+end
+
 -- Ordered version compare: true only when the catalog version is strictly
 -- newer than the installed one — plain inequality offered DOWNGRADES whenever
 -- a device was ahead of the catalog (freshly flashed firmware, repo not
@@ -266,6 +422,8 @@ end
 -- the device-side registry identity, letting `name` (= folder + display)
 -- repeat across categories. Absent on old markers -> callers key by folder
 -- name. Old readers ignore it (their line-4 check is the exact "locked").
+-- A "target=<build target>" line (same rule) names the ELF build the install
+-- carries; absent on markers written before it.
 function M.read_version(dir)
     local data = fileman.read(dir .. "/.version")
     if not data then return nil end
@@ -281,9 +439,10 @@ function M.read_version(dir)
             break
         end
     end
-    local id = nil
+    local id, target = nil, nil
     for _, ln in ipairs(lines) do
-        if ln:sub(1, 3) == "id=" and #ln > 3 then id = ln:sub(4) break end
+        if ln:sub(1, 3) == "id=" and #ln > 3 then id = ln:sub(4) end
+        if ln:sub(1, 7) == "target=" and #ln > 7 then target = ln:sub(8) end
     end
     return {
         version  = (lines[1] ~= "" and lines[1]) or "?",
@@ -291,6 +450,7 @@ function M.read_version(dir)
         category = (lines[3] ~= "" and lines[3]) or nil,
         locked   = lines[4] == "locked",
         id       = id,
+        target   = target,
     }
 end
 
@@ -366,6 +526,20 @@ function M.run_install(root, opts)
             .. ", device has " .. M.fw_api() .. ")")
         return
     end
+    -- Device gate, same standing: the UIs leave such entries out of their
+    -- lists; nothing may install what this device cannot run.
+    local why = M.requires_unmet(entry)
+    if why then
+        on_done("Not for this device: " .. why)
+        return
+    end
+    -- This device's download list (files + files_<target>, minus the other
+    -- architecture's modules).
+    local files = M.device_files(entry)
+    if #files == 0 then
+        on_done("Nothing in this entry runs on this device")
+        return
+    end
     -- Drive gate: the staging dir below needs free blocks; an update stages
     -- on the live drive too, so this applies to both.
     local total, used = fileman.df(loc == "sd" and "S" or "L")
@@ -379,7 +553,6 @@ function M.run_install(root, opts)
                 or (kind == "protocols" and "pr_")
                 or "app_"
     local staging = fileman.normalize(M.STAGING[loc] .. "/" .. prefix .. entry.id)
-    local files = entry.files
 
     local W, H = lvgl.HOR_RES(), lvgl.VER_RES()
     local overlay = root:Object {
@@ -478,12 +651,15 @@ function M.run_install(root, opts)
                 if not fname then
                     -- All files down. Record the install, then swap into place.
                     -- Line 4 "locked" is carried from the catalog so an update
-                    -- can't silently make a locked app removable.
+                    -- can't silently make a locked app removable; target=
+                    -- names the build the files are for (the App Library's
+                    -- "adds this device's build" check).
                     if not fileman.write(staging .. "/.version",
                         tostring(entry.version or "?") .. "\n" .. loc .. "\n"
                         .. tostring(entry.category or "")
                         .. (entry.locked and "\nlocked" or "")
-                        .. "\nid=" .. tostring(entry.id)) then
+                        .. "\nid=" .. tostring(entry.id)
+                        .. "\ntarget=" .. M.target()) then
                         t:delete()
                         close("Cannot write .version")
                         return

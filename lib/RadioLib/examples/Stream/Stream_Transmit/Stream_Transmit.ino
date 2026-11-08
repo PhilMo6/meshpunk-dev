@@ -56,13 +56,15 @@ String longPacket = "Lorem ipsum dolor sit amet, consectetur adipiscing elit.\
 void setup() {
   Serial.begin(9600);
 
-  // initialize SX1278 with default settings
+  // initialize SX1278 at 434 MHz
   Serial.print(F("[SX1278] Initializing ... "));
-  int state = radio.beginFSK();
+  ConfigFSK_t config;
+  config.frequency = 434;
+  int state = radio.beginFSK(config);
 
   // when using one of the non-LoRa modules for Stream transmit
   // (RF69, CC1101, Si4432 etc.), use the basic begin() method
-  // int state = radio.begin();
+  // int state = radio.begin(config);
 
   if (state == RADIOLIB_ERR_NONE) {
     Serial.println(F("success!"));
@@ -129,10 +131,6 @@ void loop() {
     if (transmissionState == RADIOLIB_ERR_NONE) {
       // packet was successfully sent
       Serial.println(F("transmission finished!"));
-
-      // NOTE: when using interrupt-driven transmit method,
-      //       it is not possible to automatically measure
-      //       transmission data rate using getDataRate()
 
     } else {
       Serial.print(F("failed, code "));

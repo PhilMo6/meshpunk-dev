@@ -44,7 +44,7 @@ static const BleProtoOps* try_load_module(const char* id) {
                 String base = e.name();
                 int slash = base.lastIndexOf('/');
                 if (slash >= 0) base = base.substring(slash + 1);
-                if (base.endsWith(".bleproto.elf")) {
+                if (base.endsWith(".bleproto" ELF_ARCH_EXT)) {
                     strncpy(elfname, base.c_str(), sizeof(elfname) - 1);
                     break;
                 }

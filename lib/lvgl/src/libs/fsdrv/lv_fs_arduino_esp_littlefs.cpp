@@ -51,7 +51,11 @@ extern "C" void lv_fs_arduino_esp_littlefs_init(void)
 /*Initialize your Storage device and File system.*/
 static void fs_init(void)
 {
-    LittleFS.begin();
+    /* MESHPUNK: no LittleFS.begin() here. The firmware mounts its LittleFS
+     * partition in setup() (main.cpp) before lv_init(); Arduino's begin()
+     * would replace the stored partition label with its default "spiffs"
+     * and fail to mount it. The callbacks below use the global LittleFS
+     * object on the firmware's mount. */
 }
 
 /**

@@ -498,7 +498,7 @@ int PrepareRawBlock();
 int DequantBlock(int *inbuf, int nSamps, int scale);
 int AACDequantize(int ch);
 int DeinterleaveShortBlocks(int ch);
-unsigned int Get32BitVal(unsigned int *last);
+unsigned int Get32BitVal(uint32_t *last);   // MESHPUNK: uint32_t*, see the definition
 int InvRootR(int r);
 int ScaleNoiseVector(int *coef, int nVals, int sf);
 void GenerateNoiseVector(int *coef, int *last, int nVals);

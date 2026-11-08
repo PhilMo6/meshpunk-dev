@@ -37,9 +37,16 @@ Radio radio = new RadioModule();
 void setup() {
   Serial.begin(9600);
 
-  // initialize LR1110 with default settings
+  // before calling begin(), correct crystal has to be selected
+  // some LR11x0 have a TCXO which needs 1.6V reference
+  // set to 0 if your radio has an XTAL
+  radio.tcxoVoltage = 1.6;
+
+  // initialize LR1110 at 434 MHz
   Serial.print(F("[LR1110] Initializing ... "));
-  int state = radio.beginGFSK();
+  ConfigFSK_t config;
+  config.frequency = 434;
+  int state = radio.beginGFSK(config);
   if (state == RADIOLIB_ERR_NONE) {
     Serial.println(F("success!"));
   } else {
@@ -69,13 +76,6 @@ void setup() {
     Serial.println(state);
     while (true) { delay(10); }
   }
-
-  // GFSK modem on LR11x0 can handle the sync word setting in bits, not just
-  // whole bytes. The value used is left-justified.
-  // This makes same result as radio.setSyncWord(syncWord, 8):
-  state = radio.setSyncBits(syncWord, 64);
-  // This will use 0x012 as sync word (12 bits only):
-  state = radio.setSyncBits(syncWord, 12);
 
   // GFSK modem allows advanced CRC configuration
   // Default is CCIT CRC16 (2 bytes, initial 0x1D0F, polynomial 0x1021, inverted)

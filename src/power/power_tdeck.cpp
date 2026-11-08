@@ -101,6 +101,10 @@ void power_dev_standby_exit(void) {
   digitalWrite(BOARD_POWERON, HIGH);
 }
 
+// DIO1 is a GPIO here: the shared standby code arms it.
+bool power_dev_standby_arm(bool radio) { (void)radio; return true; }
+void power_dev_standby_disarm(bool radio) { (void)radio; }
+
 // USB host port power: no port power control on this board.
 bool power_dev_usb_host_begin(void) { return false; }
 void power_dev_usb_host_tick(void) {}

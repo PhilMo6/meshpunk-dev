@@ -1,6 +1,22 @@
 local caps, dev = ...
 
-local wake_key = caps.trackball and "click the trackball" or "press the USER button"
+local wake_key
+if caps.trackball then
+    wake_key = "click the trackball"
+elseif dev.name == "tdisplay_p4" then
+    wake_key = "press the BOOT button"
+else
+    wake_key = "press the USER button"
+end
+
+-- The T-Display P4's button cannot wake the processor from deep sleep, so
+-- its power off is a light sleep that the button ends with a fresh start.
+local off_kind
+if dev.name == "tdisplay_p4" then
+    off_kind = "Power off shuts everything down except a light sleep that lets the BOOT button start the device again. Battery drain is low, though higher than a full deep sleep; for storage, use the battery switch."
+else
+    off_kind = "Power off is a deep sleep: everything shuts down and battery drain drops to almost nothing, enough to leave it for weeks."
+end
 
 local body = [[
 The device has three power actions and a low-power Standby mode that keeps the mesh running while the screen is off.
@@ -35,7 +51,7 @@ end
 body = body .. [[
 
 POWER OFF
-Power off is a deep sleep: everything shuts down and battery drain drops to almost nothing, enough to leave it for weeks. Nothing is received while it is off. To turn it back on, ]] .. wake_key .. [[.
+]] .. off_kind .. [[ Nothing is received while it is off. To turn it back on, ]] .. wake_key .. [[.
 
 Messages, contacts and settings are all saved before it powers down.
 

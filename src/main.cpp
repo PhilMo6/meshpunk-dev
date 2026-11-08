@@ -25,6 +25,7 @@
 #include "input/input_zones.h"
 #include "input/punk_keyboard.h"
 #include "power/power_dev.h"
+#include "rtc/rtc_dev.h"
 #include "screenshot.h"
 #include "meshpunk_sync.h"
 #include "Audio.h"
@@ -260,6 +261,9 @@ bool meshpunk_set_clock(uint8_t tier, uint32_t epoch, const char* src) {
   SLog.printf("[CLOCK] %s tier%u %s %u (delta %+lds, eff tier was %d)\n",
               src, tier, accept ? "set" : "REJECTED", (unsigned)epoch,
               (long)((int64_t)epoch - (int64_t)cur), (int)eff);
+  // A board with a clock chip keeps it at the phone-or-better time; the
+  // next boot's rtc-seed starts from it (rtc_dev.h; no chip = no-op).
+  if (accept && tier >= CLOCK_TIER_PHONE) rtc_dev_write(epoch);
   return accept;
 }
 static bool    tz_is_auto = true;
@@ -407,6 +411,7 @@ static void write_firmware_prefs(fs::FS& fs, const char* path) {
   f.printf("ble_sync_max=%d\n", ble_sync_max_per_channel);
   f.printf("wifi_enabled=%d\n", wifi_enabled_pref ? 1 : 0);
   f.printf("lora_protocol=%s\n", lora_proto_requested());
+  f.printf("antenna=%s\n", radio_hal_antenna_external() ? "external" : "internal");
   f.printf("ota_channel=%s\n", ota_channel_requested());
   f.printf("trackball_sens=%d\n", input_ui_trackball_sens_get());
   f.printf("trackball_roll=%d\n", input_ui_trackball_roll_get());
@@ -644,6 +649,19 @@ static void wifi_auto_tick() {
   next_ms = now + 250;
   if (!wifi_enabled_pref) return;
 
+#if defined(BOARD_TDISPLAY_P4)
+  // WiFi diagnostics (the C6 over esp-hosted): the access point's signal
+  // level every 10 s while connected, so a link stall shows whether the
+  // station still sees the AP.
+  {
+    static uint32_t next_rssi_ms = 0;
+    if (WiFi.status() == WL_CONNECTED && (int32_t)(now - next_rssi_ms) >= 0) {
+      next_rssi_ms = now + 10000;
+      SLog.printf("[WIFI] rssi %d dBm, channel %d\n", (int)WiFi.RSSI(), (int)WiFi.channel());
+    }
+  }
+#endif
+
   switch (wa_state) {
   case WA_IDLE: {
     if (WiFi.status() == WL_CONNECTED) {
@@ -807,6 +825,8 @@ static void firmware_prefs_load() {
       wifi_enabled_pref = (atoi(val) == 1);
     } else if (strcmp(key, "lora_protocol") == 0) {
       lora_proto_set_requested(val);   // sanitizes; bad ids become "meshcore"
+    } else if (strcmp(key, "antenna") == 0) {
+      radio_hal_antenna_select(strcmp(val, "external") == 0);   // written by radio_hal_begin()
     } else if (strcmp(key, "ota_channel") == 0) {
       ota_channel_set_requested(val);  // sanitizes; bad ids become "stable"
     } else if (strcmp(key, "trackball_sens") == 0) {
@@ -2861,8 +2881,14 @@ static bool copyFile(fs::FS &srcFS, const char* srcPath, fs::FS &dstFS, const ch
 }
 
 // ROM tinfl: used by the release build's pack extraction below AND by the
-// _inflate Lua binding (every env).
+// _inflate Lua binding (every env). IDF 4.4 exposes the ROM's miniz through
+// the per-chip rom/miniz.h; IDF 5 through its generic miniz.h (the P4 ROM
+// carries tinfl too: esp32p4.rom.ld).
+#if __has_include("rom/miniz.h")
 #include "rom/miniz.h"
+#else
+#include "miniz.h"
+#endif
 
 #ifdef MESHPUNK_EMBED_PACK
 // ==== Self-contained release build ==========================================
@@ -4952,6 +4978,10 @@ void setupLuaVGL() {
   lua_register(L, "_device_caps", [](lua_State *L) -> int {
     lua_newtable(L);
     lua_pushstring(L, MESHPUNK_BOARD_NAME);        lua_setfield(L, -2, "name");
+    // The build target of the ELF modules this CPU loads, and the SoC: the
+    // App Library's `requires` tokens and `files_<target>` lists.
+    lua_pushstring(L, ELF_HOST_ARCH);              lua_setfield(L, -2, "arch");
+    lua_pushstring(L, MESHPUNK_CHIP_NAME);         lua_setfield(L, -2, "chip");
     lua_pushinteger(L, display_dev_width());       lua_setfield(L, -2, "screen_w");
     lua_pushinteger(L, display_dev_height());      lua_setfield(L, -2, "screen_h");
     lua_pushinteger(L, display_dev_orientation()); lua_setfield(L, -2, "orientation");
@@ -4963,7 +4993,21 @@ void setupLuaVGL() {
     lua_setfield(L, -2, "audio");
     lua_pushboolean(L, power_dev_battery_mv() > 0);  lua_setfield(L, -2, "battery");
     lua_pushboolean(L, power_dev_usb_port_power()); lua_setfield(L, -2, "usb_power");
+    lua_pushboolean(L, radio_hal_antenna_switch()); lua_setfield(L, -2, "antenna_switch");
     lua_pushstring(L, lora_proto_active());         lua_setfield(L, -2, "lora_proto");
+    return 1;
+  });
+
+  // The file the ELF loader opens for `path` on this CPU: "<x>.elf" becomes
+  // "<x>.rv32.elf" on the T-Display P4 (elf_arch_path), the path itself
+  // elsewhere. Launchers check that file exists before offering a launch.
+  // Usage: local file = _elf_arch_path(app_dir .. "/nes.app.elf")
+  lua_register(L, "_elf_arch_path", [](lua_State *L) -> int {
+    // lua_register is a macro: one declaration per line, commas only inside
+    // parentheses.
+    char out[512];
+    elf_arch_path(luaL_checkstring(L, 1), out, sizeof(out));
+    lua_pushstring(L, out);
     return 1;
   });
 
@@ -4987,6 +5031,27 @@ void setupLuaVGL() {
     SLog.printf("[PROTO] boot protocol set to '%s' (reboot to apply)\n",
                 lora_proto_requested());
     lua_pushstring(L, lora_proto_requested());
+    return 1;
+  });
+
+  // Antenna switch on boards with one (_device_caps().antenna_switch — the
+  // T-Display P4's SKY13453: the internal antenna or the MMCX connector). No
+  // argument reads the selection; a boolean argument (true = external) moves
+  // the switch at once and persists the choice (firmware pref antenna=). The
+  // write is refused while a transmission is on the air; the third result
+  // names the reason.
+  // Usage: local external = _radio_antenna()              -- read
+  //        local ok, external, why = _radio_antenna(true)  -- write
+  lua_register(L, "_radio_antenna", [](lua_State *L) -> int {
+    if (lua_gettop(L) >= 1 && !lua_isnil(L, 1)) {
+      const char* why = radio_hal_set_antenna(lua_toboolean(L, 1));
+      if (!why) firmware_prefs_save();
+      lua_pushboolean(L, why == nullptr);
+      lua_pushboolean(L, radio_hal_antenna_external());
+      lua_pushstring(L, why ? why : "");
+      return 3;
+    }
+    lua_pushboolean(L, radio_hal_antenna_external());
     return 1;
   });
 
@@ -5289,6 +5354,25 @@ void setupLuaVGL() {
     SLog.println("[PROTO] protocol Lua stubs registered (nil, 'meshcore not active')");
   }
 
+  // Per-channel notification mode, keyed by channel NAME (see notify.h):
+  // 0 = off, 1 = mention-only (default), 2 = every message.
+  // Default surface: the mode store is the active protocol's. Registered
+  // before lora_proto_lua_open below, so a protocol's own pair replaces
+  // these (the meshcore package's, modules/meshcore/mclua_reg.inc); without
+  // one, reads return the shared default and writes are dropped.
+  lua_register(L, "_notify_channel_get", [](lua_State* L) -> int {
+    luaL_checkstring(L, 1);
+    lua_pushinteger(L, NOTIFY_CHAN_MENTION);
+    return 1;
+  });
+  lua_register(L, "_notify_channel_set", [](lua_State* L) -> int {
+    luaL_checkstring(L, 1);
+    int mode = (int)luaL_checkinteger(L, 2);
+    if (mode < 0 || mode > NOTIFY_CHAN_ALL) mode = NOTIFY_CHAN_MENTION;
+    lua_pushinteger(L, mode);
+    return 1;
+  });
+
   // ABI v2: the active protocol registers its OWN Lua bindings last (a
   // package ships its Lua surface the way it ships its apps). No-op for
   // protocols without one.
@@ -5322,6 +5406,10 @@ void setupLuaVGL() {
   lua_register(L, "_system_reboot", [](lua_State *L) -> int {
     SLog.println("[SYSTEM] Reboot requested from Lua");
     delay(100);
+    // Panel off first, as power-off and standby do: a restart that cuts the
+    // T-Display P4's DSI stream mid-frame leaves its panel showing a solid
+    // colour until the next boot initialises it.
+    display_dev_sleep(true);
     ESP.restart();
     return 0;
   });
@@ -5778,24 +5866,6 @@ void setupLuaVGL() {
     lua_pushboolean(L, notify_sound_enabled);
     return 1;
   });
-  // Per-channel notification mode, keyed by channel NAME (see notify.h):
-  // 0 = off, 1 = mention-only (default), 2 = every message.
-  // Default surface: the mode store is the active protocol's (the meshcore
-  // package overrides both names); without an override, reads return the
-  // shared default and writes are dropped.
-  lua_register(L, "_notify_channel_get", [](lua_State* L) -> int {
-    luaL_checkstring(L, 1);
-    lua_pushinteger(L, NOTIFY_CHAN_MENTION);
-    return 1;
-  });
-  lua_register(L, "_notify_channel_set", [](lua_State* L) -> int {
-    luaL_checkstring(L, 1);
-    int mode = (int)luaL_checkinteger(L, 2);
-    if (mode < 0 || mode > NOTIFY_CHAN_ALL) mode = NOTIFY_CHAN_MENTION;
-    lua_pushinteger(L, mode);
-    return 1;
-  });
-
   // ── BLE protocol slot ──────────────────────────────────────────────────────
   // _ble_proto_get() -> requested, active, running
   lua_register(L, "_ble_proto_get", [](lua_State* L) -> int {
@@ -5837,7 +5907,7 @@ void setupLuaVGL() {
           File e = d.openNextFile();
           while (e) {
             String base = e.name();
-            if (!e.isDirectory() && base.endsWith(".bleproto.elf")) { has_elf = true; break; }
+            if (!e.isDirectory() && base.endsWith(".bleproto" ELF_ARCH_EXT)) { has_elf = true; break; }
             e = d.openNextFile();
           }
           if (has_elf) {
@@ -5903,6 +5973,17 @@ void setupLuaVGL() {
     }
     firmware_prefs_save();
     lua_pushinteger(L, ble_sync_max_per_channel);
+    return 1;
+  });
+#else
+  // The same compat aliases in a build without the BLE companion (the T-Display
+  // P4): the slot always holds none, so both report false and nothing changes.
+  lua_register(L, "_ble_get_enabled", [](lua_State* L) -> int {
+    lua_pushboolean(L, 0);
+    return 1;
+  });
+  lua_register(L, "_ble_set_enabled", [](lua_State* L) -> int {
+    lua_pushboolean(L, 0);
     return 1;
   });
 #endif
@@ -6987,8 +7068,11 @@ void setup() {
   // interrupt watchdog at every boot (symbolized gpio_intr_service loop) —
   // a boot loop only a full power cycle escapes. Neutralize the wake pins'
   // interrupt config before any ISR service can exist.
-  gpio_intr_disable((gpio_num_t)PIN_LORA_DIO1);
-  gpio_set_intr_type((gpio_num_t)PIN_LORA_DIO1, GPIO_INTR_DISABLE);
+  // (A board whose DIO1 is an expander line, not a GPIO, defines it -1.)
+  if (PIN_LORA_DIO1 >= 0) {
+    gpio_intr_disable((gpio_num_t)PIN_LORA_DIO1);
+    gpio_set_intr_type((gpio_num_t)PIN_LORA_DIO1, GPIO_INTR_DISABLE);
+  }
   gpio_intr_disable((gpio_num_t)PIN_BOOT_BTN);
   gpio_set_intr_type((gpio_num_t)PIN_BOOT_BTN, GPIO_INTR_DISABLE);
 
@@ -7186,6 +7270,13 @@ void setup() {
   lora_proto_select_and_load();
 
   host_rtc = new VolatileRTCClock();
+  // Hardware clock chip seed (rtc_dev.h; boards without a chip read false):
+  // a boot seed like the last_gps file below, so every live tier beats it;
+  // meshpunk_set_clock() writes phone-or-better times back to the chip.
+  {
+    uint32_t rtc_epoch = 0;
+    if (rtc_dev_read(&rtc_epoch)) meshpunk_set_clock(CLOCK_TIER_SEED, rtc_epoch, "rtc-seed");
+  }
 
   // BLE protocol slot (two-slot model, docs/PROTOCOL_ABI.md §6): selected
   // independently of the LoRa protocol. The companion protocol declares
@@ -7216,6 +7307,28 @@ void setup() {
   // (nonstop scan+auth = battery drain, and scans fail while it churns).
   // All reconnect policy lives in wifi_auto_tick()'s bounded rounds instead.
   WiFi.setAutoReconnect(false);
+#if defined(BOARD_TDISPLAY_P4)
+  // WiFi diagnostics (the C6 over esp-hosted): every station event, with
+  // the disconnect reason and the RSSI at the disconnect.
+  WiFi.onEvent([](arduino_event_id_t event, arduino_event_info_t info) {
+    switch (event) {
+      case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+        SLog.printf("[WIFI] event: connected (channel %u)\n",
+                    (unsigned)info.wifi_sta_connected.channel);
+        break;
+      case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+        SLog.printf("[WIFI] event: disconnected, reason %u (%s), rssi %d\n",
+                    (unsigned)info.wifi_sta_disconnected.reason,
+                    WiFi.disconnectReasonName((wifi_err_reason_t)info.wifi_sta_disconnected.reason),
+                    (int)info.wifi_sta_disconnected.rssi);
+        break;
+      case ARDUINO_EVENT_WIFI_STA_GOT_IP:  SLog.println("[WIFI] event: got IP");          break;
+      case ARDUINO_EVENT_WIFI_STA_LOST_IP: SLog.println("[WIFI] event: lost IP");         break;
+      case ARDUINO_EVENT_WIFI_STA_STOP:    SLog.println("[WIFI] event: station stopped"); break;
+      default: break;
+    }
+  });
+#endif
   if (wifi_enabled_pref) {
     WiFi.mode(WIFI_STA);
     if (!wifi_auto_kick()) {
@@ -7557,9 +7670,10 @@ static void dispatch_emoji_popup() {
 }
 
 // ── Power off ──────────────────────────────────────────────────────────────
-// Device-neutral teardown, then the board backend parks its rails and deep
-// sleeps (power_dev_shutdown never returns; GPIO0 reboots). Runs from the
-// top of loop() via s_poweroff_request — see the _system_poweroff binding.
+// Device-neutral teardown, then the board backend parks its rails and sleeps
+// (power_dev_shutdown never returns; the board's button reboots it). Runs
+// from the top of loop() via s_poweroff_request — see the _system_poweroff
+// binding.
 static void system_shutdown() {
   SLog.println("[POWER] shutting down");
   MESH_LOCK();
@@ -7584,7 +7698,7 @@ static void system_shutdown() {
   display_dev_fill_black();
   display_dev_sleep(true);
   display_dev_brightness(0);
-  SLog.println("[POWER] entering deep sleep (wake: GPIO0)");
+  SLog.printf("[POWER] powering off (wake: GPIO%d)\n", (int)PIN_BOOT_BTN);
   delay(20);   // let the serial line drain
   power_dev_shutdown();   // never returns
 }
@@ -7610,7 +7724,7 @@ static bool standby_no_radio() {
 }
 
 static void standby_run() {
-  SLog.println("[POWER] standby: wake on notification or GPIO0");
+  SLog.printf("[POWER] standby: wake on notification or GPIO%d\n", (int)PIN_BOOT_BTN);
   // Breadcrumb for the next boot: a crash anywhere in standby is invisible
   // (USB-CDC is dead in light sleep) — this file surviving into the next boot
   // says "died during standby", paired with that boot's reset-reason line.
@@ -7652,14 +7766,19 @@ static void standby_run() {
   power_dev_standby_enter();    // Heltec: GNSS rail off
 
   // Keep the wake pins' runtime input config through light sleep instead of
-  // letting the pads switch to their sleep configuration at entry.
-  gpio_sleep_sel_dis((gpio_num_t)PIN_LORA_DIO1);
+  // letting the pads switch to their sleep configuration at entry. DIO1 is a
+  // GPIO where PIN_LORA_DIO1 >= 0; the T-Display P4 reads it through its
+  // expander (power_dev_standby_arm).
+  if (PIN_LORA_DIO1 >= 0) gpio_sleep_sel_dis((gpio_num_t)PIN_LORA_DIO1);
   gpio_sleep_sel_dis((gpio_num_t)PIN_BOOT_BTN);
   // The ext0 wake below switches GPIO0 to its RTC function during sleep,
   // where the digital INPUT_PULLUP doesn't apply — enable the RTC-domain
   // pull (the shutdown recipe) so the pad can't float LOW and insta-wake.
-  rtc_gpio_pullup_en((gpio_num_t)PIN_BOOT_BTN);
-  rtc_gpio_pulldown_dis((gpio_num_t)PIN_BOOT_BTN);
+  // The P4's BOOT pad (GPIO35) is not an RTC pad.
+  if (rtc_gpio_is_valid_gpio((gpio_num_t)PIN_BOOT_BTN)) {
+    rtc_gpio_pullup_en((gpio_num_t)PIN_BOOT_BTN);
+    rtc_gpio_pulldown_dis((gpio_num_t)PIN_BOOT_BTN);
+  }
   // Keep the RTC peripherals powered through light sleep — the wake logic
   // depends on them.
   esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
@@ -7676,6 +7795,10 @@ static void standby_run() {
 
 
   uint32_t hb_last = millis();   // heartbeat pacing (first glow after one interval)
+  // Wake causes for the end-of-standby line: gpio (DIO1 / the board's radio
+  // line / the button), timer, any other source, and rounds that skipped the
+  // sleep because a packet was already signalled.
+  uint32_t n_gpio = 0, n_timer = 0, n_other = 0, n_skip = 0;
 
   bool user_wake = false;
   while (true) {
@@ -7706,7 +7829,8 @@ static void standby_run() {
       // device boot-loops on the stale asserted status. The gpio WAKE logic
       // works with the interrupt disabled. (GPIO0's ISR is already detached
       // for the whole standby.)
-      if (arm_dio1) {
+      bool dio1_gpio = arm_dio1 && PIN_LORA_DIO1 >= 0;
+      if (dio1_gpio) {
         gpio_intr_disable((gpio_num_t)PIN_LORA_DIO1);
         gpio_wakeup_enable((gpio_num_t)PIN_LORA_DIO1, GPIO_INTR_HIGH_LEVEL);
       }
@@ -7715,21 +7839,36 @@ static void standby_run() {
       // The button additionally wakes through ext0 — the RTC-domain path the
       // shutdown wake already proved on this exact pin. DIO1 (GPIO45) is not
       // an RTC pad, so it can only use the digital gpio wake + the timer net.
+      // Only where the chip has EXT0 (soc_caps: SOC_PM_SUPPORT_EXT_WAKEUP in
+      // IDF 4.4, SOC_PM_SUPPORT_EXT0_WAKEUP in IDF 5; the P4 has EXT1 only).
+#if defined(SOC_PM_SUPPORT_EXT0_WAKEUP) || defined(SOC_PM_SUPPORT_EXT_WAKEUP)
       esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_BOOT_BTN, 0);
+#endif
       esp_sleep_enable_timer_wakeup(15ULL * 1000000ULL);
-      esp_light_sleep_start();
-      if (arm_dio1) {
+      // The board's own wake lines (power_dev.h). false = a received packet
+      // is already signalled: this round drains it instead of sleeping.
+      slept = power_dev_standby_arm(arm_dio1);
+      if (slept) {
+        esp_light_sleep_start();
+        esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+        if (cause == ESP_SLEEP_WAKEUP_GPIO)       n_gpio++;
+        else if (cause == ESP_SLEEP_WAKEUP_TIMER) n_timer++;
+        else                                      n_other++;
+      } else {
+        n_skip++;
+      }
+      power_dev_standby_disarm(arm_dio1);
+      if (dio1_gpio) {
         gpio_wakeup_disable((gpio_num_t)PIN_LORA_DIO1);
       }
       gpio_wakeup_disable((gpio_num_t)PIN_BOOT_BTN);
-      if (arm_dio1) {
+      if (dio1_gpio) {
         // Restore RadioLib's edge semantics before re-enabling: POSEDGE on an
         // already-high line does not fire, and a packet latched during the
         // sleep is picked up by the IRQ-register fallback armed below.
         gpio_set_intr_type((gpio_num_t)PIN_LORA_DIO1, GPIO_INTR_POSEDGE);
         gpio_intr_enable((gpio_num_t)PIN_LORA_DIO1);
       }
-      slept = true;
     }
     MESH_UNLOCK();
     if (slept) {
@@ -7778,15 +7917,22 @@ static void standby_run() {
   // kills RadioLib's DIO1 RX-done edge ISR and the GPIO0 click ISR for good
   // — restore both (the registered handlers themselves were untouched).
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+#if defined(SOC_PM_SUPPORT_EXT0_WAKEUP) || defined(SOC_PM_SUPPORT_EXT_WAKEUP)
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_EXT0);
-  gpio_set_intr_type((gpio_num_t)PIN_LORA_DIO1, GPIO_INTR_POSEDGE);
-  gpio_intr_enable((gpio_num_t)PIN_LORA_DIO1);
+#endif
+  if (PIN_LORA_DIO1 >= 0) {
+    gpio_set_intr_type((gpio_num_t)PIN_LORA_DIO1, GPIO_INTR_POSEDGE);
+    gpio_intr_enable((gpio_num_t)PIN_LORA_DIO1);
+  }
   input_dev_wake_pin_restore();   // re-attach the GPIO0 click ISR (edge config included)
   power_dev_standby_exit();     // Heltec: GNSS rail back on
   display_dev_sleep(false);
   // Not every panel keeps its frame memory through sleep (display_dev.h):
-  // repaint the whole UI.
+  // repaint the whole UI. It is rendered here, before the backlight comes on
+  // and before the restores below (the T-Display P4's WiFi restart
+  // re-initialises its C6 co-processor and blocks for about 2.5 s).
   lv_obj_invalidate(lv_screen_active());
+  lv_refr_now(NULL);
   // Full backlight re-init, not the incremental path: after minutes held in
   // shutdown the pulse chip's state cannot be trusted to match the driver's
   // tracking, and a mismatch leaves the screen black with no self-heal.
@@ -7798,15 +7944,19 @@ static void standby_run() {
   // (input_ui.h).
   input_ui_ignore_click_until_release();
   if (wifi_was_on && wifi_enabled_pref) { WiFi.mode(WIFI_STA); wifi_auto_kick(); }
+#if BLE_COMPANION_ENABLED
   if (ble_was_on) ble_proto_resume();
+#endif
   gps_dev_wake();               // T-Deck: RXD activity wake; Heltec: no-op
   gps_notify_wake();            // fresh GPS sync cycle
   sound_resume();               // I2S back before the deferred alert replays
   notify_standby_defer(false);
   if (notify_standby_take_alert()) notify_message_alert();
-  SLog.printf("[POWER] standby end (%s) after %lus\n",
+  SLog.printf("[POWER] standby end (%s) after %lus; wakes: gpio %lu, timer %lu, other %lu; sleeps skipped %lu\n",
               user_wake ? "button" : "notification",
-              (unsigned long)((millis() - t0) / 1000UL));
+              (unsigned long)((millis() - t0) / 1000UL),
+              (unsigned long)n_gpio, (unsigned long)n_timer,
+              (unsigned long)n_other, (unsigned long)n_skip);
 }
 
 void loop() {
@@ -7908,4 +8058,10 @@ void loop() {
     SLog.println("[POWER] auto standby (idle timeout)");
     s_standby_request = true;
   }
+
+  // One tick (1 ms: CONFIG_FREERTOS_HZ=1000 on every build) off the CPU so
+  // this core's idle task runs: it feeds the task watchdog (the idle tasks
+  // are its subscribers) and halts the core until the next interrupt.
+  // Nothing else in this function blocks on its own.
+  vTaskDelay(1);
 }

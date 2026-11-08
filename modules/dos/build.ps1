@@ -1,14 +1,43 @@
 # Build tiny386 (386 DOS emulator) as a loadable ELF module for ESP32-S3 T-Deck.
 # Uses the Xtensa toolchain from PlatformIO. See tiny386-src/VENDOR.md for the
 # vendoring rules and every MESHPUNK-tagged local edit.
+#
+# -Arch s3 (default) = the Xtensa artifact dos.app.elf, unchanged.
+# -Arch rv32 = dos.app.rv32.elf for the T-Display P4 (the gameboy module's
+# pattern): the riscv32-esp toolchain, the P4 firmware's ISA and float ABI
+# (rv32imafc, ilp32f), -mno-relax, objects in obj-rv32/, and no -lgcc: the
+# rv32 libgcc.a is not position-independent, so every builtin comes from
+# host_exports[] (src/elf_host.cpp) and the UND audit below hard-fails on
+# anything else. The loader leaves .iram.text where it was loaded on RISC-V
+# (lib/elf_loader/elf_loader.c), so the rv32 build drops the Xtensa section
+# flags and the l32r audit.
+param(
+    [ValidateSet("s3", "rv32")]
+    [string]$Arch = "s3"
+)
 
-$toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
-$CC  = "$toolchain\xtensa-esp32s3-elf-gcc.exe"
-$CXX = "$toolchain\xtensa-esp32s3-elf-g++.exe"
-$READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
+if ($Arch -eq "rv32") {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-riscv32-esp\bin"
+    $CC  = "$toolchain\riscv32-esp-elf-gcc.exe"
+    $CXX = "$toolchain\riscv32-esp-elf-g++.exe"
+    $READELF = "$toolchain\riscv32-esp-elf-readelf.exe"
+    $ARCH_CFLAGS = @("-march=rv32imafc_zicsr_zifencei", "-mabi=ilp32f", "-mno-relax")
+    $LIBS = @()
+    $OUT  = "dos.app.rv32.elf"
+    $obj_dir = "obj-rv32"
+} else {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
+    $CC  = "$toolchain\xtensa-esp32s3-elf-gcc.exe"
+    $CXX = "$toolchain\xtensa-esp32s3-elf-g++.exe"
+    $READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
+    $OBJDUMP = "$toolchain\xtensa-esp32s3-elf-objdump.exe"
+    $ARCH_CFLAGS = @("-mlongcalls")
+    $LIBS = @("-lgcc")
+    $OUT  = "dos.app.elf"
+    $obj_dir = "obj"
+}
 
 $T386 = "tiny386-src"
-$OUT  = "dos.app.elf"
 
 # BUILD_ESP32 is deliberately NOT defined — it selects ESP-IDF specifics
 # (esp_attr.h, IRAM_ATTR on 31 functions, esp_mac.h, a bump-allocator
@@ -17,8 +46,8 @@ $OUT  = "dos.app.elf"
 # -fvisibility=hidden + -Bsymbolic: module-internal globals bind directly
 # (RELATIVE relocs) instead of going through the GOT. Only host imports do.
 $COMMON = @(
-    "-shared", "-fPIC", "-fvisibility=hidden", "-fno-common",
-    "-mlongcalls",
+    "-shared", "-fPIC", "-fvisibility=hidden", "-fno-common"
+) + $ARCH_CFLAGS + @(
     "-ffunction-sections", "-fdata-sections",
     "-fno-strict-aliasing",
     "-DBPP=16",                          # native RGB565 framebuffer
@@ -69,7 +98,8 @@ $LDFLAGS = @(
     "-Wl,-e,main",
     "-Wl,-Bsymbolic",
     "-Wl,--gc-sections",
-    # BFD elf32-xtensa relaxation is buggy in this binutils.
+    # BFD elf32-xtensa relaxation is buggy in this binutils. The rv32 build
+    # (compiled -mno-relax) links without relaxation as well.
     "-Wl,--no-relax",
     # elf32-xtensa asserts its R_XTENSA_RTLD placeholder relocs are still at
     # the head of .rela.got, but the default -z combreloc sort shuffles them.
@@ -90,7 +120,9 @@ $LDFLAGS = @(
 # cpu_exec1 itself stays in PSRAM: 98KB, nowhere near fits.
 $hot_iram = @("fmopl.c", "sb16.c", "pcspk.c", "adlib.c", "pc.c", "main_tdeck.c",
               "i386.c")
-$IRAM_FLAGS = @("-DMESHPUNK_HOT_IRAM", "-mtext-section-literals", "-include", "dos_hot.h")
+# -mtext-section-literals is an Xtensa option; the P4 runs the section in place.
+$IRAM_FLAGS = if ($Arch -eq "rv32") { @("-DMESHPUNK_HOT_IRAM", "-include", "dos_hot.h") }
+              else { @("-DMESHPUNK_HOT_IRAM", "-mtext-section-literals", "-include", "dos_hot.h") }
 
 # i386.c is THE hot file (the interpreter dispatch loop) -> -O2.
 # Everything else -Os: on this shared-cache silicon these cores are
@@ -107,7 +139,6 @@ $core_sources = @(
 $glue_c   = @("main_tdeck.c", "dos_video.c", "dos_input.c", "dos_libc_shim.c")
 $glue_cpp = @("dos_folderdisk.cpp", "dos_cxxstubs.cpp")
 
-$obj_dir = "obj"
 if (-not (Test-Path $obj_dir)) { New-Item -ItemType Directory $obj_dir | Out-Null }
 
 # Newest header mtime anywhere under the source tree. Headers are shared, so a
@@ -159,7 +190,7 @@ Write-Host "Linking..."
 # when something already on the line needs it. With -lgcc first, the 64-bit
 # shift/compare helpers (__ashldi3, __floatundidf, ...) stay undefined and
 # would have to be resolved by the host at load time instead.
-& $CC $COMMON $LDFLAGS -o $OUT @objects -lgcc
+& $CC $COMMON $LDFLAGS -o $OUT @objects $LIBS
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Link failed!"
     exit 1
@@ -169,13 +200,33 @@ Write-Host ""
 Write-Host "Built $OUT"
 Get-Item $OUT | Select-Object Name, Length
 
-# Undefined symbols must all be host exports (see src/elf_host.cpp).
+# Undefined symbols must all be host exports (see src/elf_host.cpp). The table
+# is parsed from the source; a miss is printed for both arches and fails the
+# rv32 build (the Xtensa build keeps its print-only behaviour).
+$hostSrc = Get-Content (Join-Path $PSScriptRoot "..\..\src\elf_host.cpp") -Raw
+$tbl = [regex]::Match($hostSrc, 'host_exports\[\]\s*=\s*\{(.*?)\n\};', 'Singleline')
+$exported = @{}
+if ($tbl.Success) {
+    foreach ($em in [regex]::Matches($tbl.Groups[1].Value, '\{\s*"([^"]+)"')) {
+        $exported[$em.Groups[1].Value] = $true
+    }
+} else {
+    Write-Host "WARNING: could not parse host_exports[] from src/elf_host.cpp"
+}
 Write-Host ""
 Write-Host "Undefined symbols (must all be host exports):"
 $und = & $READELF --dyn-syms -W $OUT | Select-String "\sUND\s" | ForEach-Object {
     ($_.Line.Trim() -split '\s+')[-1]
 } | Where-Object { $_ -ne "" -and $_ -ne "UND" } | Sort-Object -Unique
-$und
+$missing = @()
+foreach ($sym in $und) {
+    if ($tbl.Success -and -not $exported.ContainsKey($sym)) {
+        Write-Host "  $sym   <-- NOT IN host_exports[]"
+        $missing += $sym
+    } else {
+        Write-Host "  $sym"
+    }
+}
 
 # Our own macros must never reach the linker. If one does, a call site outlived
 # its #define and -Wno-implicit-function-declaration turned it into a silent
@@ -188,17 +239,28 @@ if ($ours) {
     $ours | ForEach-Object { Write-Host "         $_" }
     exit 1
 }
+if ($missing.Count -gt 0 -and $Arch -eq "rv32") {
+    Write-Host ""
+    Write-Host "ERROR: $($missing.Count) symbol(s) missing from host_exports[] - the elf WILL fail to load:"
+    $missing | ForEach-Object { Write-Host "  $_" }
+    exit 1
+}
 
 # .iram.text audit. Two ways this silently goes wrong, both fatal at runtime:
 #   1. a literal left behind in PSRAM -> every l32r in the moved code loads
 #      garbage once the loader relocates it (hence -mtext-section-literals)
 #   2. a helper de-inlined by its section attribute -> a real call in the
 #      innermost loop, a pessimisation dressed as an optimisation
+# RISC-V: the loader runs the section in place (PSRAM), so there are no
+# literals to audit.
 Write-Host ""
-$OBJDUMP = "$toolchain\xtensa-esp32s3-elf-objdump.exe"
 $secline = (& $READELF -SW $OUT) -match '\.iram\.text'
 if (-not $secline) {
     Write-Host ".iram.text: ABSENT - hot code stayed in PSRAM"
+} elseif ($Arch -eq "rv32") {
+    $m = [regex]::Match($secline[0], '\.iram\.text\s+\S+\s+([0-9a-f]+)\s+([0-9a-f]+)\s+([0-9a-f]+)')
+    $size = [Convert]::ToUInt32($m.Groups[3].Value, 16)
+    Write-Host (".iram.text: {0} bytes, run in place from PSRAM on the P4" -f $size)
 } else {
     # [ 7] .iram.text  PROGBITS  000336b0 0336b0 000e6c ...  -> addr, off, size
     $m = [regex]::Match($secline[0], '\.iram\.text\s+\S+\s+([0-9a-f]+)\s+([0-9a-f]+)\s+([0-9a-f]+)')

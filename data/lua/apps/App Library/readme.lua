@@ -8,6 +8,7 @@ The App Library installs apps, themes and LoRa protocols onto the device over Wi
 - Everything that ships with the firmware is tracked too, so even preinstalled apps, themes and the MeshCore protocol update OTA.
 - System apps (App Library, Files, Map, Messenger, and the Settings pages) are non-removable, but can still be updated.
 - An app that needs a newer firmware than you are running shows "Needs FW" instead of Install.
+- Apps built for other hardware - another chip, or a feature this device lacks such as a microphone - are kept out of the lists; each category ends with an "N more for other devices" row that shows them greyed, with the reason. Emulators ship one build per CPU and the device downloads only its own; an emulator that arrived on a card from another device shows an Update that adds this device's build.
 - Picking an install location that is nearly full (under 16 KB free) is refused with a low-space notice; free up space on that drive and try again.
 
 An installed app can bring its own help page with it. Those appear in the Apps tab of this guide, so the guide grows as you install things.

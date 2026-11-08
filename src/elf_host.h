@@ -4,6 +4,30 @@
 
 struct lua_State;
 
+// Module artifacts carry the CPU architecture in their name
+// (docs/DEVICE_EXPANSION_PLAN_2026-09-08.md §3.1): Xtensa builds keep the
+// historical "<x>.elf" ending, RISC-V builds end in "<x>.rv32.elf". Every
+// site that forms or matches a module file name uses this ending, so one
+// Lua launcher and one catalog entry serve every device.
+#if defined(__riscv)
+#define ELF_ARCH_EXT ".rv32.elf"
+#else
+#define ELF_ARCH_EXT ".elf"
+#endif
+
+// Map a module path as a launcher names it (the ".elf" form) to this CPU's
+// artifact name; a path already carrying the architecture tag is copied as
+// is. out is empty when the result does not fit cap.
+void elf_arch_path(const char* in, char* out, size_t cap);
+
+// Build target of the ELF modules this CPU loads: the catalog's `requires`
+// token and `files_<target>` suffix (_device_caps().arch).
+#if defined(__riscv)
+#define ELF_HOST_ARCH "rv32"
+#else
+#define ELF_HOST_ARCH "xtensa"
+#endif
+
 // Register the _launch_elf() Lua binding.
 void elf_host_register_lua(lua_State* L);
 

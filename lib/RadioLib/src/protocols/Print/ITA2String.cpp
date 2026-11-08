@@ -2,6 +2,16 @@
 
 #include <string.h>
 
+// ITA2 character table: - position in array corresponds to 5-bit ITA2 code
+//                       - characters to the left are in letters shift, characters to the right in figures shift
+//                       - characters marked 0x7F do not have ASCII equivalent
+static const char ITA2Table[RADIOLIB_ITA2_LENGTH][2] RADIOLIB_NONVOLATILE = {
+  {'\0', '\0'}, {'E', '3'}, {'\n', '\n'}, {'A', '-'}, {' ', ' '}, {'S', '\''}, {'I', '8'}, {'U', '7'},
+  {'\r', '\r'}, {'D', 0x05}, {'R', '4'}, {'J', '\a'}, {'N', ','}, {'F', '!'}, {'C', ':'}, {'K', '('},
+  {'T', '5'}, {'Z', '+'}, {'L', ')'}, {'W', '2'}, {'H', 0x7F}, {'Y', '6'}, {'P', '0'}, {'Q', '1'},
+  {'O', '9'}, {'B', '?'}, {'G', '&'}, {0x7F, 0x7F}, {'M', '.'}, {'X', '/'}, {'V', ';'}, {0x7F, 0x7F}
+};
+
 ITA2String::ITA2String(char c) {
   asciiLen = 1;
   #if !RADIOLIB_STATIC_ONLY
@@ -122,11 +132,15 @@ uint16_t ITA2String::getBits(char c) {
   // search ITA2 table
   uint16_t code = 0x0000;
   for(uint8_t i = 0; i < RADIOLIB_ITA2_LENGTH; i++) {
-    if(RADIOLIB_NONVOLATILE_READ_BYTE(&ITA2Table[i][0]) == c) {
+    char* ptr = const_cast<char*>(&ITA2Table[i][0]);
+    if(RADIOLIB_NONVOLATILE_READ_BYTE(ptr) == c) {
       // character is in letter shift
       code = (RADIOLIB_ITA2_LTRS << 5) | i;
       break;
-    } else if(RADIOLIB_NONVOLATILE_READ_BYTE(&ITA2Table[i][1]) == c) {
+    }
+    
+    ptr = const_cast<char*>(&ITA2Table[i][1]);
+    if(RADIOLIB_NONVOLATILE_READ_BYTE(ptr) == c) {
       // character is in figures shift
       code = (RADIOLIB_ITA2_FIGS << 5) | i;
       break;

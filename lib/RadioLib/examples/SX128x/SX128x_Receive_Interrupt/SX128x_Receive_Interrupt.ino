@@ -39,12 +39,29 @@ SX1280 radio = new Module(10, 2, 3, 9);
 Radio radio = new RadioModule();
 */
 
+// flag to indicate that a packet was received
+volatile bool receivedFlag = false;
+
+// this function is called when a complete packet
+// is received by the module
+// IMPORTANT: this function MUST be 'void' type
+//            and MUST NOT have any arguments!
+#if defined(ESP8266) || defined(ESP32)
+  ICACHE_RAM_ATTR
+#endif
+void setFlag(void) {
+  // we got a packet, set the flag
+  receivedFlag = true;
+}
+
 void setup() {
   Serial.begin(9600);
 
-  // initialize SX1280 with default settings
+  // initialize SX1280 at 2400 MHz
   Serial.print(F("[SX1280] Initializing ... "));
-  int state = radio.begin();
+  ConfigLoRa_t config;
+  config.frequency = 2400;
+  int state = radio.begin(config);
   if (state == RADIOLIB_ERR_NONE) {
     Serial.println(F("success!"));
   } else {
@@ -77,21 +94,6 @@ void setup() {
   // radio.receive();
   // radio.readData();
   // radio.scanChannel();
-}
-
-// flag to indicate that a packet was received
-volatile bool receivedFlag = false;
-
-// this function is called when a complete packet
-// is received by the module
-// IMPORTANT: this function MUST be 'void' type
-//            and MUST NOT have any arguments!
-#if defined(ESP8266) || defined(ESP32)
-  ICACHE_RAM_ATTR
-#endif
-void setFlag(void) {
-  // we got a packet, set the flag
-  receivedFlag = true;
 }
 
 void loop() {

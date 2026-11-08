@@ -4,6 +4,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import data_filter  # the per-board shipping filter, data_filter.py at the project root
 Import("env")
 
 # Flash offsets of the direct-flash layout (merged.bin) - MUST stay in lockstep
@@ -85,8 +86,11 @@ UPDATER_ENV = {
 #            firmware reformats it; the app's embedded pack (MESHPUNK_EMBED_PACK)
 #            then repopulates it on first boot.
 #
-# The payload is a SEPARATE littlefs image of data/ sized LAUNCHER_FS_SIZE, not
-# the build's assets image: the Launcher's 16 MB table (support_files/
+# The payload is a SEPARATE littlefs image of data/ sized LAUNCHER_FS_SIZE, built
+# from the board's filtered copy of data/ (data_filter.stage, the same rule the
+# embedded pack and buildfs apply, so the other architecture's modules stay out
+# of the image and its first-boot headroom), not the build's assets image: the
+# Launcher's 16 MB table (support_files/
 # custom_16Mb.csv, used by its T-Deck and Wio Tracker L2 builds) keeps 0x1A0000
 # of the flash for itself (nvs, otadata, its 1.5 MB app, coredump), so an
 # install has 0xE60000 bytes for our declared 0x580000 app plus this image.
@@ -247,11 +251,19 @@ def merge_bin(source, target, env):
     )
     if os.path.isfile(mklittlefs + ".exe"):
         mklittlefs += ".exe"
+    # data/ filtered for this board (data_filter.ships): the files the board
+    # does not ship, such as the other architecture's ELF modules, are left out.
+    arch = data_filter.arch_of(env.BoardConfig().get("build.mcu", ""))
+    launcher_data = os.path.join(build_dir, "data_launcher")
+    kept, skipped = data_filter.stage(os.path.join(project_dir, "data"),
+                                      launcher_data, arch, env.get("BOARD", ""))
+    print("merge_bin: Launcher payload = %d files for %s; left out: %s"
+          % (kept, arch, ", ".join(skipped) if skipped else "-"))
     launcher_fs = os.path.join(build_dir, "littlefs_launcher.bin")
     print("merge_bin: building %s (0x%X) for the Launcher image"
           % (launcher_fs, LAUNCHER_FS_SIZE))
     subprocess.check_call([
-        mklittlefs, "-c", os.path.join(project_dir, "data"),
+        mklittlefs, "-c", launcher_data,
         "-s", str(LAUNCHER_FS_SIZE), "-p", "256", "-b", "4096", launcher_fs,
     ])
     fs_size = os.path.getsize(launcher_fs)

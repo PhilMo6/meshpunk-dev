@@ -2942,7 +2942,7 @@ void Audio::processLocalFile() {
 
     availableBytes = 16 * 1024; // set some large value
 
-    availableBytes = min(availableBytes, InBuff.writeSpace());
+    availableBytes = min(availableBytes, (uint32_t)InBuff.writeSpace());   // MESHPUNK: writeSpace() is size_t, a different type from uint32_t on rv32 newlib
     availableBytes = min(availableBytes, audiofile.size() - byteCounter);
     if(m_contentlength){
         if(m_contentlength > getFilePos()) availableBytes = min(availableBytes, m_contentlength - getFilePos());
@@ -3093,7 +3093,7 @@ void Audio::processWebStream() {
 
     // buffer fill routine - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
     if(availableBytes) {
-        availableBytes = min(availableBytes, InBuff.writeSpace());
+        availableBytes = min(availableBytes, (uint32_t)InBuff.writeSpace());   // MESHPUNK: size_t vs uint32_t on rv32 newlib
         int16_t bytesAddedToBuffer = _client->read(InBuff.getWritePtr(), availableBytes);
 
         if(bytesAddedToBuffer > 0) {
@@ -3153,7 +3153,7 @@ void Audio::processWebFile() {
         slowStreamDetection(InBuff.bufferFilled(), maxFrameSize);
     }
 
-    availableBytes = min(InBuff.writeSpace(), availableBytes);
+    availableBytes = min((uint32_t)InBuff.writeSpace(), availableBytes);   // MESHPUNK: size_t vs uint32_t on rv32 newlib
     availableBytes = min(m_contentlength - byteCounter, availableBytes);
     if(m_audioDataSize) availableBytes = min(m_audioDataSize - (byteCounter - m_audioDataStart), availableBytes);
 

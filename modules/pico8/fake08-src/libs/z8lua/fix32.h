@@ -223,13 +223,21 @@ struct fix32
         return frombits((uint32_t(x.bits()) >> y) | (x.bits() << (32 - y)));
     }
 
-#ifdef _3DS
+    // MESHPUNK: riscv32-esp newlib defines int32_t as long, as devkitARM
+    // does, so int and size_t are distinct from the intN_t types there too.
+#if defined(_3DS) || defined(__riscv)
     inline explicit fix32(size_t x) : m_bits(int32_t(x << 16)) {}
 
     inline fix32(int x)  : m_bits(int(x << 16)) {}
 
     inline explicit operator size_t() const { return m_bits >> 16; }
-    
+
+#endif
+    // MESHPUNK: operator int32_t() does not cover int on riscv32-esp; without
+    // this, (int) casts convert through operator double (truncating) instead
+    // of shifting (flooring) as they do where int32_t is int.
+#if defined(__riscv)
+    inline explicit operator int() const { return m_bits >> 16; }
 #endif
 
     static inline fix32 ldexp(fix32 x, int y)

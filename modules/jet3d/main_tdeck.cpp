@@ -95,6 +95,12 @@ extern "C" void exit(int code)
 //
 // Ordering differs: .init_array runs front to back, .ctors back to front (the
 // linker emits it in reverse). Both marker slots hold NULL and are skipped.
+//
+// The riscv32-esp toolchain (T-Display P4 build) emits constructors into
+// .init_array, and its default -shared linker script places the .ctors input
+// sections — the two markers — into the .init_array output section in link
+// order, so the markers bracket the real entries there (readelf: begin at the
+// first slot, end at the last). That range runs front to back on RISC-V.
 // ---------------------------------------------------------------------------
 typedef void (*init_fn_t)(void);
 extern init_fn_t __init_array_start[] __attribute__((weak));
@@ -114,9 +120,15 @@ static void run_static_ctors(void)
 
     init_fn_t* lo = &__meshpunk_ctors_begin + 1;
     init_fn_t* hi = &__meshpunk_ctors_end_marker;
+#if defined(__riscv)
+    for (init_fn_t* f = lo; f < hi; f++) {
+        if (*f) { (*f)(); n++; }
+    }
+#else
     for (init_fn_t* f = hi; f-- > lo; ) {
         if (*f) { (*f)(); n++; }
     }
+#endif
 
     mlog("[jet3d] ran %d static constructors\n", n);
 }

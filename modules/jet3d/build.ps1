@@ -1,35 +1,64 @@
 # Build the Jet 3D engine (Jet rasteriser + private Lua 5.5) as a loadable ELF
 # module for ESP32-S3 T-Deck. Uses the Xtensa toolchain from PlatformIO.
+#
+# -Arch s3 (default) = the Xtensa artifact jet3d.app.elf, unchanged.
+# -Arch rv32 = jet3d.app.rv32.elf for the T-Display P4 (the gameboy module's
+# pattern): the riscv32-esp toolchain, the P4 firmware's ISA and float ABI
+# (rv32imafc, ilp32f), -mno-relax, objects in obj-rv32/, and no -lgcc: the
+# rv32 libgcc.a is not position-independent, so every builtin comes from
+# host_exports[] (src/elf_host.cpp) and the UND audit below hard-fails on
+# anything else. The loader leaves .iram.text where it was loaded on RISC-V
+# (lib/elf_loader/elf_loader.c), so the rv32 build drops the Xtensa section
+# flag and the l32r audit; it also leaves out CONFIG_IDF_TARGET_ESP32S3
+# (Jet's ESP32-S3 PIE assembly), so Jet compiles its portable C++ paths.
+param(
+    [ValidateSet("s3", "rv32")]
+    [string]$Arch = "s3"
+)
 
-$toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
-$CC      = "$toolchain\xtensa-esp32s3-elf-gcc.exe"
-$CXX     = "$toolchain\xtensa-esp32s3-elf-g++.exe"
-$READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
-$OBJDUMP = "$toolchain\xtensa-esp32s3-elf-objdump.exe"
+if ($Arch -eq "rv32") {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-riscv32-esp\bin"
+    $CC      = "$toolchain\riscv32-esp-elf-gcc.exe"
+    $CXX     = "$toolchain\riscv32-esp-elf-g++.exe"
+    $READELF = "$toolchain\riscv32-esp-elf-readelf.exe"
+    $ARCH_CFLAGS = @("-march=rv32imafc_zicsr_zifencei", "-mabi=ilp32f", "-mno-relax")
+    $ARCH_LDFLAGS = @("-Wl,--no-relax")
+    $LIBS = @()
+    $OUT = "jet3d.app.rv32.elf"
+    $obj_dir = "obj-rv32"
+} else {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
+    $CC      = "$toolchain\xtensa-esp32s3-elf-gcc.exe"
+    $CXX     = "$toolchain\xtensa-esp32s3-elf-g++.exe"
+    $READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
+    $OBJDUMP = "$toolchain\xtensa-esp32s3-elf-objdump.exe"
+    $ARCH_CFLAGS = @("-mlongcalls", "-DCONFIG_IDF_TARGET_ESP32S3")
+    $ARCH_LDFLAGS = @()
+    $LIBS = @("-lgcc")
+    $OUT = "jet3d.app.elf"
+    $obj_dir = "obj"
+}
 
 $JET = "jet-src"
 $LUA = "lua-src"
-$OUT = "jet3d.app.elf"
 
 # Shared flags. -I. puts the module's own JetConfig.hpp ahead of anything in
 # jet-src, which ships only JetConfig.example.hpp.
 #
-# CONFIG_IDF_TARGET_ESP32S3 gates Jet's inline ESP32-S3 PIE assembly (128-bit
-# EE.VST.128.XP stores) in the clear and span-fill paths. It pulls in no
-# ESP-IDF headers. ESP_PLATFORM is deliberately NOT defined: that would make
-# Jet include esp_attr.h and dsps.h, which an ELF module has no include path
-# for.
-$COMMON = @(
+# CONFIG_IDF_TARGET_ESP32S3 (Xtensa only, $ARCH_CFLAGS) gates Jet's inline
+# ESP32-S3 PIE assembly (128-bit EE.VST.128.XP stores) in the clear and
+# span-fill paths. It pulls in no ESP-IDF headers. ESP_PLATFORM is
+# deliberately NOT defined: that would make Jet include esp_attr.h and
+# dsps.h, which an ELF module has no include path for.
+$COMMON = $ARCH_CFLAGS + @(
     "-shared", "-fPIC", "-fno-common",
     # Hidden visibility + -Bsymbolic below: internal globals bind directly
     # (RELATIVE relocs, no GOT double-hop). Plain -fno-PIC is rejected by
     # the xtensa BFD linker.
     "-fvisibility=hidden",
-    "-mlongcalls",
     "-ffunction-sections", "-fdata-sections",
     "-fno-strict-aliasing",
     "-I.", "-I$JET", "-I$LUA",
-    "-DCONFIG_IDF_TARGET_ESP32S3",
     # 32-bit lua_Number/lua_Integer halves every TValue on a 32-bit target.
     # This MUST be identical for the C and C++ halves: it selects the width of
     # lua_Number and lua_Integer, so a mismatch silently breaks the ABI between
@@ -55,7 +84,8 @@ $CXXFLAGS = $COMMON + @(
 )
 
 $LDFLAGS = @(
-    "-nostartfiles", "-nodefaultlibs", "-nostdlib",
+    "-nostartfiles", "-nodefaultlibs", "-nostdlib"
+) + $ARCH_LDFLAGS + @(
     "-Wl,-e,main",
     "-Wl,-Bsymbolic",
     # Keep .rel.dyn uncombined - combreloc trips an elf32-xtensa BFD assert.
@@ -105,7 +135,6 @@ $MUSICFLAGS = $COMMON + @(
     "-Wno-unused-variable", "-Wno-unused-but-set-variable"
 )
 
-$obj_dir = "obj"
 if (-not (Test-Path $obj_dir)) { New-Item -ItemType Directory $obj_dir | Out-Null }
 
 # Newest header mtime across the tree. Headers are shared, so a single header
@@ -141,7 +170,7 @@ function Compile-One($src, $isCpp, $flagOverride = $null) {
 
     $srcname = [System.IO.Path]::GetFileName($src)
     $opt = if ($hot -contains $srcname) { "-O2" } else { "-Os" }
-    $extra = if ($literals_in_text -contains $srcname) { @("-mtext-section-literals") } else { @() }
+    $extra = if ($Arch -eq "s3" -and $literals_in_text -contains $srcname) { @("-mtext-section-literals") } else { @() }
     Write-Host "  $(if ($isCpp) { 'CXX' } else { 'CC ' }) $srcname ($opt)"
     if ($isCpp) {
         & $CXX $CXXFLAGS $opt $extra -c -o $obj $src
@@ -177,7 +206,7 @@ $ordered += ($objects | Where-Object { $_ -notmatch 'ctors_(begin|end)\.o$' })
 $ordered += "$obj_dir/ctors_end.o"
 
 Write-Host "Linking..."
-& $CXX $CXXFLAGS $LDFLAGS -o $OUT @ordered "-lgcc"
+& $CXX $CXXFLAGS $LDFLAGS -o $OUT @ordered @LIBS
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Link failed!"
@@ -222,9 +251,35 @@ if ($ctors) {
     if ($n -lt 1) { Write-Host "  (none to run)" }
 }
 
-$ia = $sections | Select-String '\.init_array\s+INIT_ARRAY\s+[0-9a-f]+\s+[0-9a-f]+\s+([0-9a-f]+)'
-if ($ia) {
-    $n = [Convert]::ToUInt32($ia.Matches[0].Groups[1].Value, 16) / 4
+$ia = $sections | Select-String '\.init_array\s+INIT_ARRAY\s+([0-9a-f]+)\s+[0-9a-f]+\s+([0-9a-f]+)'
+if ($Arch -eq "rv32") {
+    # riscv32-esp: constructors go to .init_array, and the -shared default
+    # script places the two .ctors markers into that output section in link
+    # order. They must sit at its first and last slot, or run_static_ctors()
+    # misses constructors.
+    if (-not $ia) {
+        Write-Host "ERROR: no .init_array - the ctors markers did not land."
+        exit 1
+    }
+    $iaAddr = [Convert]::ToUInt32($ia.Matches[0].Groups[1].Value, 16)
+    $iaSize = [Convert]::ToUInt32($ia.Matches[0].Groups[2].Value, 16)
+    $lo = $syms | Select-String '([0-9a-f]{8})\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+__meshpunk_ctors_begin$'
+    $hi = $syms | Select-String '([0-9a-f]{8})\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+__meshpunk_ctors_end_marker$'
+    if (-not $lo -or -not $hi) {
+        Write-Host "ERROR: .init_array present but the boundary markers are missing."
+        exit 1
+    }
+    $loA = [Convert]::ToUInt32($lo.Matches[0].Groups[1].Value, 16)
+    $hiA = [Convert]::ToUInt32($hi.Matches[0].Groups[1].Value, 16)
+    if ($loA -ne $iaAddr -or $hiA -ne ($iaAddr + $iaSize - 4)) {
+        Write-Host "ERROR: the markers do not bracket .init_array."
+        Write-Host ("       section {0:x8}+{1}  begin {2:x8}  end {3:x8}" -f $iaAddr, $iaSize, $loA, $hiA)
+        exit 1
+    }
+    $n = ($hiA - $loA) / 4 - 1
+    Write-Host ".init_array: $n constructor(s) bracketed by the markers, run front to back by run_static_ctors()"
+} elseif ($ia) {
+    $n = [Convert]::ToUInt32($ia.Matches[0].Groups[2].Value, 16) / 4
     Write-Host ".init_array: $n constructor(s), run by run_static_ctors()"
 }
 if (-not $ctors -and -not $ia) {
@@ -234,9 +289,14 @@ if (-not $ctors -and -not $ia) {
 # .iram.text is copied into internal SRAM at load, which changes its distance
 # to every other section. Absolute references survive (the loader relocates
 # them), but l32r is PC-relative and fixed at link time, so every literal it
-# reaches must live inside the section itself. No source currently opts in.
+# reaches must live inside the section itself. RISC-V: the loader runs the
+# section in place (PSRAM), so there is nothing to audit.
 $iram = & $READELF -S -W $OUT | Select-String '\.iram\.text\s+PROGBITS\s+([0-9a-f]+)\s+[0-9a-f]+\s+([0-9a-f]+)'
-if ($iram) {
+if ($iram -and $Arch -eq "rv32") {
+    $sec_size = [Convert]::ToUInt32($iram.Matches[0].Groups[2].Value, 16)
+    Write-Host ""
+    Write-Host ".iram.text: $sec_size bytes, run in place from PSRAM on the P4"
+} elseif ($iram) {
     $sec_addr = [Convert]::ToUInt32($iram.Matches[0].Groups[1].Value, 16)
     $sec_size = [Convert]::ToUInt32($iram.Matches[0].Groups[2].Value, 16)
     $sec_end  = $sec_addr + $sec_size
@@ -264,11 +324,41 @@ if ($iram) {
 }
 
 # Every UND symbol must be resolvable from host_exports[] in src/elf_host.cpp,
-# or the module will fail to load on device. Audit at build time instead.
+# or the module will fail to load on device. Audit at build time instead:
+# the table is parsed from the source; a miss is printed for both arches and
+# fails the rv32 build (the Xtensa build keeps its print-only behaviour).
+$hostSrc = Get-Content (Join-Path $PSScriptRoot "..\..\src\elf_host.cpp") -Raw
+$tbl = [regex]::Match($hostSrc, 'host_exports\[\]\s*=\s*\{(.*?)\n\};', 'Singleline')
+$exported = @{}
+if ($tbl.Success) {
+    foreach ($em in [regex]::Matches($tbl.Groups[1].Value, '\{\s*"([^"]+)"')) {
+        $exported[$em.Groups[1].Value] = $true
+    }
+} else {
+    Write-Host "WARNING: could not parse host_exports[] from src/elf_host.cpp"
+}
+$missing = @()
 Write-Host ""
-Write-Host "Undefined symbols (each must be a host export):"
-& $READELF --dyn-syms $OUT | Select-String "\bUND\b" | ForEach-Object {
+Write-Host "Undefined symbols (each must be a host export; WEAK ones the loader"
+Write-Host "resolves to NULL when unexported, lib/elf_loader/elf_loader.c):"
+& $READELF -W --dyn-syms $OUT | Select-String "\bUND\b" | ForEach-Object {
     $parts = ($_ -replace '\s+', ' ').Trim().Split(' ')
     $sym = $parts[$parts.Length - 1]
-    if ($sym -and $sym -ne "UND") { Write-Host "  $sym" }
+    $weak = ($parts.Length -ge 8 -and $parts[4] -eq "WEAK")
+    if ($sym -and $sym -ne "UND" -and $sym -ne "Name") {
+        if ($weak -and -not $exported.ContainsKey($sym)) {
+            Write-Host "  $sym   (weak: NULL at load)"
+        } elseif ($tbl.Success -and -not $exported.ContainsKey($sym)) {
+            Write-Host "  $sym   <-- NOT IN host_exports[]"
+            $missing += $sym
+        } else {
+            Write-Host "  $sym"
+        }
+    }
+}
+if ($missing.Count -gt 0 -and $Arch -eq "rv32") {
+    Write-Host ""
+    Write-Host "ERROR: $($missing.Count) symbol(s) missing from host_exports[] - the elf WILL fail to load:"
+    $missing | ForEach-Object { Write-Host "  $_" }
+    exit 1
 }

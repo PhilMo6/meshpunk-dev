@@ -66,6 +66,13 @@ extern const struct _mp_obj_fun_builtin_var_t px_builtin_input_obj;
 // 16-bit entries, MESHPUNK).
 #define MICROPY_OPT_MAP_LOOKUP_CACHE_SIZE       (512)
 
+// Half floats ('e' in struct/array) through MicroPython's own conversion on
+// every toolchain: the native _Float16 path, taken when the compiler defines
+// __FLT16_MAX__ (riscv32-esp gcc 14 does, xtensa-esp32s3 gcc 8.4 does not),
+// calls libgcc's __truncsfhf2 / __extendhfsf2, which the firmware does not
+// export.
+#define MICROPY_FLOAT_USE_NATIVE_FLT16          (0)
+
 // The interpreter's hottest functions run from internal SRAM: the ELF loader
 // copies the .iram.text section there. Functions MicroPython has a
 // MICROPY_WRAP_* hook for are placed below; the others carry PX_IRAM in py/

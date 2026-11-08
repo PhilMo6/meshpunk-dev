@@ -1,25 +1,51 @@
 # Build gnuboy (Game Boy / Game Boy Color) as a loadable ELF module
 # for ESP32-S3 T-Deck. Uses the Xtensa toolchain from PlatformIO.
+#
+# -Arch s3 (default) = the Xtensa artifact gameboy.app.elf, unchanged.
+# -Arch rv32 = gameboy.app.rv32.elf for the T-Display P4
+# (docs/DEVICE_EXPANSION_PLAN_2026-09-08.md 3.1 / 3.4): the riscv32-esp
+# toolchain, the P4 firmware's ISA and float ABI (rv32imafc, ilp32f),
+# -mno-relax, objects in obj-rv32/, and no -lgcc: the rv32 libgcc.a is not
+# position-independent, so every builtin comes from host_exports[]
+# (src/elf_host.cpp) and the UND audit below hard-fails on anything else.
+param(
+    [ValidateSet("s3", "rv32")]
+    [string]$Arch = "s3"
+)
 
-$toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
-$CC = "$toolchain\xtensa-esp32s3-elf-gcc.exe"
-$READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
+if ($Arch -eq "rv32") {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-riscv32-esp\bin"
+    $CC = "$toolchain\riscv32-esp-elf-gcc.exe"
+    $READELF = "$toolchain\riscv32-esp-elf-readelf.exe"
+    $ARCH_CFLAGS = @("-march=rv32imafc_zicsr_zifencei", "-mabi=ilp32f", "-mno-relax")
+    $ARCH_LDFLAGS = @("-Wl,--no-relax")
+    $LIBS = @()
+    $OUT = "gameboy.app.rv32.elf"
+    $obj_dir = "obj-rv32"
+} else {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
+    $CC = "$toolchain\xtensa-esp32s3-elf-gcc.exe"
+    $READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
+    $ARCH_CFLAGS = @("-mlongcalls")
+    $ARCH_LDFLAGS = @()
+    $LIBS = @("-lgcc")
+    $OUT = "gameboy.app.elf"
+    $obj_dir = "obj"
+}
 
 $SRC = "gnuboy-src"
-$OUT = "gameboy.app.elf"
 
 # Common compiler flags (per-file -O flag added below)
-$CFLAGS = @(
+$CFLAGS = $ARCH_CFLAGS + @(
     "-shared", "-fPIC", "-fno-common",
-    "-mlongcalls",
     "-ffunction-sections", "-fdata-sections",
     "-fno-strict-aliasing",
     "-I$SRC"
 )
 
 $LDFLAGS = @(
-    "-nostartfiles", "-nodefaultlibs", "-nostdlib",
-    "-lgcc",
+    "-nostartfiles", "-nodefaultlibs", "-nostdlib"
+) + $LIBS + $ARCH_LDFLAGS + @(
     "-Wl,-e,main",
     "-Wl,--gc-sections"
 )
@@ -29,7 +55,6 @@ $core_sources = @("cpu.c", "hw.c", "lcd.c", "sound.c", "gnuboy.c") | ForEach-Obj
 # Platform glue: -Os
 $glue_sources = @("main_tdeck.c")
 
-$obj_dir = "obj"
 if (-not (Test-Path $obj_dir)) { New-Item -ItemType Directory $obj_dir | Out-Null }
 
 # Newest header mtime anywhere under the source tree. Headers are shared
@@ -83,12 +108,38 @@ $size = (Get-Item $OUT).Length
 Write-Host "Success: $OUT ($([math]::Round($size/1024, 1)) KB)"
 
 # Every UND symbol must be resolvable from host_exports[] in src/elf_host.cpp,
-# or the module will fail to load on device. Audit at build time instead.
+# or the module will fail to load on device. Audit at build time instead:
+# the table is parsed from the source; a miss is printed for both arches and
+# fails the rv32 build (the Xtensa build keeps its print-only behaviour).
+$hostSrc = Get-Content (Join-Path $PSScriptRoot "..\..\src\elf_host.cpp") -Raw
+$tbl = [regex]::Match($hostSrc, 'host_exports\[\]\s*=\s*\{(.*?)\n\};', 'Singleline')
+$exported = @{}
+if ($tbl.Success) {
+    foreach ($em in [regex]::Matches($tbl.Groups[1].Value, '\{\s*"([^"]+)"')) {
+        $exported[$em.Groups[1].Value] = $true
+    }
+} else {
+    Write-Host "WARNING: could not parse host_exports[] from src/elf_host.cpp"
+}
+$missing = @()
 Write-Host ""
 Write-Host "Undefined symbols (each must be a host export):"
-& $READELF --dyn-syms $OUT | Select-String "\bUND\b" | ForEach-Object {
+& $READELF -W --dyn-syms $OUT | Select-String "\bUND\b" | ForEach-Object {
     $parts = ($_ -replace '\s+', ' ').Trim().Split(' ')
     $sym = $parts[$parts.Length - 1]
-    if ($sym -and $sym -ne "UND") { Write-Host "  $sym" }
+    if ($sym -and $sym -ne "UND" -and $sym -ne "Name") {
+        if ($tbl.Success -and -not $exported.ContainsKey($sym)) {
+            Write-Host "  $sym   <-- NOT IN host_exports[]"
+            $missing += $sym
+        } else {
+            Write-Host "  $sym"
+        }
+    }
+}
+if ($missing.Count -gt 0 -and $Arch -eq "rv32") {
+    Write-Host ""
+    Write-Host "ERROR: $($missing.Count) symbol(s) missing from host_exports[] - the elf WILL fail to load:"
+    $missing | ForEach-Object { Write-Host "  $_" }
+    exit 1
 }
 

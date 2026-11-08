@@ -62,12 +62,34 @@ static const Module::RfSwitchMode_t rfswitch_table[] = {
 // save transmission state between loops
 int transmissionState = RADIOLIB_ERR_NONE;
 
+// flag to indicate that a packet was sent
+volatile bool transmittedFlag = false;
+
+// this function is called when a complete packet
+// is transmitted by the module
+// IMPORTANT: this function MUST be 'void' type
+//            and MUST NOT have any arguments!
+#if defined(ESP8266) || defined(ESP32)
+  ICACHE_RAM_ATTR
+#endif
+void setFlag(void) {
+  // we sent a packet, set the flag
+  transmittedFlag = true;
+}
+
 void setup() {
   Serial.begin(9600);
 
-  // initialize LR1110 with default settings
+  // before calling begin(), correct crystal has to be selected
+  // some LR11x0 have a TCXO which needs 1.6V reference
+  // set to 0 if your radio has an XTAL
+  radio.tcxoVoltage = 1.6;
+
+  // initialize LR1110 at 434 MHz
   Serial.print(F("[LR1110] Initializing ... "));
-  int state = radio.begin();
+  ConfigLoRa_t config;
+  config.frequency = 434;
+  int state = radio.begin(config);
   if (state == RADIOLIB_ERR_NONE) {
     Serial.println(F("success!"));
   } else {
@@ -98,21 +120,6 @@ void setup() {
   */
 }
 
-// flag to indicate that a packet was sent
-volatile bool transmittedFlag = false;
-
-// this function is called when a complete packet
-// is transmitted by the module
-// IMPORTANT: this function MUST be 'void' type
-//            and MUST NOT have any arguments!
-#if defined(ESP8266) || defined(ESP32)
-  ICACHE_RAM_ATTR
-#endif
-void setFlag(void) {
-  // we sent a packet, set the flag
-  transmittedFlag = true;
-}
-
 // counter to keep track of transmitted packets
 int count = 0;
 
@@ -125,10 +132,6 @@ void loop() {
     if (transmissionState == RADIOLIB_ERR_NONE) {
       // packet was successfully sent
       Serial.println(F("transmission finished!"));
-
-      // NOTE: when using interrupt-driven transmit method,
-      //       it is not possible to automatically measure
-      //       transmission data rate using getDataRate()
 
     } else {
       Serial.print(F("failed, code "));

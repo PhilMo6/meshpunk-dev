@@ -1,17 +1,51 @@
 # Build fake-08 (PICO-8) as a loadable ELF module for ESP32-S3 T-Deck
 # Uses the Xtensa toolchain from PlatformIO
+# The ELF stays in this folder: PICO-8 ships through the App Library
+# (meshpunk-apps/apps/PICO-8), not the firmware data tree.
+#
+# -Arch s3 (default) = the Xtensa artifact pico8.app.elf, unchanged.
+# -Arch rv32 = pico8.app.rv32.elf for the T-Display P4 (the gameboy module's
+# pattern): the riscv32-esp toolchain, the P4 firmware's ISA and float ABI
+# (rv32imafc, ilp32f), -mno-relax, objects in obj-rv32/, and no libraries:
+# the rv32 libgcc.a and libstdc++.a are not position-independent, so every
+# import comes from host_exports[] (src/elf_host.cpp) and the UND audit below
+# hard-fails on anything else.
+param(
+    [ValidateSet("s3", "rv32")]
+    [string]$Arch = "s3"
+)
 
 # Ensure all relative paths resolve from the script's own directory,
 # regardless of where it's invoked from (e.g. project root).
 Push-Location $PSScriptRoot
 trap { Pop-Location }
 
-$toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
-$CXX = "$toolchain\xtensa-esp32s3-elf-g++.exe"
-$SIZE = "$toolchain\xtensa-esp32s3-elf-size.exe"
+if ($Arch -eq "rv32") {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-riscv32-esp\bin"
+    $CXX = "$toolchain\riscv32-esp-elf-g++.exe"
+    $SIZE = "$toolchain\riscv32-esp-elf-size.exe"
+    $READELF = "$toolchain\riscv32-esp-elf-readelf.exe"
+    $ARCH_FLAGS = @("-march=rv32imafc_zicsr_zifencei", "-mabi=ilp32f", "-mno-relax")
+    $ARCH_LDFLAGS = @("-Wl,--no-relax")
+    $OUT = "pico8.app.rv32.elf"
+    $obj_dir = "obj-rv32"
+} else {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
+    $CXX = "$toolchain\xtensa-esp32s3-elf-g++.exe"
+    $SIZE = "$toolchain\xtensa-esp32s3-elf-size.exe"
+    $READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
+    $ARCH_FLAGS = @("-mlongcalls")
+    $ARCH_LDFLAGS = @(
+        "-lgcc",
+        "-L$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\xtensa-esp32s3-elf\lib\no-rtti",
+        "-lstdc++",
+        "-lgcc"
+    )
+    $OUT = "pico8.app.elf"
+    $obj_dir = "obj"
+}
 
 $F08 = "fake08-src"
-$OUT = "pico8.app.elf"
 
 # Common compiler flags
 # -fwrapv / -fno-strict-aliasing are correctness flags, not tuning: z8lua
@@ -21,7 +55,8 @@ $OUT = "pico8.app.elf"
 # punning code compiled as C++.
 $COMMON_FLAGS = @(
     "-shared", "-fPIC", "-fno-common",
-    "-Os", "-mlongcalls",
+    "-Os"
+) + $ARCH_FLAGS + @(
     "-fwrapv", "-fno-strict-aliasing",
     "-ffunction-sections", "-fdata-sections",
     "-D_TDECK",
@@ -48,11 +83,8 @@ $CFLAGS_Z8LUA = $COMMON_FLAGS + @(
 )
 
 $LDFLAGS = @(
-    "-nostartfiles", "-nodefaultlibs", "-nostdlib",
-    "-lgcc",
-    "-L$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\xtensa-esp32s3-elf\lib\no-rtti",
-    "-lstdc++",
-    "-lgcc",
+    "-nostartfiles", "-nodefaultlibs", "-nostdlib"
+) + $ARCH_LDFLAGS + @(
     "-Wl,-e,main",
     "-Wl,--gc-sections"
 )
@@ -90,7 +122,6 @@ Write-Host "  lodepng:  1 file"
 # ---------------------------------------------------------------------------
 # Compile
 # ---------------------------------------------------------------------------
-$obj_dir = "obj"
 if (-not (Test-Path $obj_dir)) { New-Item -ItemType Directory $obj_dir | Out-Null }
 
 $objects = @()
@@ -162,14 +193,45 @@ if ($LASTEXITCODE -eq 0) {
     & $SIZE $OUT
     $fileSize = (Get-Item $OUT).Length
     Write-Host "Success: $OUT ($([math]::Round($fileSize/1024, 1)) KB)"
-
-    # Copy to LittleFS data dir so it's included in firmware flash
-    $dest = "..\..\data\lua\apps\Games\PICO-8"
-    if (-not (Test-Path $dest)) { New-Item -ItemType Directory $dest -Force | Out-Null }
-    Copy-Item $OUT "$dest\pico8.app.elf" -Force
-    Write-Host "Copied to $dest\pico8.app.elf"
 } else {
     Write-Host "Link failed!"
+    Pop-Location
+    exit 1
+}
+
+# Every UND symbol must be resolvable from host_exports[] in src/elf_host.cpp,
+# or the module will fail to load on device. The table is parsed from the
+# source; a miss is printed for both arches and fails the rv32 build (the
+# Xtensa build only prints).
+$hostSrc = Get-Content (Join-Path $PSScriptRoot "..\..\src\elf_host.cpp") -Raw
+$tbl = [regex]::Match($hostSrc, 'host_exports\[\]\s*=\s*\{(.*?)\n\};', 'Singleline')
+$exported = @{}
+if ($tbl.Success) {
+    foreach ($em in [regex]::Matches($tbl.Groups[1].Value, '\{\s*"([^"]+)"')) {
+        $exported[$em.Groups[1].Value] = $true
+    }
+} else {
+    Write-Host "WARNING: could not parse host_exports[] from src/elf_host.cpp"
+}
+$missing = @()
+Write-Host ""
+Write-Host "Undefined symbols (each must be a host export):"
+& $READELF -W --dyn-syms $OUT | Select-String "\bUND\b" | ForEach-Object {
+    $parts = ($_ -replace '\s+', ' ').Trim().Split(' ')
+    $sym = $parts[$parts.Length - 1]
+    if ($sym -and $sym -ne "UND" -and $sym -ne "Name") {
+        if ($tbl.Success -and -not $exported.ContainsKey($sym)) {
+            Write-Host "  $sym   <-- NOT IN host_exports[]"
+            $missing += $sym
+        } else {
+            Write-Host "  $sym"
+        }
+    }
+}
+if ($missing.Count -gt 0 -and $Arch -eq "rv32") {
+    Write-Host ""
+    Write-Host "ERROR: $($missing.Count) symbol(s) missing from host_exports[] - the elf WILL fail to load:"
+    $missing | ForEach-Object { Write-Host "  $_" }
     Pop-Location
     exit 1
 }

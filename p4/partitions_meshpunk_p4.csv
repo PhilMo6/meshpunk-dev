@@ -1,9 +1,11 @@
-# Meshpunk P4 partition map (16MB flash) — PROVISIONAL, rung-1 shape.
-# One factory app slot + the data filesystem under the same "assets" label
-# the S3 firmware mounts. The OTA/updater layout is a later decision and
-# will replace this file; nothing below is a shipping commitment.
+# Meshpunk P4 partition map (16MB flash) — PROVISIONAL (Phase 0 of
+# docs/P4_PORT_PLAN_2026-10-12.md). One factory app slot + the data
+# filesystem under the same "assets" label the S3 firmware mounts. The app
+# slot is 6 MB until the first firmware build reports its size (the S3 dev
+# image is 3.0 MB in a 5.5 MB slot; Arduino 3 + IDF 5 add to that). The
+# OTA/updater layout is a later decision and will replace this file.
 # Name,     Type, SubType, Offset,   Size
 nvs,        data, nvs,     0x9000,   0x6000
 phy_init,   data, phy,     0xf000,   0x1000
-factory,    app,  factory, 0x10000,  4M
-assets,     data, spiffs,  ,         10M
+factory,    app,  factory, 0x10000,  0x600000
+assets,     data, spiffs,  0x610000, 0x9F0000

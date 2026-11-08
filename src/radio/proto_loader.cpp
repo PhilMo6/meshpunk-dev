@@ -154,8 +154,9 @@ const LoraProtoOps none_proto_ops = {
     nullptr, nullptr, nullptr,   // lua_open, lua_close, lua_tick (v2)
 };
 
-// First <name>.loraproto.elf inside fs:<dir>; false when the dir or the file
-// is absent. The caller holds the SPI lock for the SD filesystem.
+// First <name>.loraproto.elf (this CPU's artifact ending, ELF_ARCH_EXT in
+// elf_host.h: ".rv32.elf" on RISC-V) inside fs:<dir>; false when the dir or
+// the file is absent. The caller holds the SPI lock for the SD filesystem.
 static bool find_package_elf(FS& fs, const char* dir, char* out, size_t out_sz) {
     out[0] = '\0';
     File root = fs.open(dir);
@@ -166,7 +167,7 @@ static bool find_package_elf(FS& fs, const char* dir, char* out, size_t out_sz) 
             String base = e.name();
             int slash = base.lastIndexOf('/');
             if (slash >= 0) base = base.substring(slash + 1);
-            if (base.endsWith(".loraproto.elf")) {
+            if (base.endsWith(".loraproto" ELF_ARCH_EXT)) {
                 strncpy(out, base.c_str(), out_sz - 1);
                 out[out_sz - 1] = '\0';
                 break;
@@ -209,8 +210,8 @@ void lora_proto_select_and_load(void) {
         }
     }
     if (!elfname[0]) {
-        SLog.printf("[PROTO] '%s' requested but no .loraproto.elf in L:%s or S:%s — radio off\n",
-                    req, dir, dir);
+        SLog.printf("[PROTO] '%s' requested but no .loraproto%s in L:%s or S:%s — radio off\n",
+                    req, ELF_ARCH_EXT, dir, dir);
         set_notice("LoRa protocol '%s' is not installed - radio off", req);
         s_ops = &none_proto_ops;
         lora_proto_mark_active("none");

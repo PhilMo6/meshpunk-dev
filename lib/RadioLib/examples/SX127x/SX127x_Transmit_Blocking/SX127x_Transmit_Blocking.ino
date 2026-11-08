@@ -41,9 +41,11 @@ Radio radio = new RadioModule();
 void setup() {
   Serial.begin(9600);
 
-  // initialize SX1278 with default settings
+  // initialize SX1278 at 434 MHz
   Serial.print(F("[SX1278] Initializing ... "));
-  int state = radio.begin();
+  ConfigLoRa_t config;
+  config.frequency = 434;
+  int state = radio.begin(config);
   if (state == RADIOLIB_ERR_NONE) {
     Serial.println(F("success!"));
   } else {
@@ -83,11 +85,6 @@ void loop() {
   if (state == RADIOLIB_ERR_NONE) {
     // the packet was successfully transmitted
     Serial.println(F(" success!"));
-
-    // print measured data rate
-    Serial.print(F("[SX1278] Datarate:\t"));
-    Serial.print(radio.getDataRate());
-    Serial.println(F(" bps"));
 
   } else if (state == RADIOLIB_ERR_PACKET_TOO_LONG) {
     // the supplied packet was longer than 256 bytes

@@ -14,7 +14,7 @@ AX25Frame::AX25Frame(const char* destCallsign, uint8_t destSSID, const char* src
 
 }
 
-AX25Frame::AX25Frame(const char* destCallsign, uint8_t destSSID, const char* srcCallsign, uint8_t srcSSID, uint8_t control, uint8_t protocolID, uint8_t* info, uint16_t infoLen) {
+AX25Frame::AX25Frame(const char* destCallsign, uint8_t destSSID, const char* srcCallsign, uint8_t srcSSID, uint8_t control, uint8_t protocolID, const uint8_t* info, uint16_t infoLen) {
   // destination callsign/SSID
   memcpy(this->destCallsign, destCallsign, strlen(destCallsign));
   this->destCallsign[strlen(destCallsign)] = '\0';
@@ -28,6 +28,7 @@ AX25Frame::AX25Frame(const char* destCallsign, uint8_t destSSID, const char* src
   // set repeaters
   this->numRepeaters = 0;
   #if !RADIOLIB_STATIC_ONLY
+    this->info = NULL;
     this->repeaterCallsigns = NULL;
     this->repeaterSSIDs = NULL;
   #endif
@@ -64,6 +65,12 @@ AX25Frame::AX25Frame(const AX25Frame& frame)
   strncpy(this->destCallsign, frame.destCallsign, RADIOLIB_AX25_MAX_CALLSIGN_LEN + 1);
   strncpy(this->srcCallsign, frame.srcCallsign, RADIOLIB_AX25_MAX_CALLSIGN_LEN + 1);
 
+  #if !RADIOLIB_STATIC_ONLY
+    this->info = NULL;
+    this->repeaterCallsigns = NULL;
+    this->repeaterSSIDs = NULL;
+  #endif
+
   if(frame.infoLen) {
     #if !RADIOLIB_STATIC_ONLY
       this->info = new uint8_t[frame.infoLen];
@@ -92,22 +99,35 @@ AX25Frame::AX25Frame(const AX25Frame& frame)
 AX25Frame::~AX25Frame() {
   #if !RADIOLIB_STATIC_ONLY
     // deallocate info field
-    if(infoLen > 0) {
+    if(this->info != NULL) {
       delete[] this->info;
+      this->info = NULL;
     }
 
     // deallocate repeaters
-    if(this->numRepeaters > 0) {
+    if(this->repeaterCallsigns != NULL) {
       for(uint8_t i = 0; i < this->numRepeaters; i++) {
-        delete[] this->repeaterCallsigns[i];
+        if(this->repeaterCallsigns[i] != NULL) {
+          delete[] this->repeaterCallsigns[i];
+        }
       }
       delete[] this->repeaterCallsigns;
+      this->repeaterCallsigns = NULL;
+    }
+    if(this->repeaterSSIDs != NULL) {
       delete[] this->repeaterSSIDs;
+      this->repeaterSSIDs = NULL;
     }
   #endif
 }
 
 AX25Frame& AX25Frame::operator=(const AX25Frame& frame) {
+  // guard against self-assignment - required since the buffers owned by
+  // "this" are freed below before being (re)populated from "frame"
+  if(this == &frame) {
+    return(*this);
+  }
+
   // destination callsign/SSID
   memcpy(this->destCallsign, frame.destCallsign, strlen(frame.destCallsign));
   this->destCallsign[strlen(frame.destCallsign)] = '\0';
@@ -118,12 +138,38 @@ AX25Frame& AX25Frame::operator=(const AX25Frame& frame) {
   this->srcCallsign[strlen(frame.srcCallsign)] = '\0';
   this->srcSSID = frame.srcSSID;
 
-  // repeaters
+  // repeaters - free any buffers this frame already owns, then (re)allocate
+  // to match the size actually needed for the incoming frame
+  #if !RADIOLIB_STATIC_ONLY
+    if(this->repeaterCallsigns != NULL) {
+      for(uint8_t i = 0; i < this->numRepeaters; i++) {
+        if(this->repeaterCallsigns[i] != NULL) {
+          delete[] this->repeaterCallsigns[i];
+        }
+      }
+      delete[] this->repeaterCallsigns;
+      this->repeaterCallsigns = NULL;
+    }
+    if(this->repeaterSSIDs != NULL) {
+      delete[] this->repeaterSSIDs;
+      this->repeaterSSIDs = NULL;
+    }
+  #endif
   this->numRepeaters = frame.numRepeaters;
-  for(uint8_t i = 0; i < this->numRepeaters; i++) {
-    memcpy(this->repeaterCallsigns[i], frame.repeaterCallsigns[i], strlen(frame.repeaterCallsigns[i]));
+  if(this->numRepeaters > 0) {
+    #if !RADIOLIB_STATIC_ONLY
+      this->repeaterCallsigns = new char*[this->numRepeaters];
+      for(uint8_t i = 0; i < this->numRepeaters; i++) {
+        this->repeaterCallsigns[i] = new char[strlen(frame.repeaterCallsigns[i]) + 1];
+      }
+      this->repeaterSSIDs = new uint8_t[this->numRepeaters];
+    #endif
+    for(uint8_t i = 0; i < this->numRepeaters; i++) {
+      memcpy(this->repeaterCallsigns[i], frame.repeaterCallsigns[i], strlen(frame.repeaterCallsigns[i]));
+      this->repeaterCallsigns[i][strlen(frame.repeaterCallsigns[i])] = '\0';
+    }
+    memcpy(this->repeaterSSIDs, frame.repeaterSSIDs, this->numRepeaters);
   }
-  memcpy(this->repeaterSSIDs, frame.repeaterSSIDs, this->numRepeaters);
 
   // control field
   this->control = frame.control;
@@ -135,14 +181,25 @@ AX25Frame& AX25Frame::operator=(const AX25Frame& frame) {
   // PID field
   this->protocolID = frame.protocolID;
 
-  // info field
+  // info field - same free-then-(re)allocate pattern as above
+  #if !RADIOLIB_STATIC_ONLY
+    if(this->info != NULL) {
+      delete[] this->info;
+      this->info = NULL;
+    }
+  #endif
   this->infoLen = frame.infoLen;
-  memcpy(this->info, frame.info, this->infoLen);
+  if(this->infoLen > 0) {
+    #if !RADIOLIB_STATIC_ONLY
+      this->info = new uint8_t[this->infoLen];
+    #endif
+    memcpy(this->info, frame.info, this->infoLen);
+  }
 
   return(*this);
 }
 
-int16_t AX25Frame::setRepeaters(char** repeaterCallsigns, uint8_t* repeaterSSIDs, uint8_t numRepeaters) {
+int16_t AX25Frame::setRepeaters(char** repeaterCallsigns, const uint8_t* repeaterSSIDs, uint8_t numRepeaters) {
   // check number of repeaters
   if((numRepeaters < 1) || (numRepeaters > 8)) {
     return(RADIOLIB_ERR_INVALID_NUM_REPEATERS);
@@ -263,6 +320,11 @@ int16_t AX25Client::begin(const char* srcCallsign, uint8_t srcSSID, uint8_t preL
   return(phyLayer->startDirect());
 }
 
+void AX25Client::setScrambler(uint32_t poly, uint32_t init) {
+  this->scramblerPoly = poly;
+  this->scramblerInit = init;
+}
+
 #if defined(RADIOLIB_BUILD_ARDUINO)
 int16_t AX25Client::transmit(String& str, const char* destCallsign, uint8_t destSSID) {
   return(transmit(str.c_str(), destCallsign, destSSID));
@@ -307,7 +369,7 @@ int16_t AX25Client::sendFrame(AX25Frame* frame) {
   #if !RADIOLIB_STATIC_ONLY
     uint8_t* frameBuff = new uint8_t[frameBuffLen + 2];
   #else
-    uint8_t frameBuff[RADIOLIB_STATIC_ARRAY_SIZE];
+    uint8_t frameBuff[RADIOLIB_STATIC_ARRAY_SIZE + 2];
   #endif
   uint8_t* frameBuffPtr = frameBuff;
 
@@ -390,7 +452,7 @@ int16_t AX25Client::sendFrame(AX25Frame* frame) {
     // worst-case scenario: sequence of 1s, will have 120% of the original length, stuffed frame also includes both flags
     uint8_t* stuffedFrameBuff = new uint8_t[preambleLen + 1 + (6*frameBuffLen)/5 + 2];
   #else
-    uint8_t stuffedFrameBuff[RADIOLIB_STATIC_ARRAY_SIZE];
+    uint8_t stuffedFrameBuff[1 + (6*RADIOLIB_STATIC_ARRAY_SIZE)/5 + 2];
   #endif
 
   // initialize buffer to all zeros
@@ -472,6 +534,11 @@ int16_t AX25Client::sendFrame(AX25Frame* frame) {
         SET_BIT_IN_ARRAY_MSB(stuffedFrameBuff, currBitPos);
       }
     }
+  }
+
+  // do the scrambling
+  if(scramblerPoly) {
+    rlb_scrambler(stuffedFrameBuff, stuffedFrameBuffLen, scramblerPoly, scramblerInit, true);
   }
 
   // transmit

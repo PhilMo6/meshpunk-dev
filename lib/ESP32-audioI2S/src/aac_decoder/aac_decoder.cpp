@@ -3279,7 +3279,8 @@ void UnpackZeros(int nVals, int *coef)
  **********************************************************************************************************************/
 void UnpackQuads(int cb, int nVals, int *coef)
 {
-    int w, x, y, z, maxBits, nCodeBits, nSignBits, val;
+    int w, x, y, z, maxBits, nCodeBits, nSignBits;
+    int32_t val;   // MESHPUNK: DecodeHuffmanScalar takes int32_t*, which is long* on rv32 newlib
     uint32_t bitBuf;
 
     maxBits = huffTabSpecInfo[cb - HUFFTAB_SPEC_OFFSET].maxBits + 4;
@@ -3326,7 +3327,8 @@ void UnpackQuads(int cb, int nVals, int *coef)
  **********************************************************************************************************************/
 void UnpackPairsNoEsc(int cb, int nVals, int *coef)
 {
-    int y, z, maxBits, nCodeBits, nSignBits, val;
+    int y, z, maxBits, nCodeBits, nSignBits;
+    int32_t val;   // MESHPUNK: DecodeHuffmanScalar takes int32_t*, which is long* on rv32 newlib
     uint32_t bitBuf;
 
     maxBits = huffTabSpecInfo[cb - HUFFTAB_SPEC_OFFSET].maxBits + 2;
@@ -3368,7 +3370,8 @@ void UnpackPairsNoEsc(int cb, int nVals, int *coef)
  **********************************************************************************************************************/
 void UnpackPairsEsc(int cb, int nVals, int *coef)
 {
-    int y, z, maxBits, nCodeBits, nSignBits, n, val;
+    int y, z, maxBits, nCodeBits, nSignBits, n;
+    int32_t val;   // MESHPUNK: DecodeHuffmanScalar takes int32_t*, which is long* on rv32 newlib
     uint32_t bitBuf;
 
     maxBits = huffTabSpecInfo[cb - HUFFTAB_SPEC_OFFSET].maxBits + 2;
@@ -4171,7 +4174,8 @@ void DecodeSectionData(int winSequence, int numWinGrp, int maxSFB, uint8_t *sfbC
  **********************************************************************************************************************/
 int DecodeOneScaleFactor()
 {
-    int nBits, val;
+    int nBits;
+    int32_t val;   // MESHPUNK: DecodeHuffmanScalar takes int32_t*, which is long* on rv32 newlib
     uint32_t bitBuf;
 
     /* decode next scalefactor from bitstream */
@@ -4488,7 +4492,7 @@ int DecodeNoiselessData(uint8_t **buf, int *bitOffset, int *bitsAvail, int ch)
  *                if there are no codes at nBits, then we just keep << 1 each time
  *                  (since count[nBits] = 0)
  **********************************************************************************************************************/
-int DecodeHuffmanScalar(const signed short *huffTab, const HuffInfo_t *huffTabInfo, uint32_t bitBuf, int32_t *val)
+int DecodeHuffmanScalar(const signed short *huffTab, const HuffInfo_t *huffTabInfo, unsigned int bitBuf, int32_t *val)   // MESHPUNK: unsigned int bitBuf, as declared in aac_decoder.h (uint32_t is a different type, unsigned long, on rv32 newlib: the declared overload went undefined)
 {
     uint32_t count, start, shift, t;
     const uint8_t *countPtr;
@@ -5143,7 +5147,7 @@ int DeinterleaveShortBlocks(int ch)
  *
  * Notes:       uses simple linear congruential generator
  **********************************************************************************************************************/
-unsigned int Get32BitVal(unsigned int *last)
+unsigned int Get32BitVal(uint32_t *last)   // MESHPUNK: the caller's state is uint32_t (long on rv32 newlib)
 {
     uint32_t r = *last;
 
@@ -8539,7 +8543,8 @@ int DecodeHuffmanScalar(const signed int *huffTab, const HuffInfo_t *huffTabInfo
  **********************************************************************************************************************/
 int DecodeOneSymbol(int huffTabIndex) {
 
-    int nBits, val;
+    int nBits;
+    int32_t val;   // MESHPUNK: DecodeHuffmanScalar takes int32_t*, which is long* on rv32 newlib
     unsigned int bitBuf;
     const HuffInfo_t *hi;
 

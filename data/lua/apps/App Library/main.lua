@@ -22,6 +22,14 @@
       (the picker; it has no downloads of its own). A store theme is a theme
       dir carrying a .version marker; the built-in default and hand-copied
       themes have none and are never touched.
+    * Device requirements: an entry's `requires` tokens (build target, chip,
+      board, input, audio, battery, mic, ...) must all hold here, else the
+      entry is left out of the lists and shown greyed, with its reason,
+      behind the category's "N more for other devices" row. Installs download
+      `files` + `files_<target>` minus the other architecture's modules
+      (lib/downloader device_files) and the .version marker records the
+      target; an install that carries another target's build (a card moved
+      from an S3 device) shows as Update - "adds this device's build".
 
   Catalog rows show a [Lua]/[ELF]/[Protocol]/[Theme] type badge; the Info view
   explains the difference (labeling, not gating, per the store's trust model).
@@ -65,6 +73,100 @@ local function fw_required(entry)
     local need = tonumber(entry and entry.min_fw)
     if need and need > FW_API then return need end
     return nil
+end
+
+-- ── Device requirements ──────────────────────────────────────────────────────
+-- Catalog entries may carry `requires`: tokens that must ALL hold on this
+-- device (alternatives with "|"), and per-target file lists `files_<target>`
+-- ("xtensa" = the ESP32-S3 boards, "rv32" = the T-Display P4). The same
+-- rules as lib/downloader's requires_unmet, self-contained here for the same
+-- reason as fw_required. Facts: _device_caps() / _input_caps(); firmware
+-- without `arch` is an Xtensa build; any other missing fact is false; an
+-- unknown token is not met.
+
+local function device_target()
+    local ok, caps = pcall(_device_caps)
+    local arch = ok and type(caps) == "table" and caps.arch or nil
+    return (arch == "rv32") and "rv32" or "xtensa"
+end
+
+local BOARD_LABEL = { tdeck = "T-Deck", heltec_v4 = "Heltec V4",
+                      wio_l2 = "Wio L2", tdisplay_p4 = "T-Display P4" }
+
+local function device_facts()
+    local okc, caps = pcall(_device_caps)
+    if not okc or type(caps) ~= "table" then caps = {} end
+    local oki, inp = pcall(_input_caps)
+    if not oki or type(inp) ~= "table" then inp = {} end
+    local target = device_target()
+    local f = {
+        [target]  = true,
+        keyboard  = inp.keyboard == true,
+        touch     = inp.touch == true,
+        trackball = inp.trackball == true,
+        sound     = caps.audio == "i2s" or caps.audio == "buzzer",
+        i2s       = caps.audio == "i2s",
+        battery   = caps.battery == true,
+        mic       = caps.mic == true,
+        gps       = caps.gps == true,
+        usb_host  = caps.usb_host == true,
+    }
+    local chip = caps.chip or ((target == "xtensa") and "esp32s3") or nil
+    if chip then f[chip] = true end
+    if type(caps.name) == "string" then f["board:" .. caps.name] = true end
+    return f, caps
+end
+
+local function token_holds(tok, f, caps)
+    local n = tok:match("^psram>=(%d+)$")
+    if n then
+        return type(caps.psram_mb) == "number" and caps.psram_mb >= tonumber(n)
+    end
+    return f[tok] == true
+end
+
+local function token_reason(tok)
+    local b = tok:match("^board:(.+)$")
+    if b then return (BOARD_LABEL[b] or b) .. " only" end
+    local n = tok:match("^psram>=(%d+)$")
+    if n then return "needs " .. n .. " MB PSRAM" end
+    local R = {
+        xtensa = "ESP32-S3 devices only", rv32 = "T-Display P4 only",
+        esp32s3 = "ESP32-S3 devices only", esp32p4 = "T-Display P4 only",
+        keyboard = "needs a keyboard", touch = "needs a touch screen",
+        trackball = "needs a trackball", sound = "needs audio out",
+        i2s = "needs a speaker", battery = "needs a battery",
+        mic = "needs a microphone", gps = "needs GPS", usb_host = "needs USB host",
+    }
+    return R[tok] or "needs a newer App Library"
+end
+
+-- nil when every `requires` token holds here, else the reason the first
+-- failing token gives (alternatives joined with " or ").
+local function requires_unmet(entry)
+    local req = entry and entry.requires
+    if type(req) ~= "table" or #req == 0 then return nil end
+    local f, caps = device_facts()
+    for _, tok in ipairs(req) do
+        local held, reasons = false, {}
+        for alt in tostring(tok):gmatch("[^|]+") do
+            if token_holds(alt, f, caps) then held = true break end
+            reasons[#reasons + 1] = token_reason(alt)
+        end
+        if not held then return table.concat(reasons, " or ") end
+    end
+    return nil
+end
+
+-- True when an install lacks this device's build: the entry has files for
+-- this target (files_<target>) and the install's marker names another
+-- target, or none (written on another device, or by a downloader before
+-- target=). The Update that follows downloads them.
+local function build_missing(entry, inst)
+    local t = device_target()
+    local extra = entry and entry["files_" .. t]
+    if type(extra) ~= "table" or #extra == 0 then return false end
+    return inst ~= nil and inst.target ~= t
 end
 
 -- ── LoRa protocol packages ───────────────────────────────────────────────────
@@ -155,7 +257,8 @@ theme.show_background()
 local vw = nil
 local cur_cat = nil        -- category page being viewed (nil = category root)
 local cur_updates = false  -- true when the Updates page is showing
-local show_browse, show_category, show_protocols, show_themes, show_updates, refresh_view, start  -- forward decls
+local cur_others = false   -- true when cur_cat's "other devices" page is showing
+local show_browse, show_category, show_protocols, show_themes, show_updates, show_others, refresh_view, start  -- forward decls
 
 local function toast(msg)
     pcall(utils.createNotification, root, tostring(msg), 2500)
@@ -267,6 +370,7 @@ local function note_installed(installed, rec)
         location = v.location,
         category = v.category,
         locked   = v.locked,
+        target   = v.target,   -- nil on markers from downloaders before target=
         dir      = rec.dir,
         display  = rec.name,
     }
@@ -363,15 +467,16 @@ local function theme_scan_step()
     end
 end
 
--- Catalog entries whose installed version differs from the catalog version.
--- The Updates list on the root page; empty = nothing to show. Firmware-gated
--- updates are excluded — nothing actionable to offer; their category rows
--- show "Needs FW" instead.
+-- Catalog entries whose installed version is behind the catalog's, or whose
+-- install lacks this device's build. The Updates list on the root page;
+-- empty = nothing to show. Firmware-gated and other-device entries are
+-- excluded — nothing actionable to offer; their rows say so instead.
 local function pending_updates()
     local out = {}
     for _, e in ipairs(store.catalog.apps) do
         local inst = find_inst(e)
-        if inst and version_newer(e.version, inst.version) and not fw_required(e) then
+        if inst and not fw_required(e) and not requires_unmet(e)
+            and (version_newer(e.version, inst.version) or build_missing(e, inst)) then
             out[#out + 1] = { entry = e, inst = inst }
         end
     end
@@ -411,7 +516,8 @@ local function proto_inst(pe)
     local dir, loc = proto_where(pe.id)
     if not dir then return nil end
     local v = dl.read_version(dir)
-    return { dir = dir, loc = loc, version = (v and v.version) or "?" }
+    return { dir = dir, loc = loc, version = (v and v.version) or "?",
+             target = v and v.target or nil }
 end
 
 local function catalog_themes()
@@ -468,6 +574,11 @@ local function show_info()
                 .. "bring a wallpaper and font. Apply one here or\n"
                 .. "switch between installed themes in\n"
                 .. "Settings > Theme.\n\n"
+                .. "Each category ends with an \"N more for other\n"
+                .. "devices\" row: entries built for another chip\n"
+                .. "or needing hardware this device lacks, with\n"
+                .. "the reason. Emulators ship one build per CPU;\n"
+                .. "the device downloads its own.\n\n"
                 .. "Everything in the store comes from a curated\n"
                 .. "GitHub repo, reviewed before listing.",
             w = lvgl.PCT(100),
@@ -631,7 +742,8 @@ local function pending_driver_updates()
     local out = {}
     for _, de in ipairs((store.catalog and store.catalog.drivers) or {}) do
         local inst = driver_inst(de)
-        if inst and not fw_required(de) and version_newer(de.version, inst.version) then
+        if inst and not fw_required(de) and not requires_unmet(de)
+            and version_newer(de.version, inst.version) then
             out[#out + 1] = { entry = de, inst = inst }
         end
     end
@@ -722,7 +834,7 @@ end
 local function pending_bleproto_issues()
     local out = {}
     for _, pe in ipairs(catalog_protocols()) do
-        local pinst = (not fw_required(pe)) and proto_inst(pe) or nil
+        local pinst = (not fw_required(pe) and not requires_unmet(pe)) and proto_inst(pe) or nil
         if pinst then
             local want = pinst.version
             for _, bp in ipairs(package_bleprotos(pe)) do
@@ -742,8 +854,8 @@ end
 local function pending_proto_updates()
     local out = {}
     for _, pe in ipairs(catalog_protocols()) do
-        local pinst = (not fw_required(pe)) and proto_inst(pe) or nil
-        if pinst and version_newer(pe.version, pinst.version) then
+        local pinst = (not fw_required(pe) and not requires_unmet(pe)) and proto_inst(pe) or nil
+        if pinst and (version_newer(pe.version, pinst.version) or build_missing(pe, pinst)) then
             out[#out + 1] = { entry = pe, inst = pinst }
         end
     end
@@ -755,7 +867,7 @@ end
 local function pending_theme_updates()
     local out = {}
     for _, te in ipairs(catalog_themes()) do
-        local tinst = (not fw_required(te)) and theme_inst(te) or nil
+        local tinst = (not fw_required(te) and not requires_unmet(te)) and theme_inst(te) or nil
         if tinst and version_newer(te.version, tinst.version) then
             out[#out + 1] = { entry = te, inst = tinst }
         end
@@ -840,10 +952,16 @@ end
 -- once the app is in place — the app-first protocol flow uses it for the
 -- activation pointer.
 local function do_install(entry, inst, after)
-    -- Firmware gate (the menu never offers the action; this catches the rest).
+    -- Firmware and device gates (the menu never offers the action; these
+    -- catch the rest).
     local need = fw_required(entry)
     if need then
         toast("Needs firmware update (API " .. need .. ")")
+        return
+    end
+    local why = requires_unmet(entry)
+    if why then
+        toast("Not for this device: " .. why)
         return
     end
     if inst then
@@ -899,9 +1017,9 @@ local function offer_proto_apps(pe)
     local todo, names = {}, {}
     for _, id in ipairs(pe.apps or {}) do
         local ae = find_app(id)
-        if ae and not fw_required(ae) then
+        if ae and not fw_required(ae) and not requires_unmet(ae) then
             local inst = find_inst(ae)
-            if not inst or version_newer(ae.version, inst.version) then
+            if not inst or version_newer(ae.version, inst.version) or build_missing(ae, inst) then
                 todo[#todo + 1] = ae
                 names[#names + 1] = ae.name
             end
@@ -1042,12 +1160,16 @@ local function proto_menu(pe)
         end
 
         local need = fw_required(pe)
+        local why = requires_unmet(pe)
         if need then
             box:Label {
                 text = "Needs a firmware update first\n(needs API " .. need
                     .. ", device has " .. FW_API .. ")",
                 text_color = "#ff5555", w = lvgl.PCT(100),
             }
+        elseif why then
+            box:Label { text = "Not for this device: " .. why,
+                        text_color = "#ff5555", w = lvgl.PCT(100) }
         elseif not inst then
             item("Install", function()
                 pick_location(function(loc)
@@ -1063,8 +1185,10 @@ local function proto_menu(pe)
                 end, { recommend = "internal",
                        note = "Internal loads even without the SD card; a card-hosted protocol needs the card at boot (radio off without it)." })
             end)
-        elseif version_newer(pe.version, inst.version) then
-            item("Update to v" .. tostring(pe.version), function()
+        elseif version_newer(pe.version, inst.version) or build_missing(pe, inst) then
+            item(version_newer(pe.version, inst.version)
+                    and ("Update to v" .. tostring(pe.version))
+                    or "Update - adds this device's build", function()
                 run_proto_install(pe, nil, function(err)
                     if err then
                         toast(err == "cancelled" and "Cancelled" or err)
@@ -1113,10 +1237,12 @@ end
 local function proto_row(content, pe)
     local inst = proto_inst(pe)
     local state
-    if inst and not version_newer(pe.version, inst.version) then
+    if inst and not version_newer(pe.version, inst.version) and not build_missing(pe, inst) then
         state = "Installed"
     elseif fw_required(pe) then
         state = "Needs FW"
+    elseif requires_unmet(pe) then
+        state = "Other device"
     elseif inst then
         state = "Update"
     else
@@ -1309,6 +1435,7 @@ local function theme_menu(te, inst)
         end
 
         local need = te and fw_required(te)
+        local why = te and requires_unmet(te)
         local actionable = te and (not inst or version_newer(te.version, inst.version))
         if actionable and need then
             box:Label {
@@ -1316,6 +1443,9 @@ local function theme_menu(te, inst)
                     .. ", device has " .. FW_API .. ")",
                 text_color = "#ff5555", w = lvgl.PCT(100),
             }
+        elseif actionable and why then
+            box:Label { text = "Not for this device: " .. why,
+                        text_color = "#ff5555", w = lvgl.PCT(100) }
         elseif te and not inst then
             item("Install", function()
                 pick_location(function(loc)
@@ -1352,6 +1482,8 @@ local function theme_row(content, te)
         state = "Installed"
     elseif fw_required(te) then
         state = "Needs FW"
+    elseif requires_unmet(te) then
+        state = "Other device"
     elseif inst then
         state = "Update"
     else
@@ -1457,15 +1589,20 @@ local function app_menu(entry, inst)
         -- missing and the one button downloads the protocol FIRST, then the
         -- app — two visible installs, nothing automatic.
         local need = entry and fw_required(entry)
+        local why = entry and requires_unmet(entry)
         local need_proto = entry and proto_required(entry)
+        local adds_build = entry and inst and build_missing(entry, inst)
         local actionable = entry
-            and (not inst or version_newer(entry.version, inst.version))
+            and (not inst or version_newer(entry.version, inst.version) or adds_build)
         if actionable and need then
             box:Label {
                 text = "Needs a firmware update first\n(app needs API " .. need
                     .. ", device has " .. FW_API .. ")",
                 text_color = "#ff5555", w = lvgl.PCT(100),
             }
+        elseif actionable and why then
+            box:Label { text = "Not for this device: " .. why,
+                        text_color = "#ff5555", w = lvgl.PCT(100) }
         elseif actionable and need_proto then
             local pe = find_proto(need_proto)
             box:Label {
@@ -1505,6 +1642,9 @@ local function app_menu(entry, inst)
             item("Install", function() do_install(entry, nil) end)
         elseif entry and inst and version_newer(entry.version, inst.version) then
             item("Update to v" .. tostring(entry.version),
+                 function() do_install(entry, inst) end)
+        elseif adds_build then
+            item("Update - adds this device's build",
                  function() do_install(entry, inst) end)
         end
         if inst then
@@ -1566,23 +1706,42 @@ local function show_error(msg)
 end
 
 -- Catalog grouped by category (uncategorized apps land under "Other").
--- Returns groups (name -> sorted entry array) and the sorted category order.
+-- Returns groups (name -> sorted entries this device can run), the sorted
+-- category order, and others (name -> sorted {entry, why, kind} for the
+-- entries whose requirements this device does not meet).
 local function group_catalog()
-    local groups, order = {}, {}
+    local groups, others, order = {}, {}, {}
     for _, e in ipairs(store.catalog.apps) do
         local cat = (type(e.category) == "string" and e.category ~= "")
             and e.category or "Other"
         if not groups[cat] then
             groups[cat] = {}
+            others[cat] = {}
             order[#order + 1] = cat
         end
-        table.insert(groups[cat], e)
+        local why = requires_unmet(e)
+        if why then
+            table.insert(others[cat], { entry = e, why = why, kind = "app" })
+        else
+            table.insert(groups[cat], e)
+        end
     end
     table.sort(order)
     for _, cat in ipairs(order) do
         table.sort(groups[cat], function(a, b) return a.name < b.name end)
+        table.sort(others[cat], function(a, b) return a.entry.name < b.entry.name end)
     end
-    return groups, order
+    return groups, order, others
+end
+
+-- The row that ends a list when the category holds entries for other
+-- devices; it opens the greyed list.
+local function others_row(content, cat, n)
+    if n == 0 then return end
+    local b = content:Button { w = lvgl.PCT(100), h = 28 }
+    b:Label { text = n .. " more for other devices", align = lvgl.ALIGN.LEFT_MID,
+              text_color = "#808080" }
+    nav.tap(b, function() show_others(cat) end)
 end
 
 -- One catalog row (name/version/badge + description + state), tapping opens
@@ -1591,10 +1750,12 @@ local function catalog_row(content, e)
     local entry = e
     local inst = find_inst(e)
     local state
-    if inst and not version_newer(e.version, inst.version) then
+    if inst and not version_newer(e.version, inst.version) and not build_missing(e, inst) then
         state = "Installed"  -- up to date, or ahead of the catalog
     elseif fw_required(e) then
         state = "Needs FW"   -- installable/updatable, but firmware is too old
+    elseif requires_unmet(e) then
+        state = "Other device"
     elseif proto_required(e) then
         -- Its LoRa protocol is missing; the detail menu offers the download.
         state = "Needs " .. proto_name(proto_required(e))
@@ -1621,7 +1782,7 @@ end
 -- The pinned LoRa Protocols page: every protocol package, rendered like an
 -- app row (name, version, [Protocol] badge, description, state).
 show_protocols = function()
-    cur_cat, cur_updates = PROTO_CAT, false
+    cur_cat, cur_updates, cur_others = PROTO_CAT, false, false
     swap_view(function(v)
         local content = v:Object {
             w = W, h = H, x = 0, y = 0,
@@ -1636,22 +1797,25 @@ show_protocols = function()
         back_btn:Label { text = "Back", align = lvgl.ALIGN.CENTER }
         back_btn:onClicked(function() show_browse() end)
 
-        local list = {}
-        for _, pe in ipairs(catalog_protocols()) do list[#list + 1] = pe end
+        local list, n_other = {}, 0
+        for _, pe in ipairs(catalog_protocols()) do
+            if requires_unmet(pe) then n_other = n_other + 1 else list[#list + 1] = pe end
+        end
         table.sort(list, function(a, b) return a.name < b.name end)
         for _, pe in ipairs(list) do
             proto_row(content, pe)
         end
-        if #list == 0 then
+        if #list == 0 and n_other == 0 then
             content:Label { text = "No protocols in this catalog", w = lvgl.PCT(100), h = 24 }
         end
+        others_row(content, PROTO_CAT, n_other)
     end)
 end
 
 -- The pinned Themes page: every catalog theme rendered like an app row, then
 -- store-installed themes that fell out of the catalog (still removable).
 show_themes = function()
-    cur_cat, cur_updates = THEME_CAT, false
+    cur_cat, cur_updates, cur_others = THEME_CAT, false, false
     swap_view(function(v)
         local content = v:Object {
             w = W, h = H, x = 0, y = 0,
@@ -1666,18 +1830,19 @@ show_themes = function()
         back_btn:Label { text = "Back", align = lvgl.ALIGN.CENTER }
         back_btn:onClicked(function() show_browse() end)
 
-        local list, in_catalog = {}, {}
+        local list, in_catalog, n_other = {}, {}, 0
         for _, te in ipairs(catalog_themes()) do
-            list[#list + 1] = te
+            if requires_unmet(te) then n_other = n_other + 1 else list[#list + 1] = te end
             in_catalog[te.id] = true
         end
         table.sort(list, function(a, b) return a.name < b.name end)
         for _, te in ipairs(list) do
             theme_row(content, te)
         end
-        if #list == 0 then
+        if #list == 0 and n_other == 0 then
             content:Label { text = "No themes in this catalog", w = lvgl.PCT(100), h = 24 }
         end
+        others_row(content, THEME_CAT, n_other)
 
         local orphans = {}
         for id, inst in pairs(store.themes) do
@@ -1706,13 +1871,14 @@ show_category = function(cat)
         show_themes()
         return
     end
-    cur_cat, cur_updates = cat, false
-    local groups = group_catalog()
+    cur_cat, cur_updates, cur_others = cat, false, false
+    local groups, _, others = group_catalog()
     local entries = groups[cat]
     if not entries then   -- category vanished (e.g. after a Refresh)
         show_browse()
         return
     end
+    local n_other = #(others[cat] or {})
 
     swap_view(function(v)
         local content = v:Object {
@@ -1731,13 +1897,74 @@ show_category = function(cat)
         for _, e in ipairs(entries) do
             catalog_row(content, e)
         end
+        others_row(content, cat, n_other)
+    end)
+end
+
+-- A category's entries for OTHER devices (requires not met here), greyed,
+-- each with its reason. Tapping opens the detail menu, which shows the
+-- reason instead of Install; Open and Remove still work for one that is
+-- installed (moved in on a card).
+show_others = function(cat)
+    cur_cat, cur_updates, cur_others = cat, false, true
+    local list = {}
+    if cat == PROTO_CAT then
+        for _, pe in ipairs(catalog_protocols()) do
+            local why = requires_unmet(pe)
+            if why then list[#list + 1] = { entry = pe, why = why, kind = "proto" } end
+        end
+    elseif cat == THEME_CAT then
+        for _, te in ipairs(catalog_themes()) do
+            local why = requires_unmet(te)
+            if why then list[#list + 1] = { entry = te, why = why, kind = "theme" } end
+        end
+    else
+        local _, _, others = group_catalog()
+        for _, o in ipairs(others[cat] or {}) do list[#list + 1] = o end
+    end
+    table.sort(list, function(a, b) return a.entry.name < b.entry.name end)
+
+    swap_view(function(v)
+        local content = v:Object {
+            w = W, h = H, x = 0, y = 0,
+            bg_opa = 0, border_width = 0, pad_all = 4,
+            flex = { flex_direction = "row", flex_wrap = "wrap" },
+        }
+        nav.replace(content, { flags = nav.ROLLOVER + nav.SCROLL_FIRST })
+
+        content:Label { text = cat .. " - other devices", w = lvgl.PCT(100), h = 18 }
+
+        local back_btn = content:Button { w = lvgl.PCT(100), h = 24 }
+        back_btn:Label { text = "Back", align = lvgl.ALIGN.CENTER }
+        back_btn:onClicked(function() show_category(cat) end)
+
+        for _, o in ipairs(list) do
+            local e, why, kind = o.entry, o.why, o.kind
+            local badge = (kind == "proto") and "[Protocol]"
+                       or (kind == "theme") and "[Theme]"
+                       or type_badge(e)
+            local row = content:Button { w = lvgl.PCT(100), h = 52 }
+            row:Label {
+                text = e.name .. "  v" .. tostring(e.version) .. "  " .. badge,
+                align = lvgl.ALIGN.TOP_LEFT, text_color = "#808080",
+            }
+            row:Label { text = why, align = lvgl.ALIGN.BOTTOM_LEFT, text_color = "#808080" }
+            nav.tap(row, function()
+                if kind == "proto" then proto_menu(e)
+                elseif kind == "theme" then theme_menu(e, theme_inst(e))
+                else app_menu(e, find_inst(e)) end
+            end)
+        end
+        if #list == 0 then
+            content:Label { text = "Nothing here", w = lvgl.PCT(100), h = 24 }
+        end
     end)
 end
 
 -- Updates page: every catalog app whose installed version is behind. Reached
 -- from the root's "Updates (N)" button; that button only exists when N > 0.
 show_updates = function()
-    cur_cat, cur_updates = nil, true
+    cur_cat, cur_updates, cur_others = nil, true, false
     local ups = pending_updates()
     local sups = pending_proto_updates()
     local bups = pending_bleproto_issues()
@@ -1784,7 +2011,7 @@ end
 -- LoRa Protocols and Themes buttons (whenever the catalog carries those),
 -- then one button per app category.
 show_browse = function()
-    cur_cat, cur_updates = nil, false
+    cur_cat, cur_updates, cur_others = nil, false, false
     local _, order = group_catalog()
     local ups = pending_updates()
     local n_ups = #ups + #pending_proto_updates() + #pending_bleproto_issues()
@@ -1847,6 +2074,8 @@ end
 refresh_view = function()
     if cur_updates then
         show_updates()
+    elseif cur_cat and cur_others then
+        show_others(cur_cat)
     elseif cur_cat then
         show_category(cur_cat)
     else

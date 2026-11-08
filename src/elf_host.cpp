@@ -20,6 +20,24 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_task_wdt.h>
+#include <esp_idf_version.h>
+// IDF 5 changes the running task watchdog through a config struct whose
+// idle_core_mask re-subscribes the idle tasks; these are the ones sdkconfig
+// subscribed at boot (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPUx). IDF 4.4
+// keeps its subscriptions across esp_task_wdt_init(timeout, panic).
+#if ESP_IDF_VERSION_MAJOR >= 5
+#ifdef CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0
+#define ELF_TWDT_IDLE0 (1u << 0)
+#else
+#define ELF_TWDT_IDLE0 0u
+#endif
+#ifdef CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1
+#define ELF_TWDT_IDLE1 (1u << 1)
+#else
+#define ELF_TWDT_IDLE1 0u
+#endif
+#define ELF_TWDT_IDLE_CORE_MASK (ELF_TWDT_IDLE0 | ELF_TWDT_IDLE1)
+#endif
 #include <esp_rom_sys.h>   // esp_rom_printf — safe to call from exception context
 #include <esp_attr.h>      // IRAM_ATTR — the ELF fault handler runs from IRAM
 #include <soc/timer_group_reg.h>  // TG1 MWDT (interrupt watchdog) register access
@@ -73,6 +91,24 @@ extern "C" {
     unsigned long long __udivdi3(unsigned long long, unsigned long long);
     unsigned long long __umoddi3(unsigned long long, unsigned long long);
     long long __moddi3(long long, long long);
+    // Count leading zeros: __builtin_clz on RV32IMAFC (no Zbb), where Xtensa
+    // has NSAU. In both toolchains' libgcc.a.
+    int __clzsi2(unsigned);
+    // 64-bit integer <-> float/double. Xtensa modules link libgcc.a and carry
+    // their own; rv32 modules link none (its libgcc.a is not position-
+    // independent). In both toolchains' libgcc.a.
+    double __floatundidf(unsigned long long);
+    float  __floatundisf(unsigned long long);
+    float  __floatdisf(long long);
+    unsigned long long __fixunssfdi(float);
+    unsigned long long __fixunsdfdi(double);
+    // 64-bit shifts, byte swap, find-first-set, unordered double compare.
+    // In both toolchains' libgcc.a. __ashldi3 is in proto_exports[] too.
+    long long __ashldi3(long long, int);
+    long long __lshrdi3(long long, int);
+    int       __bswapsi2(int);
+    int       __ffsdi2(long long);
+    int       __unorddf2(double, double);
 }
 
 // Device input backend: keyboard sampling/decode, trackball counters + click
@@ -1000,6 +1036,16 @@ extern "C" void mcs_append_extra_path(const char* msg_log_path,
 extern "C" int  mcs_read_one_stored_msg(const char* path, uint32_t offset,
                                         StoredMsg* m);
 
+// C++ exports whose signatures carry uint32_t: newlib types it as unsigned
+// int on Xtensa (mangled 'j') and as unsigned long on RISC-V ('m'), so the
+// same function has a different linkage name per architecture, and a module
+// built for this CPU imports this CPU's spelling.
+#if defined(__riscv)
+#define U32_MANGLED(xtensa_name, riscv_name) riscv_name
+#else
+#define U32_MANGLED(xtensa_name, riscv_name) xtensa_name
+#endif
+
 static const elf_symbol_t proto_exports[] = {
     { "memcpy",    (void*)memcpy },
     { "memset",    (void*)memset },
@@ -1125,8 +1171,10 @@ static const elf_symbol_t proto_exports[] = {
     { "_ZN4rcap10pop_oldestEP10PktCapture", (void*)&rcap::pop_oldest },
     { "_ZN4rcap12take_droppedEv",           (void*)&rcap::take_dropped },
     { "_ZN6mstore16set_max_messagesEi",     (void*)&mstore::set_max_messages },
-    { "_ZN6mstore22append_channel_messageEPKciS1_S1_jffhbtPKhS3_j", (void*)&mstore::append_channel_message },
-    { "_ZN6mstore17append_dm_messageEPKcS1_S1_jffhbtPKhS3_S3_j",    (void*)&mstore::append_dm_message },
+    { U32_MANGLED("_ZN6mstore22append_channel_messageEPKciS1_S1_jffhbtPKhS3_j",
+                  "_ZN6mstore22append_channel_messageEPKciS1_S1_mffhbtPKhS3_m"), (void*)&mstore::append_channel_message },
+    { U32_MANGLED("_ZN6mstore17append_dm_messageEPKcS1_S1_jffhbtPKhS3_S3_j",
+                  "_ZN6mstore17append_dm_messageEPKcS1_S1_mffhbtPKhS3_S3_m"),    (void*)&mstore::append_dm_message },
     { "_ZN6mstore19unread_bump_channelEPKc",  (void*)&mstore::unread_bump_channel },
     { "_ZN6mstore14unread_bump_dmEPKc",       (void*)&mstore::unread_bump_dm },
     { "_ZN6mstore14unread_channelEPKc",       (void*)&mstore::unread_channel },
@@ -1137,17 +1185,22 @@ static const elf_symbol_t proto_exports[] = {
     { "_ZN6mstore21push_channel_messagesEP9lua_StatePKci", (void*)&mstore::push_channel_messages },
     { "_ZN6mstore16push_dm_messagesEP9lua_StatePKci",      (void*)&mstore::push_dm_messages },
     { "_ZN6mstore20push_dm_thread_namesEP9lua_State",      (void*)&mstore::push_dm_thread_names },
-    { "_ZN6mstore22push_chat_page_channelEP9lua_StatePKciji", (void*)&mstore::push_chat_page_channel },
-    { "_ZN6mstore17push_chat_page_dmEP9lua_StatePKciji",      (void*)&mstore::push_chat_page_dm },
+    { U32_MANGLED("_ZN6mstore22push_chat_page_channelEP9lua_StatePKciji",
+                  "_ZN6mstore22push_chat_page_channelEP9lua_StatePKcimi"), (void*)&mstore::push_chat_page_channel },
+    { U32_MANGLED("_ZN6mstore17push_chat_page_dmEP9lua_StatePKciji",
+                  "_ZN6mstore17push_chat_page_dmEP9lua_StatePKcimi"),      (void*)&mstore::push_chat_page_dm },
     { "_ZN6mstore18push_msg_summariesEP9lua_StatePK13MStoreChanRefi", (void*)&mstore::push_msg_summaries },
-    { "_ZN6mstore18push_routing_queryEP9lua_StatePKcjj",   (void*)&mstore::push_routing_query },
+    { U32_MANGLED("_ZN6mstore18push_routing_queryEP9lua_StatePKcjj",
+                  "_ZN6mstore18push_routing_queryEP9lua_StatePKcmm"),   (void*)&mstore::push_routing_query },
     { "_ZN6mstore20push_routing_sendersEP9lua_StatePKci",  (void*)&mstore::push_routing_senders },
     { "_ZN6mstore15push_path_tableEP9lua_StatetPKh",       (void*)&mstore::push_path_table },
     { "_ZN6mstore22lookup_persisted_pathsEP9lua_StatePKcS3_S3_", (void*)&mstore::lookup_persisted_paths },
-    { "_ZN6mstore21read_stored_msgs_fromEPKcjP9StoredMsgPjiS4_S4_", (void*)&mstore::read_stored_msgs_from },
+    { U32_MANGLED("_ZN6mstore21read_stored_msgs_fromEPKcjP9StoredMsgPjiS4_S4_",
+                  "_ZN6mstore21read_stored_msgs_fromEPKcmP9StoredMsgPmiS4_S4_"), (void*)&mstore::read_stored_msgs_from },
     { "_ZN6mstore20read_all_stored_msgsEPKcP9StoredMsgi",  (void*)&mstore::read_all_stored_msgs },
     { "_ZN6mstore23enumerate_message_filesEP11MsgFileInfoi", (void*)&mstore::enumerate_message_files },
-    { "_ZN6mstore24offset_of_newest_recordsEPKcji",        (void*)&mstore::offset_of_newest_records },
+    { U32_MANGLED("_ZN6mstore24offset_of_newest_recordsEPKcji",
+                  "_ZN6mstore24offset_of_newest_recordsEPKcmi"),        (void*)&mstore::offset_of_newest_records },
     // Type-boundary bridges (definitions above the table).
     { "mcs_channel_msg_path",     (void*)mcs_channel_msg_path },
     { "mcs_dm_msg_path",          (void*)mcs_dm_msg_path },
@@ -1163,6 +1216,25 @@ static const elf_symbol_t proto_exports[] = {
     { "mesh_ccm_decrypt",       (void*)mesh_ccm_decrypt },
     { "mesh_x25519_dh",         (void*)mesh_x25519_dh },
     { "mesh_generate_keypair",  (void*)mesh_generate_keypair },
+#if defined(__riscv)
+    // RISC-V modules cannot link the toolchain's libgcc.a / libm.a (their
+    // objects are not position-independent), so the compiler builtins and
+    // the libm calls the protocol packages compile to are served from the
+    // firmware's own copies. The set is the UND audits of
+    // modules/meshcore/build.ps1 and modules/mtlite/build.ps1 -Arch rv32.
+    { "__floatsidf",   (void*)__floatsidf },
+    { "__floatunsidf", (void*)__floatunsidf },
+    { "__fixdfsi",     (void*)__fixdfsi },
+    { "__extendsfdf2", (void*)__extendsfdf2 },
+    { "__truncdfsf2",  (void*)__truncdfsf2 },
+    { "__adddf3",      (void*)__adddf3 },
+    { "__subdf3",      (void*)__subdf3 },
+    { "__muldf3",      (void*)__muldf3 },
+    { "__divdf3",      (void*)__divdf3 },
+    { "pow",           (void*)(double(*)(double,double))pow },
+    { "__ashldi3",     (void*)__ashldi3 },
+    { "floorf",        (void*)(float(*)(float))floorf },
+#endif
     ELF_SYMBOL_END
 };
 
@@ -1423,6 +1495,38 @@ void host_blit_rect(const uint16_t* rgb565, int x, int y, int w, int h) {
     display_dev_blit(x, y, w, h, rgb565);
 }
 
+// Band renderers address a 320x240 canvas (the bounds host_blit_rect_async
+// enforces). On a larger panel the canvas is centred, with the offset
+// host_blit_frame gives a full frame of that size.
+#define RECT_CANVAS_W 320
+#define RECT_CANVAS_H 240
+
+static void rect_canvas_origin(int* ox, int* oy) {
+    int x = (display_dev_width()  - RECT_CANVAS_W) / 2;
+    int y = (display_dev_height() - RECT_CANVAS_H) / 2;
+    *ox = (x > 0) ? x : 0;
+    *oy = (y > 0) ? y : 0;
+}
+
+// Letterbox bookkeeping for a centred canvas, as host_blit_frame keeps it for
+// a centred frame: with controller chips shown, the canvas is the module's
+// frame for elf_apply_touch_mode, and chip parts in the borders are pushed
+// once per screen clear, after the band. A canvas at the panel origin has
+// no borders, so nothing is recorded.
+static void rect_canvas_borders(void) {
+    int ox, oy;
+    rect_canvas_origin(&ox, &oy);
+    if ((ox == 0 && oy == 0) || !s_zone_overlay_on) return;
+    s_zone_fx = ox;            s_zone_fy = oy;
+    s_zone_fw = RECT_CANVAS_W; s_zone_fh = RECT_CANVAS_H;
+    s_zone_frame_seen = true;
+    if (!s_zone_border_pushed) {
+        s_zone_border_pushed = true;
+        zone_overlay_push_outside(ox, oy, RECT_CANVAS_W, RECT_CANVAS_H, false,
+                                  display_dev_blit);
+    }
+}
+
 // ── Async blit ───────────────────────────────────────────────────────────────
 // A Core-1 task owns the (blocking) SPI push so the module keeps running on
 // Core 0 during the transfer. The module double-buffers and hands over a
@@ -1450,10 +1554,12 @@ static void blit_task_body(void*) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         const uint16_t* buf = s_blit_buf;
         if (buf) {
-            if (s_blit_is_rect)
+            if (s_blit_is_rect) {
                 host_blit_rect(buf, s_blit_x, s_blit_y, s_blit_w, s_blit_h);
-            else
+                rect_canvas_borders();
+            } else {
                 host_blit_frame(buf, s_blit_w, s_blit_h);
+            }
         }
         xSemaphoreGive(s_blit_idle);
     }
@@ -1498,14 +1604,23 @@ void host_blit_frame_async(const uint16_t* rgb565, int w, int h) {
 // PREVIOUS push has finished, which is exactly when the buffer handed over
 // before that one becomes safe to touch again. Two buffers are therefore
 // enough, and the caller must alternate them.
+//
+// Unlike host_blit_rect, x/y are canvas coordinates (RECT_CANVAS_W x
+// RECT_CANVAS_H); rect_canvas_origin places the canvas on the panel.
 void host_blit_rect_async(const uint16_t* rgb565, int x, int y, int w, int h) {
     if (!rgb565 || w <= 0 || h <= 0) return;
-    if (x < 0 || y < 0 || x + w > 320 || y + h > 240) return;
-    if (!blit_async_begin()) { host_blit_rect(rgb565, x, y, w, h); return; }
+    if (x < 0 || y < 0 || x + w > RECT_CANVAS_W || y + h > RECT_CANVAS_H) return;
+    int ox, oy;
+    rect_canvas_origin(&ox, &oy);
+    if (!blit_async_begin()) {
+        host_blit_rect(rgb565, x + ox, y + oy, w, h);
+        rect_canvas_borders();
+        return;
+    }
     xSemaphoreTake(s_blit_idle, portMAX_DELAY);
     s_blit_buf     = rgb565;
-    s_blit_x       = x;
-    s_blit_y       = y;
+    s_blit_x       = x + ox;
+    s_blit_y       = y + oy;
     s_blit_w       = w;
     s_blit_h       = h;
     s_blit_is_rect = true;
@@ -2236,7 +2351,13 @@ int host_link_gb_send(int cmd, int data_ctrl, unsigned int ts) {
 }
 
 int host_link_gb_poll(unsigned int* ts_out) {
-    return tdeck_link_gb_poll(ts_out);
+    // The module ABI carries the timestamp as unsigned int, the bridge as
+    // uint32_t: the same 32 bits, but distinct types on rv32 newlib (long).
+    // The bridge writes the timestamp only with an event (result >= 0).
+    uint32_t ts = 0;
+    int r = tdeck_link_gb_poll(&ts);
+    if (r >= 0 && ts_out) *ts_out = ts;
+    return r;
 }
 
 int host_link_gb_wait(unsigned int timeout_ms) {
@@ -2500,6 +2621,17 @@ static const elf_symbol_t host_exports[] = {
     { "__udivdi3",          (void*)__udivdi3 },
     { "__umoddi3",          (void*)__umoddi3 },
     { "__moddi3",           (void*)__moddi3 },
+    { "__clzsi2",           (void*)__clzsi2 },
+    { "__floatundidf",      (void*)__floatundidf },
+    { "__floatundisf",      (void*)__floatundisf },
+    { "__floatdisf",        (void*)__floatdisf },
+    { "__fixunssfdi",       (void*)__fixunssfdi },
+    { "__fixunsdfdi",       (void*)__fixunsdfdi },
+    { "__ashldi3",          (void*)__ashldi3 },
+    { "__lshrdi3",          (void*)__lshrdi3 },
+    { "__bswapsi2",         (void*)__bswapsi2 },
+    { "__ffsdi2",           (void*)__ffsdi2 },
+    { "__unorddf2",         (void*)__unorddf2 },
 
     // C library: time
     { "time",               (void*)time },
@@ -2567,7 +2699,10 @@ struct elf_run_ctx {
 //
 // XtExcFrame, xt_exc_handler and xt_set_exception_handler come from
 // <xtensa/xtensa_api.h>, already pulled in transitively via FreeRTOS.h.
+// Xtensa only: IDF's RISC-V port (ESP32-P4) has no per-cause exception
+// hook, see the #else branch below.
 // ---------------------------------------------------------------------------
+#if defined(__xtensa__)
 
 // Xtensa EXCCAUSE values a misbehaving native module is likely to trigger.
 // (Excludes 1=Syscall and 4=Level1Interrupt — those are NORMAL operations and
@@ -2652,6 +2787,17 @@ static void elf_set_core1_handlers(bool install) {
     vSemaphoreDelete(done);
 }
 
+#else  // RISC-V (ESP32-P4)
+// No fault interception: a module fault goes to IDF's default panic handler.
+// Phase 3 of docs/P4_PORT_PLAN_2026-10-12.md owns the RV32 module path.
+static void elf_install_handlers(int core) { (void)core; }
+static void elf_restore_handlers(int core) { (void)core; }
+static void elf_set_core1_handlers(bool install) {
+    SLog.printf("[elf_host] Core1 fault handlers: none on this architecture (%s)\n",
+                install ? "install" : "restore");
+}
+#endif  // __xtensa__
+
 static void elf_run_task(void* param) {
     elf_run_ctx* ctx = (elf_run_ctx*)param;
     s_elf_run_task = xTaskGetCurrentTaskHandle();   // owns s_io_bounce this session
@@ -2731,8 +2877,26 @@ bool elf_host_pending_take(void) {
 // Run the stashed module to completion. MUST be called only after luaTearDown()
 // — Lua is down and this never touches lua_State. The caller recreates Lua after
 // it returns. Returns the module result (negative on load/spawn failure).
+void elf_arch_path(const char* in, char* out, size_t cap) {
+#if defined(__riscv)
+    const size_t n = strlen(in);
+    if (n >= 4 && strcmp(in + n - 4, ".elf") == 0 &&
+        !(n >= 9 && strcmp(in + n - 9, ".rv32.elf") == 0)) {
+        const size_t stem = n - 4;
+        if (stem + sizeof(".rv32.elf") > cap) { out[0] = '\0'; return; }
+        memcpy(out, in, stem);
+        memcpy(out + stem, ".rv32.elf", sizeof(".rv32.elf"));
+        return;
+    }
+#endif
+    strlcpy(out, in, cap);
+}
+
 int elf_host_run_pending(void) {
-    const char* path = s_elf_args[0];
+    // The launcher names the ".elf" artifact; this CPU loads its own
+    // (elf_arch_path). argv[0] stays the name the launcher gave.
+    static char path[ELF_ARG_MAX + 8];
+    elf_arch_path(s_elf_args[0], path, sizeof(path));
     int argc = s_elf_argc;
     char* argv[ELF_MAX_ARGS + 1];
     for (int i = 0; i < argc; i++) argv[i] = s_elf_args[i];
@@ -2766,7 +2930,16 @@ int elf_host_run_pending(void) {
     lvgl_ticker.detach();
     // Widen the task watchdog timeout so long module init doesn't trip it.
     // Also set panic=false so even if it triggers, it just warns instead of rebooting.
+#if ESP_IDF_VERSION_MAJOR >= 5
+    {
+        esp_task_wdt_config_t wdt = { .timeout_ms = 120000,
+                                      .idle_core_mask = ELF_TWDT_IDLE_CORE_MASK,
+                                      .trigger_panic = false };
+        esp_task_wdt_reconfigure(&wdt);
+    }
+#else
     esp_task_wdt_init(120, false);
+#endif
     // Disable the interrupt watchdog (TG1 MWDT). The first 3D frame from PSRAM
     // with cold caches can exceed the default 300ms timeout.
     {
@@ -3001,7 +3174,17 @@ int elf_host_run_pending(void) {
     REG_WRITE(TIMG_WDTWPROTECT_REG(1), 0x50D83AA1);
     REG_SET_BIT(TIMG_WDTCONFIG0_REG(1), (1U << 31));
     REG_WRITE(TIMG_WDTWPROTECT_REG(1), 0);
-    esp_task_wdt_init(5, true);  // restore normal watchdog (5s timeout, panic on trigger)
+    // restore normal watchdog (5s timeout, panic on trigger)
+#if ESP_IDF_VERSION_MAJOR >= 5
+    {
+        esp_task_wdt_config_t wdt = { .timeout_ms = 5000,
+                                      .idle_core_mask = ELF_TWDT_IDLE_CORE_MASK,
+                                      .trigger_panic = true };
+        esp_task_wdt_reconfigure(&wdt);
+    }
+#else
+    esp_task_wdt_init(5, true);
+#endif
     lvgl_ticker.attach_ms(5, []() { lv_tick_inc(5); });
     // Force full redraw — LVGL doesn't know the display was wiped
     lv_obj_invalidate(lv_screen_active());

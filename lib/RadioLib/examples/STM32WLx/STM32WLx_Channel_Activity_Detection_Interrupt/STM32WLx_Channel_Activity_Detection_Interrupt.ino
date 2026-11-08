@@ -33,6 +33,18 @@ static const Module::RfSwitchMode_t rfswitch_table[] = {
   END_OF_MODE_TABLE,
 };
 
+// flag to indicate that a packet was detected or CAD timed out
+volatile bool scanFlag = false;
+
+// this function is called when a complete packet
+// is received by the module
+// IMPORTANT: this function MUST be 'void' type
+//            and MUST NOT have any arguments!
+void setFlag(void) {
+  // something happened, set the flag
+  scanFlag = true;
+}
+
 void setup() {
   Serial.begin(9600);
 
@@ -40,9 +52,13 @@ void setup() {
   // this has to be done prior to calling begin()
   radio.setRfSwitchTable(rfswitch_pins, rfswitch_table);
 
-  // initialize STM32WLx with default settings, except frequency
-  Serial.print(F("[STM32WLx] Initializing ... "));
-  int state = radio.begin(868.0);
+  // initialize STM32WL with default settings
+  // except frequency and TCXO voltage suitable for Nucleo WL55JC1
+  Serial.print(F("[STM32WL] Initializing ... "));
+  ConfigLoRa_t config;
+  config.frequency = 868.0;
+  radio.tcxoVoltage = 1.7;
+  int state = radio.begin(config);
   if (state == RADIOLIB_ERR_NONE) {
     Serial.println(F("success!"));
   } else {
@@ -64,18 +80,6 @@ void setup() {
     Serial.print(F("failed, code "));
     Serial.println(state);
   }
-}
-
-// flag to indicate that a packet was detected or CAD timed out
-volatile bool scanFlag = false;
-
-// this function is called when a complete packet
-// is received by the module
-// IMPORTANT: this function MUST be 'void' type
-//            and MUST NOT have any arguments!
-void setFlag(void) {
-  // something happened, set the flag
-  scanFlag = true;
 }
 
 void loop() {

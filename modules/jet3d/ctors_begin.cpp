@@ -13,6 +13,12 @@
 // object first and ctors_end.cpp last, so the real constructors sit between
 // them. Same mechanism crtbegin.o/crtend.o use.
 //
+// On the riscv32-esp toolchain GCC emits constructors into .init_array, and
+// the default -shared linker script places this .ctors entry into the
+// .init_array output section in link order, so the two markers bracket the
+// real .init_array entries there (main_tdeck.cpp walks them front to back
+// on RISC-V).
+//
 // The slot holds NULL; main_tdeck.cpp starts one past it and skips nulls.
 
 typedef void (*init_fn_t)(void);

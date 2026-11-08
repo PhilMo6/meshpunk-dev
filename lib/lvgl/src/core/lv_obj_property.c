@@ -44,7 +44,7 @@ typedef lv_result_t (*lv_property_getter_t)(const lv_obj_t *, lv_prop_id_t, lv_p
  **********************/
 
 static lv_result_t obj_property(lv_obj_t * obj, lv_prop_id_t id, lv_property_t * value, bool set);
-static int32_t property_name_compare(const void * ref, const void * element);
+static int property_name_compare(const void * ref, const void * element);   /* MESHPUNK: int, the type of its definition below and of lv_utils_bsearch's cmp (int32_t is long on rv32) */
 
 /**********************
  *  STATIC VARIABLES

@@ -1,22 +1,50 @@
 # Build snes9x (retro-go pure-C port) as a loadable ELF module
 # for ESP32-S3 T-Deck. Uses the Xtensa toolchain from PlatformIO.
+#
+# -Arch s3 (default) = the Xtensa artifact snes.app.elf, unchanged.
+# -Arch rv32 = snes.app.rv32.elf for the T-Display P4 (the gameboy module's
+# pattern): the riscv32-esp toolchain, the P4 firmware's ISA and float ABI
+# (rv32imafc, ilp32f), -mno-relax, objects in obj-rv32/, and no -lgcc: the
+# rv32 libgcc.a is not position-independent, so every builtin comes from
+# host_exports[] (src/elf_host.cpp) and the UND audit below hard-fails on
+# anything else. The loader leaves .iram.text where it was loaded on RISC-V
+# (lib/elf_loader/elf_loader.c), so the rv32 build drops the Xtensa section
+# flags and the l32r audit.
+param(
+    [ValidateSet("s3", "rv32")]
+    [string]$Arch = "s3"
+)
 
-$toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
-$CC = "$toolchain\xtensa-esp32s3-elf-gcc.exe"
-$READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
-$OBJDUMP = "$toolchain\xtensa-esp32s3-elf-objdump.exe"
+if ($Arch -eq "rv32") {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-riscv32-esp\bin"
+    $CC = "$toolchain\riscv32-esp-elf-gcc.exe"
+    $READELF = "$toolchain\riscv32-esp-elf-readelf.exe"
+    $ARCH_CFLAGS = @("-march=rv32imafc_zicsr_zifencei", "-mabi=ilp32f", "-mno-relax")
+    $ARCH_LDFLAGS = @("-Wl,--no-relax")
+    $LIBS = @()
+    $OUT = "snes.app.rv32.elf"
+    $obj_dir = "obj-rv32"
+} else {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
+    $CC = "$toolchain\xtensa-esp32s3-elf-gcc.exe"
+    $READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
+    $OBJDUMP = "$toolchain\xtensa-esp32s3-elf-objdump.exe"
+    $ARCH_CFLAGS = @("-mlongcalls")
+    $ARCH_LDFLAGS = @()
+    $LIBS = @("-lgcc")
+    $OUT = "snes.app.elf"
+    $obj_dir = "obj"
+}
 
 $S9X = "snes9x-src\src"
-$OUT = "snes.app.elf"
 
 # Common compiler flags (per-file -O flag added below)
-$CFLAGS = @(
+$CFLAGS = $ARCH_CFLAGS + @(
     "-shared", "-fPIC", "-fno-common",
     # Hidden visibility + -Bsymbolic below: internal globals bind directly
     # (RELATIVE relocs, no GOT double-hop). Plain -fno-PIC is rejected by
     # the xtensa BFD linker.
     "-fvisibility=hidden",
-    "-mlongcalls",
     "-ffunction-sections", "-fdata-sections",
     "-fno-strict-aliasing",
     "-I$S9X",
@@ -33,8 +61,8 @@ $CFLAGS = @(
 )
 
 $LDFLAGS = @(
-    "-nostartfiles", "-nodefaultlibs", "-nostdlib",
-    "-lgcc",
+    "-nostartfiles", "-nodefaultlibs", "-nostdlib"
+) + $LIBS + $ARCH_LDFLAGS + @(
     "-Wl,-e,main",
     "-Wl,-Bsymbolic",
     # Keep .rel.dyn uncombined — combreloc trips an elf32-xtensa BFD assert.
@@ -63,7 +91,6 @@ $core_sources = Get-ChildItem "$S9X\*.c" | ForEach-Object { $_.FullName }
 # Platform glue + fast-path renderer
 $glue_sources = @("main_tdeck.c", "fastrender.c")
 
-$obj_dir = "obj"
 if (-not (Test-Path $obj_dir)) { New-Item -ItemType Directory $obj_dir | Out-Null }
 
 # Newest header mtime anywhere under the source tree. Headers are shared, so a
@@ -98,7 +125,8 @@ foreach ($src in ($core_sources + ($glue_sources | ForEach-Object { (Get-Item $_
     # fxemu.c also gets -fno-jump-tables: a switch table is emitted as data
     # inside .iram.text, where the l32r audit below reads it as code and
     # reports false escapes. Without it the switch becomes a decision tree.
-    $extra = if ($srcname -eq "fastrender.c") { @("-mtext-section-literals") }
+    $extra = if ($Arch -eq "rv32") { @() }
+             elseif ($srcname -eq "fastrender.c") { @("-mtext-section-literals") }
              elseif ($srcname -eq "fxemu.c") { @("-mtext-section-literals", "-fno-jump-tables") }
              elseif ($srcname -eq "getset.c") { @("-mtext-section-literals", "-fno-jump-tables") }
              # sa1.c/sa1cpu.c: SA1_HOT functions land in .iram.text (sa1.h).
@@ -132,9 +160,14 @@ Write-Host "Success: $OUT ($([math]::Round($size/1024, 1)) KB)"
 # .iram.text is copied into internal SRAM at load, which changes its distance
 # to every other section. Absolute references survive (the loader relocates
 # them), but l32r is PC-relative and fixed at link time, so every literal it
-# reaches must live inside the section itself.
+# reaches must live inside the section itself. RISC-V: the loader runs the
+# section in place (PSRAM), so there is nothing to audit.
 $iram = & $READELF -S -W $OUT | Select-String '\.iram\.text\s+PROGBITS\s+([0-9a-f]+)\s+[0-9a-f]+\s+([0-9a-f]+)'
-if ($iram) {
+if ($iram -and $Arch -eq "rv32") {
+    $sec_size = [Convert]::ToUInt32($iram.Matches[0].Groups[2].Value, 16)
+    Write-Host ""
+    Write-Host ".iram.text: $sec_size bytes, run in place from PSRAM on the P4"
+} elseif ($iram) {
     $sec_addr = [Convert]::ToUInt32($iram.Matches[0].Groups[1].Value, 16)
     $sec_size = [Convert]::ToUInt32($iram.Matches[0].Groups[2].Value, 16)
     $sec_end  = $sec_addr + $sec_size
@@ -165,11 +198,37 @@ if ($iram) {
 }
 
 # Every UND symbol must be resolvable from host_exports[] in src/elf_host.cpp,
-# or the module will fail to load on device. Audit at build time instead.
+# or the module will fail to load on device. Audit at build time instead:
+# the table is parsed from the source; a miss is printed for both arches and
+# fails the rv32 build (the Xtensa build keeps its print-only behaviour).
+$hostSrc = Get-Content (Join-Path $PSScriptRoot "..\..\src\elf_host.cpp") -Raw
+$tbl = [regex]::Match($hostSrc, 'host_exports\[\]\s*=\s*\{(.*?)\n\};', 'Singleline')
+$exported = @{}
+if ($tbl.Success) {
+    foreach ($em in [regex]::Matches($tbl.Groups[1].Value, '\{\s*"([^"]+)"')) {
+        $exported[$em.Groups[1].Value] = $true
+    }
+} else {
+    Write-Host "WARNING: could not parse host_exports[] from src/elf_host.cpp"
+}
+$missing = @()
 Write-Host ""
 Write-Host "Undefined symbols (each must be a host export):"
-& $READELF --dyn-syms $OUT | Select-String "\bUND\b" | ForEach-Object {
+& $READELF -W --dyn-syms $OUT | Select-String "\bUND\b" | ForEach-Object {
     $parts = ($_ -replace '\s+', ' ').Trim().Split(' ')
     $sym = $parts[$parts.Length - 1]
-    if ($sym -and $sym -ne "UND") { Write-Host "  $sym" }
+    if ($sym -and $sym -ne "UND" -and $sym -ne "Name") {
+        if ($tbl.Success -and -not $exported.ContainsKey($sym)) {
+            Write-Host "  $sym   <-- NOT IN host_exports[]"
+            $missing += $sym
+        } else {
+            Write-Host "  $sym"
+        }
+    }
+}
+if ($missing.Count -gt 0 -and $Arch -eq "rv32") {
+    Write-Host ""
+    Write-Host "ERROR: $($missing.Count) symbol(s) missing from host_exports[] - the elf WILL fail to load:"
+    $missing | ForEach-Object { Write-Host "  $_" }
+    exit 1
 }

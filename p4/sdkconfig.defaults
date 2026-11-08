@@ -43,14 +43,81 @@ CONFIG_CACHE_L2_CACHE_LINE_128B=y
 CONFIG_FREERTOS_HZ=1000
 
 # Console: DEFAULT (UART0 primary + USB-Serial-JTAG as the non-blocking
-# secondary). Output reaches the P4.U USB port through the secondary
-# console — this is the configuration both working builds for this board
-# (LilyGo factory, wadamesh) ship. Forcing USB-Serial-JTAG as the PRIMARY
-# console was tried and the boot went silent before the bootloader's first
-# log line on this v1.0 chip; do not reintroduce it without a hw round.
+# secondary) — the configuration both working builds for this board
+# (LilyGo factory, wadamesh) ship. The port the PC sees is UART0: the
+# board's USB-C data port is a CH343 USB-UART bridge (VID 1A86 / PID 55D3),
+# and no USB-Serial-JTAG device has ever enumerated from it. Forcing
+# USB-Serial-JTAG as the PRIMARY console was tried and the boot went silent
+# before the bootloader's first log line on this v1.0 chip; do not
+# reintroduce it without a hw round.
 
-# esp-hosted (rung 8): rung8_wifi.c registers the C6 reset callback (the C6
-# EN line is expander IO14) and then calls esp_hosted_init() itself, so
-# the constructor that would call it before app_main is left out
-# (MESHPUNK option, libraries/esp_hosted/Kconfig).
+# esp-hosted: the boot-time constructor that would call esp_hosted_init()
+# before app_main is left out (MESHPUNK option, libraries/esp_hosted/
+# Kconfig). Arduino's cores/esp32/esp32-hal-hosted.c runs
+# esp_hosted_sdio_set_config -> esp_hosted_init -> esp_hosted_connect_to_slave
+# at the first WiFi or BLE use, the sequence rung 8 proved; the board layer
+# registers the C6 reset callback (the C6 EN line is expander IO14) before
+# that (plan Phase 2).
 CONFIG_ESP_HOSTED_AUTO_INIT=n
+# esp-hosted's console commands are not used.
+CONFIG_ESP_HOSTED_CLI_ENABLED=n
+
+# ── Firmware build (Phase 0 of docs/P4_PORT_PLAN_2026-10-12.md) ────────────
+
+# Arduino 3.3.12 as a component: its main.cpp is app_main() and runs
+# setup()/loop(). loop() on core 0 and a 16 KB loop stack match the S3 envs'
+# -DARDUINO_RUNNING_CORE=0 / -DARDUINO_LOOP_STACK_SIZE=16384
+# (meshpunk_tasks.cpp pins the mesh task to core 1).
+CONFIG_AUTOSTART_ARDUINO=y
+CONFIG_ARDUINO_RUN_CORE0=y
+CONFIG_ARDUINO_LOOP_STACK_SIZE=16384
+
+# Arduino's NetworkClientSecure (the TLS behind HTTPClient's https:// and
+# WiFiClientSecure) compiles its whole ssl_client.cpp only when mbedTLS has
+# a PSK key exchange enabled (MBEDTLS_KEY_EXCHANGE_SOME_PSK_ENABLED);
+# without these two the library is an empty object and the link fails on
+# start_ssl_client/ssl_init/... The #warning in ssl_client.cpp names them.
+CONFIG_MBEDTLS_PSK_MODES=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+
+# -Os, what the Arduino S3 builds use; the rung builds were -Og.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# sound.cpp and lib/ESP32-audioI2S drive the legacy I2S driver
+# (driver/i2s.h), which IDF 5 marks deprecated with a #warning per file.
+CONFIG_I2S_SUPPRESS_DEPRECATE_WARN=y
+
+# Task watchdog: a starved idle task panics (reboot with a register dump) —
+# the S3 builds' value; elf_host.cpp re-arms "5 s, panic" after every module
+# run on both builds. loop() sleeps one tick per pass (main.cpp), so IDLE0
+# runs every millisecond. IDLE1 is checked too (IDF default; the S3 does
+# not check it): a mesh task that stops sleeping panics instead of freezing
+# the UI silently.
+CONFIG_ESP_TASK_WDT_PANIC=y
+
+# FAT long file names on the SD card. IDF's default is 8.3 names only
+# (FATFS_LFN_NONE): the card mounted and `mkdir /meshpunk` worked, but
+# fopen("/sd/meshpunk/wifi_creds") failed — every firmware path longer than
+# 8.3 (firmware_prefs, wifi_creds, lora_protos, apps/<name>/main.lua, ...)
+# needs long names. The values are the Arduino 2.0.17 S3 SDK's (its
+# tools/sdk/esp32s3/sdkconfig): the long-name buffer on the caller's stack
+# (512 bytes per FatFs call), 255-character names, UTF-8 on the API side,
+# OEM codepage 850 so short names on a card match those the S3 boards
+# write, and FatFs buffers (a 4 KB per-file cache with 4096-byte sectors)
+# in PSRAM rather than the internal heap.
+CONFIG_FATFS_LFN_STACK=y
+CONFIG_FATFS_MAX_LFN=255
+CONFIG_FATFS_API_ENCODING_UTF_8=y
+CONFIG_FATFS_CODEPAGE_850=y
+CONFIG_FATFS_ALLOC_PREFER_EXTRAM=y
+
+# ELF modules execute from PSRAM. With this option on (IDF's default with
+# SPIRAM_BOOT_INIT), esp_cpu_configure_region_protection() splits the PSRAM
+# address range into locked PMP regions — the XIP text copy R+X, the heap
+# R+W only — and the first instruction fetched from a loaded module faults
+# ("Instruction access fault", MCAUSE 1, MTVAL = the module address; build
+# 20). With it off the PSRAM range is one locked R+W+X entry
+# (esp_hw_support/port/esp32p4/cpu_region_protect.c, the branch without
+# SPIRAM_PRE_CONFIGURE_MEMORY_PROTECTION), as the S3 boards have no
+# execute restriction on PSRAM either.
+CONFIG_SPIRAM_PRE_CONFIGURE_MEMORY_PROTECTION=n

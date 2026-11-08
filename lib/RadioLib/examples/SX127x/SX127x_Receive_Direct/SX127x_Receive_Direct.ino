@@ -32,12 +32,22 @@ const int pin = 5;
 Radio radio = new RadioModule();
 */
 
+// this function is called when a new bit is received
+void readBit(void) {
+  // read the data bit
+  radio.readBit(pin);
+}
+
 void setup() {
   Serial.begin(9600);
 
   // initialize SX1278 with FSK modem at 9600 bps
   Serial.print(F("[SX1278] Initializing ... "));
-  int state = radio.beginFSK(434.0, 9.6, 20.0);
+  ConfigFSK_t config;
+  config.frequency = 434.0;
+  config.bitRate = 9.6;
+  config.frequencyDeviation = 20.0;
+  int state = radio.beginFSK(config);
   if (state == RADIOLIB_ERR_NONE) {
     Serial.println(F("success!"));
   } else {
@@ -57,12 +67,6 @@ void setup() {
 
   // start direct mode reception
   radio.receiveDirect();
-}
-
-// this function is called when a new bit is received
-void readBit(void) {
-  // read the data bit
-  radio.readBit(pin);
 }
 
 void loop() {

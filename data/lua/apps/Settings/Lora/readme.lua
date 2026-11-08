@@ -10,4 +10,6 @@ Each protocol's apps live in its own launcher category (Meshcore, MTLite): its M
 
 Your selection is honored on every boot. If the selected protocol's installed files are missing or unreadable, the device boots with the radio off and posts a notification saying so - nothing is substituted.
 
-Bluetooth is a second, independent protocol slot - BLE and LoRa are different radios, so they run side by side. It has its own app: Settings > Ble.]] }
+Bluetooth is a second, independent protocol slot - BLE and LoRa are different radios, so they run side by side. It has its own app: Settings > Ble.
+
+Antenna (boards with a switch, today the T-Display P4): the radio uses the internal antenna or the MMCX connector. Switching to the connector takes two taps - fit an antenna first, since transmitting into an empty connector loads the amplifier with nothing. Back to internal is one tap. The choice applies at once and persists.]] }

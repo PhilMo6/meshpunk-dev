@@ -38,12 +38,29 @@ Radio radio = new RadioModule();
 // save transmission state between loops
 int transmissionState = RADIOLIB_ERR_NONE;
 
+// flag to indicate that a packet was sent
+volatile bool transmittedFlag = false;
+
+// this function is called when a complete packet
+// is transmitted by the module
+// IMPORTANT: this function MUST be 'void' type
+//            and MUST NOT have any arguments!
+#if defined(ESP8266) || defined(ESP32)
+  ICACHE_RAM_ATTR
+#endif
+void setFlag(void) {
+  // we sent a packet, set the flag
+  transmittedFlag = true;
+}
+
 void setup() {
   Serial.begin(9600);
 
-  // initialize SX1280 with default settings
+  // initialize SX1280 at 2400 MHz
   Serial.print(F("[SX1280] Initializing ... "));
-  int state = radio.begin();
+  ConfigLoRa_t config;
+  config.frequency = 2400;
+  int state = radio.begin(config);
   if (state == RADIOLIB_ERR_NONE) {
     Serial.println(F("success!"));
   } else {
@@ -69,21 +86,6 @@ void setup() {
                       0x89, 0xAB, 0xCD, 0xEF};
     state = radio.startTransmit(byteArr, 8);
   */
-}
-
-// flag to indicate that a packet was sent
-volatile bool transmittedFlag = false;
-
-// this function is called when a complete packet
-// is transmitted by the module
-// IMPORTANT: this function MUST be 'void' type
-//            and MUST NOT have any arguments!
-#if defined(ESP8266) || defined(ESP32)
-  ICACHE_RAM_ATTR
-#endif
-void setFlag(void) {
-  // we sent a packet, set the flag
-  transmittedFlag = true;
 }
 
 // counter to keep track of transmitted packets

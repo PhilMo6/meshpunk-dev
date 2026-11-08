@@ -32,7 +32,7 @@ void mesh_aes_block_encrypt(const uint8_t *key, int key_bits,
 }
 
 void mesh_sha256(const uint8_t *data, size_t len, uint8_t out[32]) {
-    mbedtls_sha256_ret(data, len, out, 0 /* SHA-256 */);
+    mbedtls_sha256(data, len, out, 0 /* SHA-256 */);
 }
 
 bool mesh_ccm_encrypt(const uint8_t key[32], const uint8_t nonce[13],
@@ -90,8 +90,10 @@ bool mesh_x25519_dh(const uint8_t our_private[32],
     bool ok = false;
     if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) != 0) goto cleanup;
     if (mbedtls_mpi_read_binary_le(&d, our_private, 32) != 0) goto cleanup;
-    if (mbedtls_mpi_read_binary_le(&Q.X, their_public, 32) != 0) goto cleanup;
-    if (mbedtls_mpi_lset(&Q.Z, 1) != 0) goto cleanup;
+    // For a Montgomery group, mbedtls_ecp_point_read_binary reads the 32
+    // little-endian bytes into X and sets Z = 1 (library/ecp.c) — the point
+    // fields themselves are private in mbedTLS 3.
+    if (mbedtls_ecp_point_read_binary(&grp, &Q, their_public, 32) != 0) goto cleanup;
     if (mbedtls_ecdh_compute_shared(&grp, &z, &Q, &d, esp_rng_fn, NULL) != 0) goto cleanup;
     if (mbedtls_mpi_write_binary_le(&z, shared_out, 32) != 0) goto cleanup;
     ok = true;
@@ -108,6 +110,7 @@ bool mesh_generate_keypair(uint8_t public_key[32], uint8_t private_key[32]) {
     mbedtls_ecp_group grp;
     mbedtls_mpi d;
     mbedtls_ecp_point Q;
+    size_t olen = 0;
     mbedtls_ecp_group_init(&grp);
     mbedtls_mpi_init(&d);
     mbedtls_ecp_point_init(&Q);
@@ -116,7 +119,11 @@ bool mesh_generate_keypair(uint8_t public_key[32], uint8_t private_key[32]) {
     if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) != 0) goto cleanup;
     if (mbedtls_ecdh_gen_public(&grp, &d, &Q, esp_rng_fn, NULL) != 0) goto cleanup;
     if (mbedtls_mpi_write_binary_le(&d, private_key, 32) != 0) goto cleanup;
-    if (mbedtls_mpi_write_binary_le(&Q.X, public_key, 32) != 0) goto cleanup;
+    // For a Montgomery group, mbedtls_ecp_point_write_binary writes X as 32
+    // little-endian bytes (library/ecp.c) — the point fields themselves are
+    // private in mbedTLS 3.
+    if (mbedtls_ecp_point_write_binary(&grp, &Q, MBEDTLS_ECP_PF_UNCOMPRESSED, &olen,
+                                       public_key, 32) != 0 || olen != 32) goto cleanup;
     ok = true;
 
 cleanup:

@@ -5,7 +5,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sdkconfig.h>
 #include <esp_heap_caps.h>
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+#include <esp_cache.h>       // esp_cache_msync: loaded code reaches the fetch path
+#include <esp_err.h>
+#include <hal/cache_hal.h>   // cache level and line size of an address range
+#endif
 
 // ---------------------------------------------------------------------------
 // ELF format definitions (subset needed for our loader)
@@ -232,6 +238,35 @@ static void* elf_alloc(size_t size, bool executable) {
     }
     return p;
 }
+
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+// Make a range written through the data path fetchable as code: write the
+// data cache back to memory, then invalidate the instruction-cache lines
+// covering it. esp_cache_msync accepts an unaligned range for the writeback
+// but rejects ESP_CACHE_MSYNC_FLAG_UNALIGNED for an invalidation
+// (esp_mm/esp_cache_msync.c), so the invalidation range is widened to the
+// line size of the cache level that covers the address, found with the same
+// two HAL calls esp_cache_msync uses for its own check (L1 for internal
+// SRAM, L2 for PSRAM: hal/esp32p4/include/hal/cache_ll.h). Dropping the
+// neighbouring instruction lines only costs a refetch.
+static esp_err_t p4_code_sync(void* addr, size_t size) {
+    esp_err_t err = esp_cache_msync(addr, size,
+                                    ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+                                    ESP_CACHE_MSYNC_FLAG_TYPE_DATA |
+                                    ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    if (err != ESP_OK) return err;
+    uint32_t level = 0, id = 0;
+    if (!cache_hal_vaddr_to_cache_level_id((uint32_t)addr, size, &level, &id))
+        return ESP_ERR_INVALID_ARG;
+    uint32_t line = cache_hal_get_cache_line_size(level, CACHE_TYPE_INSTRUCTION);
+    if (line == 0) return ESP_ERR_INVALID_STATE;
+    uint32_t lo = (uint32_t)addr & ~(line - 1);
+    uint32_t hi = ((uint32_t)addr + size + line - 1) & ~(line - 1);
+    return esp_cache_msync((void*)lo, hi - lo,
+                           ESP_CACHE_MSYNC_FLAG_DIR_M2C |
+                           ESP_CACHE_MSYNC_FLAG_TYPE_INST);
+}
+#endif
 
 // Forward declaration — defined after module struct
 static uint32_t remap_if_text(const elf_module_t* mod, uint32_t addr);
@@ -598,6 +633,10 @@ elf_module_t* elf_load_ex(const void* data, size_t size,
                 // section must be self-contained (literals included, which
                 // needs -mtext-section-literals) because moving it changes
                 // every PC-relative distance to anything outside it.
+                // RISC-V code reaches code and data outside the section
+                // PC-relatively (auipc) and has no literal-pool equivalent,
+                // so on RISC-V the section stays where it was loaded.
+#if !defined(__riscv)
                 if (shstr && !mod->hot_mem && shdr[i].sh_size &&
                     strcmp(shstr + shdr[i].sh_name, HOT_SECTION) == 0) {
                     // Rounded up: the copy below stores whole words, so a
@@ -617,6 +656,7 @@ elf_module_t* elf_load_ex(const void* data, size_t size,
                               HOT_SECTION, shdr[i].sh_size);
                     }
                 }
+#endif
             }
         }
     }
@@ -712,6 +752,24 @@ elf_module_t* elf_load_ex(const void* data, size_t size,
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
     extern void Cache_WriteBack_All(void);
     Cache_WriteBack_All();
+#elif defined(CONFIG_IDF_TARGET_ESP32P4)
+    // The P4 fetches code through the same L1/L2 cache hierarchy the data
+    // path wrote. esp_cache_msync (esp_mm) pushes each written range out of
+    // the data cache and then drops the instruction-cache lines covering it,
+    // so the first fetch reads the new code; fence.i then orders this hart's
+    // own instruction stream behind the writes (RISC-V Zifencei). A failed
+    // sync fails the load.
+    {
+        esp_err_t err = p4_code_sync(load_base, total_size);
+        if (err == ESP_OK && mod->hot_mem)
+            err = p4_code_sync(mod->hot_mem, mod->hot_hi - mod->hot_lo);
+        if (err != ESP_OK) {
+            LOG_E("cache sync of the loaded code failed: %s", esp_err_to_name(err));
+            elf_unload(mod);
+            return NULL;
+        }
+        __asm__ volatile("fence.i" ::: "memory");
+    }
 #elif defined(__riscv)
 #error "RISC-V target: add this chip's cache writeback/invalidate here (IDF esp_cache_msync) so code written via the data path becomes fetchable — do not build without it"
 #endif

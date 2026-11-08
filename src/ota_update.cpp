@@ -47,7 +47,20 @@ extern "C" {
 }
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
-#include "esp_spi_flash.h"   // esp_partition_mmap handle type, spi_flash_munmap
+#include "esp_idf_version.h"
+// Flash mapping of the updater partition (ota_layout below): IDF 5 gave
+// esp_partition_mmap its own memory enum, handle type and unmap call
+// (esp_partition.h); IDF 4.4 uses the spi_flash ones from esp_spi_flash.h.
+#if ESP_IDF_VERSION_MAJOR >= 5
+typedef esp_partition_mmap_handle_t ota_mmap_handle_t;
+#define OTA_MMAP_DATA  ESP_PARTITION_MMAP_DATA
+#define ota_munmap(h)  esp_partition_munmap(h)
+#else
+#include "esp_spi_flash.h"
+typedef spi_flash_mmap_handle_t ota_mmap_handle_t;
+#define OTA_MMAP_DATA  SPI_FLASH_MMAP_DATA
+#define ota_munmap(h)  spi_flash_munmap(h)
+#endif
 #include "esp_system.h"
 #include "esp_heap_caps.h"
 #include "mbedtls/sha256.h"
@@ -203,8 +216,8 @@ static OtaLayout ota_layout(void) {
     // and never mounts the card, so it is refused here instead.
     static char reason[160];
     const void* mapped = nullptr;
-    spi_flash_mmap_handle_t handle = 0;
-    if (esp_partition_mmap(l.updater, 0, l.updater->size, SPI_FLASH_MMAP_DATA, &mapped, &handle) != ESP_OK) {
+    ota_mmap_handle_t handle = 0;
+    if (esp_partition_mmap(l.updater, 0, l.updater->size, OTA_MMAP_DATA, &mapped, &handle) != ESP_OK) {
       l.reason = "The updater partition could not be mapped for its board tag.";
       return l;
     }
@@ -212,7 +225,7 @@ static OtaLayout ota_layout(void) {
     ota_tag_scan_init(tag, true);
     ota_tag_scan_feed(tag, (const uint8_t*)mapped, l.updater->size);
     ota_tag_scan_finish(tag);
-    spi_flash_munmap(handle);
+    ota_munmap(handle);
     if (!tag.found) {
       snprintf(reason, sizeof reason,
                "The updater partition holds no tagged MeshPunk updater. Upload the %s env.", kUpdaterEnv);
@@ -449,7 +462,7 @@ static const char* verify_open(const OtaLayout& lay) {
   if (hdr[23] != 1) return "image carries no appended hash";
 
   mbedtls_sha256_init(&s.sha);
-  mbedtls_sha256_starts_ret(&s.sha, 0);
+  mbedtls_sha256_starts(&s.sha, 0);
   s.sha_live = true;
   ota_tag_scan_init(s.board_tag, false);
   s.total = size;
@@ -520,14 +533,14 @@ static void step_verify(void) {
       session_fail("read failed while hashing");
       return;
     }
-    mbedtls_sha256_update_ret(&s.sha, s_buf, want);
+    mbedtls_sha256_update(&s.sha, s_buf, want);
     ota_tag_scan_feed(s.board_tag, s_buf, want);
     s.done += want;
     moved += want;
   }
   if (s.done >= body) {
     uint8_t calc[32], tail[32];
-    mbedtls_sha256_finish_ret(&s.sha, calc);
+    mbedtls_sha256_finish(&s.sha, calc);
     mbedtls_sha256_free(&s.sha);
     s.sha_live = false;
     if (s.in.is_sd) sd_spi_take();   // held through the read; meshpunk_close releases it

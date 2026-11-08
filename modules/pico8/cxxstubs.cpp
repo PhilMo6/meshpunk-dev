@@ -57,4 +57,17 @@ namespace std {
     void __throw_range_error(const char*) { abort(); }
     void __throw_bad_function_call() { abort(); }
     void __throw_overflow_error(const char*) { abort(); }
+#if defined(__riscv)
+    // Referenced by gcc 11+ headers (the riscv32-esp gcc 14 build).
+    void __throw_bad_array_new_length() { abort(); }
+#endif
 }
+
+#if defined(__riscv)
+// riscv32-esp gcc 14's <string> declares basic_string<char> an extern
+// template at C++17, so the other files call its members out of line, and
+// the rv32 build links no libstdc++.a (not position-independent). The
+// members are instantiated here instead, as libstdc++'s string-inst.cc does.
+#include <string>
+template class std::basic_string<char>;
+#endif

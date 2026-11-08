@@ -8,16 +8,45 @@
 # loraproto_ops), --no-relax + -z nocombreloc, -lm -lgcc static. The UND
 # audits below cross-check against proto_exports[] (src/elf_host.cpp) and
 # hard-fail on any symbol the firmware does not export.
+#
+# -Arch s3 (default) builds the Xtensa artifacts for the S3 boards;
+# -Arch rv32 builds the RISC-V artifacts for the T-Display P4
+# (docs/DEVICE_EXPANSION_PLAN_2026-09-08.md 3.1 / 3.4): same sources, the
+# riscv32-esp toolchain, the P4 firmware's ISA and float ABI
+# (rv32imafc, ilp32f; -mno-relax so no linker-relaxation relocations),
+# output names tagged ".rv32.elf" (the firmware's ELF_ARCH_EXT, elf_host.h)
+# staged next to the Xtensa files. No -lm/-lgcc on rv32: the toolchain's
+# libgcc.a/libm.a are not position-independent and ld refuses them in a
+# shared object, so every builtin a module needs comes from proto_exports[].
+param(
+    [ValidateSet("s3", "rv32")]
+    [string]$Arch = "s3"
+)
 
-$toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
-$CXX     = "$toolchain\xtensa-esp32s3-elf-g++.exe"
-$READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
+if ($Arch -eq "rv32") {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-riscv32-esp\bin"
+    $CXX     = "$toolchain\riscv32-esp-elf-g++.exe"
+    $READELF = "$toolchain\riscv32-esp-elf-readelf.exe"
+    $ARCH_EXT = ".rv32.elf"
+    $ARCH_CFLAGS = @("-march=rv32imafc_zicsr_zifencei", "-mabi=ilp32f", "-mno-relax")
+    $LIBS = @()
+} else {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
+    $CXX     = "$toolchain\xtensa-esp32s3-elf-g++.exe"
+    $READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
+    $ARCH_EXT = ".elf"
+    $ARCH_CFLAGS = @("-mlongcalls")
+    $LIBS = @("-lm", "-lgcc")
+}
 
-$OUT  = "meshcore.loraproto.elf"
-$OUT2 = "meshcore_companion.bleproto.elf"
+$OUT  = "meshcore.loraproto$ARCH_EXT"
+$OUT2 = "meshcore_companion.bleproto$ARCH_EXT"
 
 $MC     = "..\..\lib\MeshCore\src"
-$CRYPTO = "..\..\.pio\libdeps\meshpunk\Crypto"
+# Vendored in lib/ (the same versions the S3 envs' libdeps hold: Crypto
+# 0.4.0, base64 1.4.0), so the module builds on a machine without libdeps.
+$CRYPTO = "..\..\lib\Crypto"
+$BASE64 = "..\..\lib\base64\src"
 
 # The BLE-slot component is its OWN elf (one loading mechanism for every BLE
 # protocol); it resolves its PunkMesh/shim imports against the LoRa elf at
@@ -57,8 +86,8 @@ $SRC = @(
     "$CRYPTO\BigNumberUtil.cpp"
 )
 
-$FLAGS = @(
-    "-shared", "-fPIC", "-fno-common", "-Os", "-mlongcalls",
+$FLAGS = $ARCH_CFLAGS + @(
+    "-shared", "-fPIC", "-fno-common", "-Os",
     "-ffunction-sections", "-fdata-sections",
     "-fno-rtti", "-fno-exceptions", "-std=gnu++17",
     # The companion is part of the package, over the BLE-slot transport.
@@ -84,7 +113,7 @@ $FLAGS = @(
     "-I..\..\lib\lua",
     "-I$MC",
     "-I$CRYPTO",
-    "-I..\..\.pio\libdeps\meshpunk\base64\src",
+    "-I$BASE64",
     "-I..\..\lib\ed25519",
     "-nostartfiles", "-nodefaultlibs", "-nostdlib",
     "-Wl,--gc-sections",
@@ -93,7 +122,7 @@ $FLAGS = @(
 )
 
 Write-Host "  CXX  $($SRC.Count) sources -> $OUT"
-& $CXX @FLAGS -o $OUT @SRC "-lm" "-lgcc"
+& $CXX @FLAGS -o $OUT @SRC @LIBS
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Compilation failed!"
     exit 1
@@ -115,6 +144,12 @@ if (-not $tbl.Success) {
 $exported = @{}
 foreach ($em in [regex]::Matches($tbl.Groups[1].Value, '\{\s*"([^"]+)"')) {
     $exported[$em.Groups[1].Value] = $true
+}
+# Entries whose linkage name differs per architecture: U32_MANGLED(xtensa, riscv)
+# in src/elf_host.cpp (uint32_t mangles as 'j' on Xtensa, 'm' on RISC-V).
+$grp = if ($Arch -eq "rv32") { 2 } else { 1 }
+foreach ($em in [regex]::Matches($tbl.Groups[1].Value, 'U32_MANGLED\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)')) {
+    $exported[$em.Groups[$grp].Value] = $true
 }
 
 $missing = @()
@@ -152,7 +187,7 @@ if ($ops) {
 # ── The companion elf (BLE slot) ────────────────────────────────────────────
 Write-Host ""
 Write-Host "  CXX  $($SRC2.Count) sources -> $OUT2"
-& $CXX @FLAGS -o $OUT2 @SRC2 "-lm" "-lgcc"
+& $CXX @FLAGS -o $OUT2 @SRC2 @LIBS
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Companion compilation failed!"
     exit 1

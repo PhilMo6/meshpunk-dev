@@ -142,4 +142,6 @@ namespace std {
     void __throw_range_error(const char*) { abort(); }
     void __throw_bad_function_call() { abort(); }
     void __throw_overflow_error(const char*) { abort(); }
+    // Referenced by gcc 11+ headers (the riscv32-esp gcc 14 build).
+    void __throw_bad_array_new_length() { abort(); }
 }

@@ -21,6 +21,12 @@
 --
 -- Every preset gains a Screenshot pad automatically — see M.new.
 --
+-- Screen size: presets are authored for a 320x240 canvas (DESIGN_W x
+-- DESIGN_H). On a screen of another size the pads on each half of the
+-- canvas move to that side's screen edge (anchor_offsets), so on a wide
+-- panel they sit beside the centred game picture. Saved geometry and the
+-- editor are in the real screen's pixels.
+--
 -- Editor: live full-screen preview, drag a pad to move it, W/H steppers in
 -- a two-row control bar that flips to the far half of the screen from the
 -- selected pad. All edits auto-save on Back.
@@ -29,9 +35,15 @@ local lvgl = require("lvgl")
 
 local M = {}
 
-local SCREEN_W, SCREEN_H = 320, 240
+local DESIGN_W, DESIGN_H = 320, 240
+local CLUSTER_GAP = 12   -- pads at most this far apart move together
 local MIN_SIDE = 24
 local CFG_DIR = "L:/touch_layouts"
+local NO_SHIFT = { dx = 0, dy = 0 }
+
+local function screen_wh()
+    return lvgl.HOR_RES(), lvgl.VER_RES()
+end
 
 -- The Screenshot pad every layout gains (see M.new). 0xFD is a FIRMWARE out
 -- (INPUT_ZONE_SHOT in input_zones.h): the zone layer turns a tap on it into a
@@ -124,6 +136,78 @@ function Pad:save()
     return true
 end
 
+-- ── Screen-size anchoring ───────────────────────────────────────────────────
+-- Pads on the same half of the design canvas (by their centre) that are at
+-- most CLUSTER_GAP apart, transitively, form a cluster (a D-pad, a button
+-- group, part of a key row) and move as one; a cluster never spans the
+-- centre line. Horizontally a left-half cluster stays at the screen's left
+-- edge and a right-half one moves to the right edge. Vertically, by its
+-- centre, a cluster in the top / middle / bottom third sits at the screen's
+-- top edge / middle / bottom edge. On a DESIGN_W x DESIGN_H screen every
+-- offset is 0.
+
+local function left_half(z)
+    return z.x + z.w / 2 < DESIGN_W / 2
+end
+
+local function near(a, b)
+    if left_half(a) ~= left_half(b) then return false end
+    local gx = math.max(0, b.x - (a.x + a.w), a.x - (b.x + b.w))
+    local gy = math.max(0, b.y - (a.y + a.h), a.y - (b.y + b.h))
+    return gx <= CLUSTER_GAP and gy <= CLUSTER_GAP
+end
+
+local function shift_y(centre, extra)
+    if centre < DESIGN_H / 3 then return 0 end
+    if centre > DESIGN_H * 2 / 3 then return extra end
+    return math.floor(extra / 2)
+end
+
+-- Offsets { dx, dy } keyed by zone table, for zones on a sw x sh screen.
+local function anchor_offsets(zones, sw, sh)
+    local n = #zones
+    local parent = {}
+    for i = 1, n do parent[i] = i end
+    local function find(i)
+        while parent[i] ~= i do
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        end
+        return i
+    end
+    for i = 1, n do
+        for j = i + 1, n do
+            if near(zones[i], zones[j]) then
+                local a, b = find(i), find(j)
+                if a ~= b then parent[b] = a end
+            end
+        end
+    end
+    local box = {}
+    for i = 1, n do
+        local r, z = find(i), zones[i]
+        local b = box[r]
+        if not b then
+            box[r] = { x0 = z.x, y0 = z.y, x1 = z.x + z.w, y1 = z.y + z.h }
+        else
+            if z.x < b.x0 then b.x0 = z.x end
+            if z.y < b.y0 then b.y0 = z.y end
+            if z.x + z.w > b.x1 then b.x1 = z.x + z.w end
+            if z.y + z.h > b.y1 then b.y1 = z.y + z.h end
+        end
+    end
+    local ex, ey = sw - DESIGN_W, sh - DESIGN_H
+    local off = {}
+    for i = 1, n do
+        local b = box[find(i)]
+        off[zones[i]] = {
+            dx = ((b.x0 + b.x1) / 2 < DESIGN_W / 2) and 0 or ex,
+            dy = shift_y((b.y0 + b.y1) / 2, ey),
+        }
+    end
+    return off
+end
+
 -- ── Resolution ──────────────────────────────────────────────────────────────
 
 function Pad:_preset()
@@ -133,20 +217,35 @@ function Pad:_preset()
     return self.presets[1]
 end
 
--- Effective geometry of one preset zone (override applied, clamped on-screen).
+-- Anchor offsets of preset p for the current screen size (cached on p).
+function Pad:_offsets(p)
+    local sw, sh = screen_wh()
+    local c = p._anchor
+    if not c or c.sw ~= sw or c.sh ~= sh then
+        c = { sw = sw, sh = sh, off = anchor_offsets(p.zones, sw, sh) }
+        p._anchor = c
+    end
+    return c.off
+end
+
+-- Effective geometry of one preset zone: the user's override, else the
+-- preset position anchored to this screen; clamped on-screen.
 function Pad:_geom(z)
     local o = self.over[z.id]
     local off
     if o and o.off ~= nil then off = o.off else off = z.default_off or false end
+    local p = self:_preset()
+    local a = (p and self:_offsets(p)[z]) or NO_SHIFT
+    local sw, sh = screen_wh()
     local g = {
-        x = (o and o.x) or z.x, y = (o and o.y) or z.y,
+        x = (o and o.x) or (z.x + a.dx), y = (o and o.y) or (z.y + a.dy),
         w = (o and o.w) or z.w, h = (o and o.h) or z.h,
         off = off,
     }
-    g.w = clamp(g.w, MIN_SIDE, SCREEN_W)
-    g.h = clamp(g.h, MIN_SIDE, SCREEN_H)
-    g.x = clamp(g.x, 0, SCREEN_W - g.w)
-    g.y = clamp(g.y, 0, SCREEN_H - g.h)
+    g.w = clamp(g.w, MIN_SIDE, sw)
+    g.h = clamp(g.h, MIN_SIDE, sh)
+    g.x = clamp(g.x, 0, sw - g.w)
+    g.y = clamp(g.y, 0, sh - g.h)
     return g
 end
 
@@ -222,6 +321,7 @@ function Pad:open(o)
         c:clear_flag(lvgl.FLAG.SCROLLABLE)
         c:clear_flag(lvgl.FLAG.SCROLL_CHAIN)   -- see the box drag flags below
 
+        local sw, sh = screen_wh()
         local sel = nil          -- selected preset-zone index
         local boxes = {}         -- idx -> { obj=, label_obj=, z=, g= }
         local dirty = false
@@ -236,7 +336,7 @@ function Pad:open(o)
         -- selected pad would sit under it — moving on overlap (not on a
         -- midline test) gives natural hysteresis, so dragging across the
         -- middle of the screen can't make it flicker back and forth.
-        local bar_y = SCREEN_H - BAR_H
+        local bar_y = sh - BAR_H
 
         local function bar_hides(g, y)
             return g.y < y + BAR_H and g.y + g.h > y
@@ -246,7 +346,7 @@ function Pad:open(o)
             if not bar or not sel then return end
             local g = boxes[sel].g
             if not bar_hides(g, bar_y) then return end
-            local other = (bar_y == 0) and (SCREEN_H - BAR_H) or 0
+            local other = (bar_y == 0) and (sh - BAR_H) or 0
             if bar_hides(g, other) then return end   -- covered either way
             bar_y = other
             bar:set{ y = bar_y }
@@ -333,8 +433,8 @@ function Pad:open(o)
                     local vx, vy = lvgl.indev.get_act():get_vect()
                     if vx == 0 and vy == 0 then return end
                     local b = boxes[i]
-                    b.g.x = clamp(b.g.x + vx, 0, SCREEN_W - b.g.w)
-                    b.g.y = clamp(b.g.y + vy, 0, SCREEN_H - b.g.h)
+                    b.g.x = clamp(b.g.x + vx, 0, sw - b.g.w)
+                    b.g.y = clamp(b.g.y + vy, 0, sh - b.g.h)
                     obj:set{ x = b.g.x, y = b.g.y }
                     touch_override()
                     bar_place()
@@ -348,7 +448,7 @@ function Pad:open(o)
 
         -- ── Control bar ─────────────────────────────────────────────
         bar = abs(c:Object{
-            x = 0, y = 0, w = SCREEN_W, h = BAR_H,
+            x = 0, y = 0, w = sw, h = BAR_H,
             bg_color = "#101010", bg_opa = 230,
             border_width = 0, radius = 0, pad_all = 2,
         })
@@ -371,8 +471,8 @@ function Pad:open(o)
         local function grow(dw, dh)
             if not sel then return end
             local b = boxes[sel]
-            b.g.w = clamp(b.g.w + dw, MIN_SIDE, SCREEN_W - b.g.x)
-            b.g.h = clamp(b.g.h + dh, MIN_SIDE, SCREEN_H - b.g.y)
+            b.g.w = clamp(b.g.w + dw, MIN_SIDE, sw - b.g.x)
+            b.g.h = clamp(b.g.h + dh, MIN_SIDE, sh - b.g.y)
             box_paint(sel)
             touch_override()
             bar_refresh()
@@ -383,8 +483,8 @@ function Pad:open(o)
         local function nudge(dx, dy)
             if not sel then return end
             local b = boxes[sel]
-            b.g.x = clamp(b.g.x + dx, 0, SCREEN_W - b.g.w)
-            b.g.y = clamp(b.g.y + dy, 0, SCREEN_H - b.g.h)
+            b.g.x = clamp(b.g.x + dx, 0, sw - b.g.w)
+            b.g.y = clamp(b.g.y + dy, 0, sh - b.g.h)
             b.obj:set{ x = b.g.x, y = b.g.y }
             touch_override()
             bar_place()
@@ -411,7 +511,7 @@ function Pad:open(o)
                 total = total + it.w
                 if i > 1 then total = total + gap end
             end
-            local x = math.floor((SCREEN_W - total) / 2)
+            local x = math.floor((sw - total) / 2)
             for _, it in ipairs(items) do
                 it.make(x, y)
                 x = x + it.w + gap
@@ -482,20 +582,22 @@ function Pad:open(o)
         end }
         row_center(2, 4, row0)
 
-        -- Rows 1 and 2: move / resize, four thumb-sized steppers each.
+        -- Rows 1 and 2: move / resize, four thumb-sized steppers each, laid
+        -- out for a DESIGN_W bar and centred on a wider one.
+        local bx = math.max(0, math.floor((sw - DESIGN_W) / 2))
         bar:Label{ text = "MOVE", text_font = font, text_color = "#888888",
-                   x = 4, y = 36 }:add_flag(lvgl.FLAG.IGNORE_LAYOUT)
-        bar_btn(48,  30, 64, "<", function() nudge(-NUDGE_STEP, 0) end, true)
-        bar_btn(114, 30, 64, ">", function() nudge(NUDGE_STEP, 0) end, true)
-        bar_btn(180, 30, 64, "^", function() nudge(0, -NUDGE_STEP) end, true)
-        bar_btn(246, 30, 64, "v", function() nudge(0, NUDGE_STEP) end, true)
+                   x = bx + 4, y = 36 }:add_flag(lvgl.FLAG.IGNORE_LAYOUT)
+        bar_btn(bx + 48,  30, 64, "<", function() nudge(-NUDGE_STEP, 0) end, true)
+        bar_btn(bx + 114, 30, 64, ">", function() nudge(NUDGE_STEP, 0) end, true)
+        bar_btn(bx + 180, 30, 64, "^", function() nudge(0, -NUDGE_STEP) end, true)
+        bar_btn(bx + 246, 30, 64, "v", function() nudge(0, NUDGE_STEP) end, true)
 
         bar:Label{ text = "SIZE", text_font = font, text_color = "#888888",
-                   x = 4, y = 64 }:add_flag(lvgl.FLAG.IGNORE_LAYOUT)
-        bar_btn(48,  58, 64, "W-", function() grow(-SIZE_STEP, 0) end, true)
-        bar_btn(114, 58, 64, "W+", function() grow(SIZE_STEP, 0) end, true)
-        bar_btn(180, 58, 64, "H-", function() grow(0, -SIZE_STEP) end, true)
-        bar_btn(246, 58, 64, "H+", function() grow(0, SIZE_STEP) end, true)
+                   x = bx + 4, y = 64 }:add_flag(lvgl.FLAG.IGNORE_LAYOUT)
+        bar_btn(bx + 48,  58, 64, "W-", function() grow(-SIZE_STEP, 0) end, true)
+        bar_btn(bx + 114, 58, 64, "W+", function() grow(SIZE_STEP, 0) end, true)
+        bar_btn(bx + 180, 58, 64, "H-", function() grow(0, -SIZE_STEP) end, true)
+        bar_btn(bx + 246, 58, 64, "H+", function() grow(0, SIZE_STEP) end, true)
 
         build_boxes()
         bar:set{ y = bar_y }

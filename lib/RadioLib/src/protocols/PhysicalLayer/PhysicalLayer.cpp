@@ -2,9 +2,9 @@
 
 #include <string.h>
 
-PhysicalLayer::PhysicalLayer(float step, size_t maxLen) {
-  this->freqStep = step;
-  this->maxPacketLength = maxLen;
+PhysicalLayer::PhysicalLayer() {
+  this->freqStep = 1;
+  this->maxPacketLength = 1;
   #if !RADIOLIB_EXCLUDE_DIRECT_RECEIVE
   this->bufferBitPos = 0;
   this->bufferWritePos = 0;
@@ -51,7 +51,7 @@ int16_t PhysicalLayer::transmit(String& str, uint8_t addr) {
 #endif
 
 int16_t PhysicalLayer::transmit(const char* str, uint8_t addr) {
-  return(transmit((uint8_t*)str, strlen(str), addr));
+  return(transmit(reinterpret_cast<uint8_t*>(const_cast<char*>(str)), strlen(str), addr));
 }
 
 int16_t PhysicalLayer::transmit(const uint8_t* data, size_t len, uint8_t addr) {
@@ -62,7 +62,7 @@ int16_t PhysicalLayer::transmit(const uint8_t* data, size_t len, uint8_t addr) {
 }
 
 #if defined(RADIOLIB_BUILD_ARDUINO)
-int16_t PhysicalLayer::receive(String& str, size_t len) {
+int16_t PhysicalLayer::receive(String& str, size_t len, RadioLibTime_t timeout) {
   int16_t state = RADIOLIB_ERR_NONE;
 
   // user can override the length of data to read
@@ -82,7 +82,7 @@ int16_t PhysicalLayer::receive(String& str, size_t len) {
   #endif
 
   // attempt packet reception
-  state = receive(data, length);
+  state = receive(data, length, timeout);
 
   // any of the following leads to at least some data being available
   // let's leave the decision of whether to keep it or not up to the user
@@ -96,7 +96,7 @@ int16_t PhysicalLayer::receive(String& str, size_t len) {
     data[length] = 0;
 
     // initialize Arduino String class
-    str = String((char*)data);
+    str = String(reinterpret_cast<char*>(data));
   }
 
   // deallocate temporary buffer
@@ -108,9 +108,10 @@ int16_t PhysicalLayer::receive(String& str, size_t len) {
 }
 #endif
 
-int16_t PhysicalLayer::receive(uint8_t* data, size_t len) {
+int16_t PhysicalLayer::receive(uint8_t* data, size_t len, RadioLibTime_t timeout) {
   (void)data;
   (void)len;
+  (void)timeout;
   return(RADIOLIB_ERR_UNSUPPORTED);
 }
 
@@ -132,11 +133,18 @@ int16_t PhysicalLayer::startReceive() {
 }
 
 int16_t PhysicalLayer::startReceive(uint32_t timeout, RadioLibIrqFlags_t irqFlags, RadioLibIrqFlags_t irqMask, size_t len) {
-  (void)timeout;
-  (void)irqFlags;
-  (void)irqMask;
-  (void)len;
-  return(RADIOLIB_ERR_UNSUPPORTED);
+  RadioModeConfig_t cfg = {
+    .receive = {
+      .timeout = timeout,
+      .irqFlags = irqFlags,
+      .irqMask = irqMask,
+      .len = len,
+    }
+  };
+
+  int16_t state = this->stageMode(RADIOLIB_RADIO_MODE_RX, &cfg);
+  RADIOLIB_ASSERT(state);
+  return(this->launchMode());
 }
 
 #if defined(RADIOLIB_BUILD_ARDUINO)
@@ -146,17 +154,28 @@ int16_t PhysicalLayer::startTransmit(String& str, uint8_t addr) {
 #endif
 
 int16_t PhysicalLayer::startTransmit(const char* str, uint8_t addr) {
-  return(startTransmit((uint8_t*)str, strlen(str), addr));
+  return(startTransmit(reinterpret_cast<uint8_t*>(const_cast<char*>(str)), strlen(str), addr));
 }
 
 int16_t PhysicalLayer::startTransmit(const uint8_t* data, size_t len, uint8_t addr) {
-  (void)data;
-  (void)len;
-  (void)addr;
-  return(RADIOLIB_ERR_UNSUPPORTED);
+  RadioModeConfig_t cfg = {
+    .transmit = {
+      .data = data,
+      .len = len,
+      .addr = addr,
+    }
+  };
+
+  int16_t state = this->stageMode(RADIOLIB_RADIO_MODE_TX, &cfg);
+  RADIOLIB_ASSERT(state);
+  return(this->launchMode());
 }
 
 int16_t PhysicalLayer::finishTransmit() {
+  return(RADIOLIB_ERR_UNSUPPORTED);
+}
+
+int16_t PhysicalLayer::finishReceive() {
   return(RADIOLIB_ERR_UNSUPPORTED);
 }
 
@@ -191,7 +210,7 @@ int16_t PhysicalLayer::readData(String& str, size_t len) {
     data[length] = 0;
 
     // initialize Arduino String class
-    str = String((char*)data);
+    str = String(reinterpret_cast<char*>(data));
   }
 
   // deallocate temporary buffer
@@ -270,23 +289,25 @@ int16_t PhysicalLayer::setPreambleLength(size_t len) {
   return(RADIOLIB_ERR_UNSUPPORTED);
 }
 
-int16_t PhysicalLayer::setDataRate(DataRate_t dr) {
+int16_t PhysicalLayer::setDataRate(DataRate_t dr, ModemType_t modem) {
   (void)dr;
+  (void)modem;
   return(RADIOLIB_ERR_UNSUPPORTED);
 }
 
-int16_t PhysicalLayer::checkDataRate(DataRate_t dr) {
+int16_t PhysicalLayer::checkDataRate(DataRate_t dr, ModemType_t modem) {
   (void)dr;
+  (void)modem;
   return(RADIOLIB_ERR_UNSUPPORTED);
-}
-
-float PhysicalLayer::getFreqStep() const {
-  return(this->freqStep);
 }
 
 size_t PhysicalLayer::getPacketLength(bool update) {
   (void)update;
-  return(0);
+  // technically this should be returning some unsigned value, not a negative status code
+  // however, 0 could be misinterpreted in this case
+  // the value of RADIOLIB_ERR_UNSUPPORTED (-25) when converted to 32-bit unsigned int is 4294967271
+  // that is conmfortably out of range for any possible packet length
+  return((size_t)RADIOLIB_ERR_UNSUPPORTED);
 }
 
 float PhysicalLayer::getRSSI() {
@@ -295,6 +316,14 @@ float PhysicalLayer::getRSSI() {
 
 float PhysicalLayer::getSNR() {
   return(RADIOLIB_ERR_UNSUPPORTED);
+}
+
+RadioLibTime_t PhysicalLayer::calculateTimeOnAir(ModemType_t modem, DataRate_t dr, PacketConfig_t pc, size_t len) {
+  (void)modem;
+  (void)dr;
+  (void)pc;
+  (void)len;
+  return(0);
 }
 
 RadioLibTime_t PhysicalLayer::getTimeOnAir(size_t len) {
@@ -324,7 +353,7 @@ int16_t PhysicalLayer::checkIrq(RadioLibIrqType_t irq) {
     return(RADIOLIB_ERR_UNSUPPORTED);
   }
   
-  return(getIrqFlags() & this->irqMap[irq]);
+  return((getIrqFlags() & this->irqMap[irq]) != 0);
 }
 
 int16_t PhysicalLayer::setIrq(RadioLibIrqFlags_t irq) {
@@ -497,10 +526,15 @@ void PhysicalLayer::readBit(uint32_t pin) {
 
 #endif
 
-int16_t PhysicalLayer::setDIOMapping(uint32_t pin, uint32_t value) {
-  (void)pin;
-  (void)value;
-  return(RADIOLIB_ERR_UNSUPPORTED);
+void PhysicalLayer::setIrqAction(void (*func)(void), bool rising) {
+  Module* mod = getMod();
+  mod->hal->attachInterrupt(mod->hal->pinToInterrupt(mod->getIrq()), func, 
+    rising ? mod->hal->GpioInterruptRising : mod->hal->GpioInterruptFalling);
+}
+
+void PhysicalLayer::clearIrqAction() {
+  Module* mod = getMod();
+  mod->hal->detachInterrupt(mod->hal->pinToInterrupt(mod->getIrq()));
 }
 
 void PhysicalLayer::setPacketReceivedAction(void (*func)(void)) {
@@ -537,6 +571,16 @@ int16_t PhysicalLayer::getModem(ModemType_t* modem) {
   return(RADIOLIB_ERR_UNSUPPORTED);
 }
 
+int16_t PhysicalLayer::stageMode(RadioModeType_t mode, RadioModeConfig_t* cfg) {
+  (void)mode;
+  (void)cfg;
+  return(RADIOLIB_ERR_UNSUPPORTED);
+}
+
+int16_t PhysicalLayer::launchMode() {
+  return(RADIOLIB_ERR_UNSUPPORTED);
+}
+
 #if RADIOLIB_INTERRUPT_TIMING
 void PhysicalLayer::setInterruptSetup(void (*func)(uint32_t)) {
   Module* mod = getMod();
@@ -548,3 +592,53 @@ void PhysicalLayer::setTimerFlag() {
   mod->TimerFlag = true;
 }
 #endif
+
+int16_t PhysicalLayer::calculateRxDutyCycle(size_t txPreLen, size_t rxPreLen, uint16_t minSymbols, DataRate_t* dr, uint32_t* wakePeriod, uint32_t* sleepPeriod) {
+  RADIOLIB_ASSERT_PTR(dr);
+  RADIOLIB_ASSERT_PTR(wakePeriod);
+  RADIOLIB_ASSERT_PTR(sleepPeriod);
+  
+  uint16_t senderPreambleLength = txPreLen;
+  if(senderPreambleLength == 0) {
+    senderPreambleLength = rxPreLen;
+  } else if(senderPreambleLength > rxPreLen) {
+    // the unit must be configured to expect a preamble length at least as long as the sender is using
+    return(RADIOLIB_ERR_INVALID_PREAMBLE_LENGTH);
+  }
+  if(minSymbols == 0) {
+    if(dr->lora.spreadingFactor <= 6) {
+      minSymbols = 12;
+    } else {
+      minSymbols = 8;
+    }
+  }
+
+  // if we're not to sleep at all, just use the standard startReceive
+  if(2 * minSymbols > senderPreambleLength) {
+    *sleepPeriod = 0;
+    RADIOLIB_DEBUG_BASIC_PRINTLN("Auto sleep period too short");
+    return(RADIOLIB_ERR_NONE);
+  }
+
+  // worst case is that the sender starts transmitting when we're just less than minSymbols from going back to sleep.
+  // in this case, we don't catch minSymbols before going to sleep,
+  // so we must be awake for at least that long before the sender stops transmitting.
+  uint16_t sleepSymbols = senderPreambleLength - 2 * minSymbols;
+
+  uint32_t symbolLength = ((uint32_t)(10 * 1000) << dr->lora.spreadingFactor) / (10 * dr->lora.bandwidth);
+  *sleepPeriod = symbolLength * sleepSymbols;
+  RADIOLIB_DEBUG_BASIC_PRINTLN("Auto sleep period: %lu", (long unsigned int)*sleepPeriod);
+
+  // when the unit detects a preamble, it starts a timer that will timeout if it doesn't receive a header in time.
+  // the duration is sleepPeriod + 2 * wakePeriod.
+  // The sleepPeriod doesn't take into account shutdown and startup time for the unit (~1ms)
+  // We need to ensure that the timeout is longer than senderPreambleLength.
+  // So we must satisfy: wakePeriod > (preamblePeriod - (sleepPeriod - 1000)) / 2. (A)
+  // we also need to ensure the unit is awake to see at least minSymbols. (B)
+  *wakePeriod = RADIOLIB_MAX(
+    (symbolLength * (senderPreambleLength + 1) - (*sleepPeriod - 1000)) / 2, // (A)
+    symbolLength * (minSymbols + 1)); //(B)
+  RADIOLIB_DEBUG_BASIC_PRINTLN("Auto wake period: %lu", (long unsigned int)*wakePeriod);
+
+  return(RADIOLIB_ERR_NONE);
+}

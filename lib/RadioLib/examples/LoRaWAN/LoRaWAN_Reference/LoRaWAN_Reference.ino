@@ -42,17 +42,23 @@ void setup() {
   int16_t state = 0;  // return value for calls to RadioLib
 
   Serial.println(F("Initialise the radio"));
-  state = radio.begin();
+  ConfigLoRa_t config;
+  config.frequency = 868; // The frequency here does not matter, as it will get changed by LoRaWAN anyway
+  //radio.tcxoVoltage = 1.6; // Some radio modules like SX126x often come with TCXO
+  state = radio.begin(config);
   debug(state != RADIOLIB_ERR_NONE, F("Initialise radio failed"), state, true);
-
-  // Override the default join rate
-  uint8_t joinDR = 4;
-
+  
+  // Optionally provide a custom sleep function - see config.h
+  //node.setSleepFunction(customDelay);
+  
   // Setup the OTAA session information
   node.beginOTAA(joinEUI, devEUI, nwkKey, appKey);
 
+  // Override the default join rate
+  node.setDatarate(4);
+
   Serial.println(F("Join ('login') the LoRaWAN Network"));
-  state = node.activateOTAA(joinDR);
+  state = node.activateOTAA();
   debug(state != RADIOLIB_LORAWAN_NEW_SESSION, F("Join failed"), state, true);
 
   // Print the DevAddr
@@ -68,7 +74,7 @@ void setup() {
   // Manages uplink intervals to the TTN Fair Use Policy
   node.setDutyCycle(true, 1250);
 
-  // Enable the dwell time limits - 400ms is the limit for the US
+  // Update dwell time limits - 400ms is the limit for the US
   node.setDwellTime(true, 400);
 
   Serial.println(F("Ready!\n"));
@@ -175,13 +181,14 @@ void loop() {
       Serial.println(gwCnt);
     }
 
-    uint32_t networkTime = 0;
-    uint8_t fracSecond = 0;
-    if(node.getMacDeviceTimeAns(&networkTime, &fracSecond, true) == RADIOLIB_ERR_NONE) {
+    uint32_t timestamp = 0;
+    uint16_t milliseconds = 0;
+    if(node.getMacDeviceTimeAns(&timestamp, &milliseconds, true) == RADIOLIB_ERR_NONE) {
       Serial.print(F("[LoRaWAN] DeviceTime Unix:\t"));
-      Serial.println(networkTime);
-      Serial.print(F("[LoRaWAN] DeviceTime second:\t1/"));
-      Serial.println(fracSecond);
+      Serial.println(timestamp);
+      Serial.print(F("[LoRaWAN] DeviceTime frac:\t"));
+      Serial.print(milliseconds);
+      Serial.println(F(" ms"));
     }
   
   } else {

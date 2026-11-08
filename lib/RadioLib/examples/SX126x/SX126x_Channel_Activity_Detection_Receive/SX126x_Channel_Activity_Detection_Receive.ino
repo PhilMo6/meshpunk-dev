@@ -35,12 +35,37 @@ SX1262 radio = new Module(10, 2, 3, 9);
 Radio radio = new RadioModule();
 */
 
+// whether we are receiving, or scanning
+bool receiving = false;
+
+// flag to indicate that a packet was detected or CAD timed out
+volatile bool scanFlag = false;
+
+// this function is called when a complete packet
+// is received by the module
+// IMPORTANT: this function MUST be 'void' type
+//            and MUST NOT have any arguments!
+#if defined(ESP8266) || defined(ESP32)
+  ICACHE_RAM_ATTR
+#endif
+void setFlag(void) {
+  // something happened, set the flag
+  scanFlag = true;
+}
+
 void setup() {
   Serial.begin(9600);
 
-  // initialize SX1262 with default settings
+  // before calling begin(), correct crystal has to be selected
+  // most SX126x have a TCXO which needs 1.6V reference
+  // set to 0 if your radio has an XTAL
+  radio.tcxoVoltage = 1.6;
+
+  // initialize SX1262 at 434 MHz
   Serial.print(F("[SX1262] Initializing ... "));
-  int state = radio.begin();
+  ConfigLoRa_t config;
+  config.frequency = 434;
+  int state = radio.begin(config);
   if (state == RADIOLIB_ERR_NONE) {
     Serial.println(F("success!"));
   } else {
@@ -62,23 +87,6 @@ void setup() {
     Serial.print(F("failed, code "));
     Serial.println(state);
   }
-}
-
-// flag to indicate that a packet was detected or CAD timed out
-volatile bool scanFlag = false;
-
-bool receiving = false;
-
-// this function is called when a complete packet
-// is received by the module
-// IMPORTANT: this function MUST be 'void' type
-//            and MUST NOT have any arguments!
-#if defined(ESP8266) || defined(ESP32)
-  ICACHE_RAM_ATTR
-#endif
-void setFlag(void) {
-  // something happened, set the flag
-  scanFlag = true;
 }
 
 void loop() {

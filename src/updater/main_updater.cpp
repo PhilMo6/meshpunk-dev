@@ -345,7 +345,7 @@ static const char* verify_image(fs::File& f, uint32_t expect_size, const String&
 
   mbedtls_sha256_context ctx;
   mbedtls_sha256_init(&ctx);
-  mbedtls_sha256_starts_ret(&ctx, 0);
+  mbedtls_sha256_starts(&ctx, 0);
   if (!f.seek(0)) {
     mbedtls_sha256_free(&ctx);
     return "seek failed";
@@ -359,12 +359,12 @@ static const char* verify_image(fs::File& f, uint32_t expect_size, const String&
       mbedtls_sha256_free(&ctx);
       return "read failed while hashing";
     }
-    mbedtls_sha256_update_ret(&ctx, s_buf, want);
+    mbedtls_sha256_update(&ctx, s_buf, want);
     ota_tag_scan_feed(tag, s_buf, want);
     left -= want;
   }
   uint8_t calc[32];
-  mbedtls_sha256_finish_ret(&ctx, calc);
+  mbedtls_sha256_finish(&ctx, calc);
   mbedtls_sha256_free(&ctx);
   ota_tag_scan_finish(tag);
 

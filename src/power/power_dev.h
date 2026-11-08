@@ -19,8 +19,10 @@ void power_dev_init(void);
 uint16_t power_dev_battery_mv(void);
 
 // Board tail of the power-off path: park board-specific peripherals/rails,
-// arm the wake button (GPIO0 on both boards, active LOW), enter deep sleep.
+// arm the wake button (GPIO0 on the S3 boards, active LOW), enter deep sleep.
 // Never returns; waking is a full reboot (reset reason ESP_RST_DEEPSLEEP).
+// T-Display P4: its button (GPIO35) cannot wake deep sleep, so it light-
+// sleeps with GPIO35 armed and restarts on a press (reset reason ESP_RST_SW).
 // The device-neutral teardown (store flush, radio off, BLE/WiFi stop, SD
 // unmount) is system_shutdown() in main.cpp and has already run.
 // power_dev_init() must release this path's RTC holds on the wake boot.
@@ -33,6 +35,18 @@ void power_dev_shutdown(void);
 // with no power control. Heltec: VGNSS rail off/on (GPS).
 void power_dev_standby_enter(void);
 void power_dev_standby_exit(void);
+
+// Per-sleep standby wake hooks, called by standby_run() under MESH_LOCK
+// around each esp_light_sleep_start(), after the shared code armed the BOOT
+// button and (on boards wiring it to a GPIO, PIN_LORA_DIO1 >= 0) DIO1.
+// `radio` = a radio is running and armed in RX. arm() returns false when a
+// received packet is already signalled: that round does not sleep, so the
+// mesh task drains it first. T-Display P4: DIO1 is an expander input, so
+// arm() reads the expander's input ports (releasing its INT line) and arms
+// INT (GPIO5) as a level-LOW wake; disarm() disarms it. Other boards:
+// arm() returns true, both do nothing.
+bool power_dev_standby_arm(bool radio);
+void power_dev_standby_disarm(bool radio);
 
 // USB host port power. usb_core calls begin() when host mode starts, tick()
 // from its task loop while host mode runs, and end() when host mode stops.

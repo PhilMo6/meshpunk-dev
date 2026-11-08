@@ -9,16 +9,40 @@
 #  - -lm -lgcc STATIC: floor() (frequency slots) + compiler float helpers
 #    link in; the UND audit below must then show ONLY proto_exports[] symbols
 #    (src/elf_host.cpp): libc string/stdio, rand/srand, the mesh_* crypto seam
+#
+# -Arch s3 (default) builds the Xtensa artifact for the S3 boards; -Arch rv32
+# builds mtlite.loraproto.rv32.elf for the T-Display P4 (the meshcore
+# module's pattern): the riscv32-esp toolchain, the P4 firmware's ISA and
+# float ABI (rv32imafc, ilp32f), -mno-relax, and no -lm/-lgcc: the
+# toolchain's libgcc.a/libm.a are not position-independent, so every
+# builtin and math function comes from proto_exports[].
+param(
+    [ValidateSet("s3", "rv32")]
+    [string]$Arch = "s3"
+)
 
-$toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
-$CXX     = "$toolchain\xtensa-esp32s3-elf-g++.exe"
-$READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
+if ($Arch -eq "rv32") {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-riscv32-esp\bin"
+    $CXX     = "$toolchain\riscv32-esp-elf-g++.exe"
+    $READELF = "$toolchain\riscv32-esp-elf-readelf.exe"
+    $ARCH_EXT = ".rv32.elf"
+    $ARCH_CFLAGS = @("-march=rv32imafc_zicsr_zifencei", "-mabi=ilp32f", "-mno-relax")
+    $LIBS = @()
+} else {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
+    $CXX     = "$toolchain\xtensa-esp32s3-elf-g++.exe"
+    $READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
+    $ARCH_EXT = ".elf"
+    $ARCH_CFLAGS = @("-mlongcalls")
+    $LIBS = @("-lm", "-lgcc")
+}
 
 $SRC = "mtlite.cpp"
-$OUT = "mtlite.loraproto.elf"
+$OUT = "mtlite.loraproto$ARCH_EXT"
 
 $FLAGS = @(
-    "-shared", "-fPIC", "-fno-common", "-Os", "-mlongcalls",
+    "-shared", "-fPIC", "-fno-common", "-Os"
+) + $ARCH_CFLAGS + @(
     "-ffunction-sections", "-fdata-sections",
     "-fno-rtti", "-fno-exceptions", "-std=gnu++17",
     "-I.",
@@ -31,7 +55,7 @@ $FLAGS = @(
 )
 
 Write-Host "  CXX  $SRC -> $OUT"
-& $CXX @FLAGS -o $OUT $SRC "-lm" "-lgcc"
+& $CXX @FLAGS -o $OUT $SRC @LIBS
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Compilation failed!"
     exit 1
@@ -53,6 +77,12 @@ if (-not $tbl.Success) {
 $exported = @{}
 foreach ($em in [regex]::Matches($tbl.Groups[1].Value, '\{\s*"([^"]+)"')) {
     $exported[$em.Groups[1].Value] = $true
+}
+# Entries whose linkage name differs per architecture: U32_MANGLED(xtensa, riscv)
+# in src/elf_host.cpp (uint32_t mangles as 'j' on Xtensa, 'm' on RISC-V).
+$grp = if ($Arch -eq "rv32") { 2 } else { 1 }
+foreach ($em in [regex]::Matches($tbl.Groups[1].Value, 'U32_MANGLED\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)')) {
+    $exported[$em.Groups[$grp].Value] = $true
 }
 
 $missing = @()

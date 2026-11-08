@@ -458,4 +458,8 @@ void power_dev_standby_exit(void) {
   wio_l2_exp_set(WIO_L2_EXP_AUDIO_PA, true);
 }
 
+// DIO1 is a GPIO here (GPIO9): the shared standby code arms it.
+bool power_dev_standby_arm(bool radio) { (void)radio; return true; }
+void power_dev_standby_disarm(bool radio) { (void)radio; }
+
 #endif // BOARD_WIO_L2

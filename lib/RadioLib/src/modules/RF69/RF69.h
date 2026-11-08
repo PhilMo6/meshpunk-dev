@@ -12,7 +12,7 @@
 // RF69 physical layer properties
 #define RADIOLIB_RF69_FREQUENCY_STEP_SIZE                       61.03515625
 #define RADIOLIB_RF69_MAX_PACKET_LENGTH                         64
-#define RADIOLIB_RF69_CRYSTAL_FREQ                              32.0
+#define RADIOLIB_RF69_CRYSTAL_FREQ                              32.0f
 #define RADIOLIB_RF69_DIV_EXPONENT                              19
 
 // RF69 register map
@@ -483,6 +483,7 @@ class RF69: public PhysicalLayer {
     using PhysicalLayer::receive;
     using PhysicalLayer::startTransmit;
     using PhysicalLayer::readData;
+    using PhysicalLayer::setSyncWord;
 
     /*!
       \brief Default constructor.
@@ -493,6 +494,16 @@ class RF69: public PhysicalLayer {
     // basic methods
 
     /*!
+      \brief Initialization method for FSK modem.
+      \param config Initialization configuration.
+      \details This method initializes the FSK modem with the specified configuration.
+      Supports designated initializers when using C++14 or above.
+      \returns \ref status_codes
+    */
+    int16_t begin(const ConfigFSK_t& config);
+
+    /*!
+      \deprecated Use \ref begin(const ConfigFSK_t& config) instead.
       \brief Initialization method.
       \param freq Carrier frequency in MHz. Defaults to 434.0 MHz.
       \param br Bit rate to be used in kbps. Defaults to 4.8 kbps.
@@ -528,11 +539,13 @@ class RF69: public PhysicalLayer {
     /*!
       \brief Blocking binary receive method.
       Overloads for string-based transmissions are implemented in PhysicalLayer.
-      \param data Binary data to be sent.
-      \param len Number of bytes to send.
+      \param data Pointer to array to save the received binary data.
+      \param len Number of bytes that will be received. Must be known in advance for binary transmissions.
+      \param timeout Reception timeout in milliseconds. If set to 0,
+      timeout period will be calculated automatically based on the radio configuration.
       \returns \ref status_codes
     */
-    int16_t receive(uint8_t* data, size_t len) override;
+    int16_t receive(uint8_t* data, size_t len, RadioLibTime_t timeout = 0) override;
 
     /*!
       \brief Sets the module to sleep mode.
@@ -577,7 +590,7 @@ class RF69: public PhysicalLayer {
       \brief Sets AES key.
       \param key Key to be used for AES encryption. Must be exactly 16 bytes long.
     */
-    void setAESKey(uint8_t* key);
+    void setAESKey(const uint8_t* key);
 
     /*!
       \brief Enables AES encryption.
@@ -647,6 +660,14 @@ class RF69: public PhysicalLayer {
       \brief Clears interrupt service routine to call when  FIFO is empty.
     */
     void clearFifoEmptyAction();
+
+    /*!
+      \brief Set FIFO threshold level.
+      Be aware that threshold is also set in setFifoFullAction method.
+      setFifoThreshold method must be called AFTER calling setFifoFullAction!
+      \param threshold Threshold level in bytes.
+    */
+    void setFifoThreshold(uint8_t threshold);
 
     /*!
       \brief Set interrupt service routine function to call when FIFO is full.
@@ -719,6 +740,12 @@ class RF69: public PhysicalLayer {
     */
     int16_t readData(uint8_t* data, size_t len) override;
 
+    /*!
+      \brief Clean up after reception is done.
+      \returns \ref status_codes
+    */
+    int16_t finishReceive() override;
+
     // configuration methods
 
     /*!
@@ -768,27 +795,45 @@ class RF69: public PhysicalLayer {
     /*!
       \brief Sets output power. Allowed values range from -18 to 13 dBm for
       low power modules (RF69C/CW) or -2 to 20 dBm (RF69H/HC/HCW).
+      Doest not force high power mode; for modules using high power port,
+      use RF69::setOutputPower(pwr, true)
       \param pwr Output power to be set in dBm.
-      \param highPower Set to true when using modules high power port (RF69H/HC/HCW).
-      Defaults to false (models without high power port - RF69C/CW).
       \returns \ref status_codes
     */
-    int16_t setOutputPower(int8_t pwr, bool highPower = false);
+    int16_t setOutputPower(int8_t pwr) override;
+
+    /*!
+      \brief Sets output power. Allowed values range from -18 to 13 dBm for
+      low power modules (RF69C/CW) or -2 to 20 dBm (RF69H/HC/HCW).
+      \param pwr Output power to be set in dBm.
+      \param highPower Set to true when using modules high power port (RF69H/HC/HCW),
+      or to false for models without high power port - RF69C/CW.
+      \returns \ref status_codes
+    */
+    int16_t setOutputPower(int8_t pwr, bool highPower);
+
+    /*!
+      \brief Sets sync word. Up to 8 bytes can be set as sync word.
+      Override for PhysicalLayer compatibility, with maximum error bits set to 0.
+      \param syncWord Pointer to the array of sync word bytes.
+      \param len Sync word length in bytes.
+    */
+    int16_t setSyncWord(uint8_t* syncWord, size_t len) override;
 
     /*!
       \brief Sets sync word. Up to 8 bytes can be set as sync word.
       \param syncWord Pointer to the array of sync word bytes.
       \param len Sync word length in bytes.
-      \param maxErrBits Maximum allowed number of bit errors in received sync word. Defaults to 0.
+      \param maxErrBits Maximum allowed number of bit errors in received sync word.
     */
-    int16_t setSyncWord(uint8_t* syncWord, size_t len, uint8_t maxErrBits = 0);
+    int16_t setSyncWord(uint8_t* syncWord, size_t len, uint8_t maxErrBits);
 
     /*!
       \brief Sets preamble length.
       \param preambleLen Preamble length to be set (in bits), allowed values: 16, 24, 32, 48, 64, 96, 128 and 192.
       \returns \ref status_codes
     */
-    int16_t setPreambleLength(uint8_t preambleLen);
+    int16_t setPreambleLength(size_t preambleLen) override;
 
     /*!
       \brief Sets node address. Calling this method will also enable address filtering for node address only.
@@ -941,7 +986,7 @@ class RF69: public PhysicalLayer {
     int16_t setLnaTestBoost(bool value);
 
     /*!
-      \brief Gets RSSI (Recorded Signal Strength Indicator) of the last received packet.
+      \brief Gets RSSI (Received Signal Strength Indicator) of the last received packet.
       \returns Last packet RSSI in dBm.
     */
     float getRSSI() override;
@@ -991,7 +1036,7 @@ class RF69: public PhysicalLayer {
       \param value The value that indicates which function to place on that pin. See chip datasheet for details.
       \returns \ref status_codes
     */
-    int16_t setDIOMapping(uint32_t pin, uint32_t value) override;
+    int16_t setDIOMapping(uint32_t pin, uint32_t value);
 
 #if !RADIOLIB_GODMODE && !RADIOLIB_LOW_LEVEL
   protected:
@@ -1022,8 +1067,6 @@ class RF69: public PhysicalLayer {
     uint8_t packetLengthConfig = RADIOLIB_RF69_PACKET_FORMAT_VARIABLE;
 
     bool promiscuous = false;
-
-    uint8_t syncWordLength = RADIOLIB_RF69_DEFAULT_SW_LEN;
 
     bool bitSync = true;
 

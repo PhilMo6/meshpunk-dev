@@ -1,8 +1,15 @@
 import os
 import struct
 import subprocess
+import sys
 import zlib
 Import("env")
+
+# The per-board shipping filter (data_filter.py at the project root): the
+# pack carries only the files this board ships — the other architecture's
+# module artifacts stay out of the S3 release image.
+sys.path.insert(0, env.subst("$PROJECT_DIR"))
+import data_filter
 
 # Packs data/ into pack/data_pack.bin for embedding into the release app image
 # (board_build.embed_files). The firmware extracts it into LittleFS on first
@@ -49,13 +56,22 @@ def build_pack(source, target, env):
     # interrupted extractions retry. Always stored raw so the firmware can
     # memcmp it without inflating.
     files = [("/.pack_version", git_version(project_dir).encode("utf-8"))]
+    arch  = data_filter.arch_of(env.BoardConfig().get("build.mcu", ""))
+    board = env.get("BOARD", "")
+    skipped = 0
     for root, dirs, names in os.walk(data_dir):
         dirs.sort()
         for name in sorted(names):
             full = os.path.join(root, name)
             rel = "/" + os.path.relpath(full, data_dir).replace(os.sep, "/")
+            if not data_filter.ships(rel, arch, board):
+                skipped += 1
+                continue
             with open(full, "rb") as f:
                 files.append((rel, f.read()))
+    if skipped:
+        print("make_data_pack: %s/%s skips %d file(s) the board does not ship"
+              % (board, arch, skipped))
 
     index_size = 0
     for rel, _ in files:

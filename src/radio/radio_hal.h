@@ -3,10 +3,13 @@
 #include <stdint.h>
 
 // ── Radio HAL ────────────────────────────────────────────────────────────────
-// The ONE access path to the SX1262, whichever LoRa protocol is active:
+// The ONE access path to the LoRa chip, whichever LoRa protocol is active:
 // bring-up, parameter programming, and the raw polled TX/RX primitives.
 // Protocol modules call these through the MeshHostApi table. Every call
-// takes SPI_LOCK (the bus is shared with TFT + SD on the T-Deck).
+// takes SPI_LOCK (the bus is shared with TFT + SD on the T-Deck). The chip
+// itself sits behind a RadioChip adapter (radio_chip.h): the SX1262 on the
+// S3 boards and the T-Display P4's SX1262 SKU, the LR2021 on the P4's
+// other SKU — IRQ snapshots are always in SX126x bit positions.
 //
 // This header is MeshCore-free on purpose: protocol modules compile against
 // it (via the MeshHostApi function table), and the record of what the chip
@@ -31,13 +34,16 @@ struct RadioParams {
 #define RADIO_HAL_SYNC_WORD_DEFAULT 0x12
 #define RADIO_HAL_PREAMBLE_DEFAULT  8
 
-// Bind the HAL to the radio object (constructed in main.cpp). Call once in
+// Bind the HAL to the SX1262 object (constructed in main.cpp). Call once in
 // setup() before radio_hal_begin().
 void radio_hal_init(SX1262* radio);
 
-// Chip bring-up: radio.begin() plus per-board module wiring (Heltec V4:
-// 1.8V TCXO on DIO3, DIO2 as RF switch, 140mA current limit). Returns false
-// if begin() failed (logged either way).
+// Chip bring-up: the adapter's begin() (RadioLib begin() plus the board's
+// module wiring — Heltec V4: 1.8V TCXO on DIO3, DIO2 as RF switch, 140mA
+// current limit; Wio L2: the same at 3.0 V). On the T-Display P4 the LR2021
+// is tried first and the SX1262 when no LR2021 answers (the two SKUs).
+// Returns false if begin() failed (logged either way); the chip is then not
+// driven at all.
 bool radio_hal_begin();
 
 // Program all RF parameters. Logs each RadioLib result; returns true only if
@@ -71,6 +77,21 @@ bool     radio_hal_set_tx_power(int8_t radiated_dbm);
 // for the operating band + board wiring/rx-boost re-apply. Leaves standby —
 // the caller re-enters RX.
 void     radio_hal_reset_agc();
+
+// ── Antenna switch (boards with one) ─────────────────────────────────────────
+// T-Display P4: SKY13453 VCTL on expander IO1, 1 = the internal antenna, 0 =
+// the MMCX connector (LilyGo v1 driver SetSky13453RfSwitch). Boards without
+// a switch: antenna_switch() false, antenna_external() false, set_antenna()
+// refused. The selection is the firmware pref antenna=internal|external
+// (main.cpp): antenna_select() records the loaded pref, radio_hal_begin()
+// writes it before the chip comes up, set_antenna() writes a change at once.
+bool        radio_hal_antenna_switch();        // the board has a switch
+bool        radio_hal_antenna_external();      // current selection
+void        radio_hal_antenna_select(bool external);
+// Select the antenna now. Returns nullptr when done, otherwise the reason it
+// was not: no switch on this board, a transmission still on the air after a
+// bounded wait (the PA must not see the switch move), or a failed write.
+const char* radio_hal_set_antenna(bool external);
 
 // ── Boot protocol selector ───────────────────────────────────────────────────
 // `requested` is the persisted user choice (firmware_prefs lora_protocol=...);

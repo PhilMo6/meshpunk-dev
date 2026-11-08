@@ -18,6 +18,7 @@ Join the MeshPunk Discord: https://discord.gg/cmJKV5gEdP
 | --- | --- | --- |
 | LilyGo T-Deck | `meshpunk` | Keyboard, trackball, touchscreen |
 | Heltec V4 + Expansion Kit V2 | `meshpunk_heltec` | Touchscreen only |
+| Seeed Wio Tracker L2 | `meshpunk_wio_l2` | Touchscreen, WAKE button |
 
 Device-specific code lives behind a per-subsystem backend (`src/input`,
 `src/display`, `src/audio`, `src/power`, `src/gps`), so the rest of the
@@ -61,11 +62,13 @@ your hardware.
 - File manager (Tools > Files) for both internal flash and SD
 - App Library — browse and install apps and themes straight from GitHub over WiFi, and update the ones you already have, no reflash needed
 - On-device firmware updates (Settings > Firmware) — install new releases over WiFi or from the SD card, no computer needed; see [Updating on the device](#updating-on-the-device)
+- Flasher app (Tools > Flasher) — flash ESP32 firmware onto another device over a USB cable, from the device itself: MeshPunk, MeshCore, Meshtastic or any image, with partition backup and restore
+- Display orientation (Settings > Device) — landscape or portrait, a quarter turn at a time; the apps follow
 
 
 ## Installation 
 
-1. Download the release file you want to install from the release page. **Releases are built per device — the filenames carry the board name** (`meshpunk-tdeck-<version>-…` / `meshpunk-heltec_v4-<version>-…`); a build for the wrong board will not run correctly.
+1. Download the release file you want to install from the release page. **Releases are built per device — the filenames carry the board name** (`meshpunk-tdeck-<version>-…` / `meshpunk-heltec_v4-<version>-…` / `meshpunk-wio_l2-<version>-…`); a build for the wrong board will not run correctly.
 - For a first-time install download the -merged.bin file
 - For updates you no longer need a computer: Settings > Firmware on the device checks GitHub over WiFi and installs the new release, or installs a -firmware.bin copied to the SD card (see "Updating on the device" below). Flashing the -firmware.bin here works too: it updates the firmware AND refreshes MeshPunk's bundled files automatically on the next boot (your settings and messages are kept)
 2. Go to https://meshcore.io/flasher scroll to bottom and click on Custom Firmware
@@ -112,6 +115,7 @@ Settings > Firmware updates MeshPunk without a computer:
 - The updater has its own screen: it shows the job, verifies the file again, draws a progress bar while writing, and restarts when done. Do not power off while it writes; if that happens anyway, it simply runs the same job again on the next start.
 - Only releases from the one that introduced the updater onward can be installed this way. Each image carries a board tag, and the page refuses files built for the other board or from before the tag existed. Older releases still flash by USB.
 - Devices installed through the Launcher update through the Launcher instead; the page says so and offers nothing there.
+- Channel: the Firmware page checks the stable releases by default. Switching its Channel to dev checks the development repo's `-devN` builds instead, which are unreleased and expected to be rough. Switching back to stable offers the newest stable release as "Switch to" — the way back from a dev build.
 
 ## Using with the Launcher (optional, T-Deck and Wio Tracker L2)
 
@@ -236,6 +240,8 @@ Apps are grouped by category; when an installed app or theme is behind the catal
 
 System apps (App Library, Files, Map, Messenger, and the Settings pages) are non-removable, but can still be updated.
 
+Entries built for other hardware — another chip, or a feature this device lacks (a microphone, say) — are kept out of the lists; each category ends with an **N more for other devices** row that shows them greyed, with the reason. Emulators ship one build per CPU (ESP32-S3 and the T-Display P4's RISC-V) and the device downloads only its own; a game folder moved in on a card from another device shows an Update that adds this device's build.
+
 ## Project Structure
 
 - `/src` - Main C++ code
@@ -247,7 +253,7 @@ System apps (App Library, Files, Map, Messenger, and the Settings pages) are non
 ## Requirements for Development
 
 - PlatformIO
-- A supported device (T-Deck or Heltec V4 + Expansion Kit)
+- A supported device (T-Deck, Heltec V4 + Expansion Kit, or Wio Tracker L2)
 - Git (for submodules)
 
 ## Building and Development
@@ -265,6 +271,7 @@ System apps (App Library, Files, Map, Messenger, and the Settings pages) are non
    ```
    pio run --target upload                    # T-Deck
    pio run -e meshpunk_heltec --target upload # Heltec V4
+   pio run -e meshpunk_wio_l2 --target upload # Wio Tracker L2
    ```
    This will upload only the firmware, not the filesystem data.
    Once per device, also upload the updater firmware that lives in its own
@@ -273,11 +280,13 @@ System apps (App Library, Files, Map, Messenger, and the Settings pages) are non
    ```
    pio run -e meshpunk_updater --target upload        # T-Deck
    pio run -e meshpunk_heltec_updater --target upload # Heltec V4
+   pio run -e meshpunk_wio_l2_updater --target upload # Wio Tracker L2
    ```
 6. To upload the filesystem data (when changing lua scripts)
    ```
    pio run --target uploadfs
    pio run -e meshpunk_heltec --target uploadfs
+   pio run -e meshpunk_wio_l2 --target uploadfs
    ```
 7. To build release artifacts (written to `releases/`): the release envs embed
    the `data/` tree into the app so the published binaries are self-contained
@@ -321,7 +330,7 @@ Boards without a keyboard get both, built into the firmware:
 - **On-screen keyboard** — opens when a text field is focused; it is the text entry path in apps and in native games alike
 - **On-screen game pad** — native games (Doom, GameBoy, DOS, the emulators) draw a button layout over the game, rendered outline-and-label only so the game stays visible behind it
 
-One control cycles the on-screen input through pad → pad hidden → keyboard → off: the **IO button** on the Heltec, or **Shift+Alt** on a board with a keyboard. The **Touch input** row in Settings → Device does the same cycle — the way in for legacy T-Deck keyboards, which report no modifiers and so cannot chord. A board with a keyboard boots with all of it off; a keyboardless board boots with the pad on.
+One control cycles the on-screen input through pad → pad hidden → keyboard → off: the **IO button** on the Heltec, the **WAKE button** on the Wio Tracker L2, or **Shift+Alt** on a board with a keyboard. The **Touch input** row in Settings → Device does the same cycle — the way in for legacy T-Deck keyboards, which report no modifiers and so cannot chord. A board with a keyboard boots with all of it off; a keyboardless board boots with the pad on.
 
 **Quitting a native game** — any of: hold `Alt`+`Backspace` ~1.5s (needs a keyboard), hold the on-screen **QUIT** button ~1s, or a key bound to quit in the launcher's Controls screen.
 
@@ -423,6 +432,7 @@ MIT
 - LVGL: https://lvgl.io/
 - LilyGo for the T-Deck hardware
 - Heltec for the WiFi LoRa 32 V4 hardware and Expansion Kit
+- Seeed Studio for the Wio Tracker L2 hardware
 - MTLite's Meshtastic-compatible wire protocol via meshtastic-lite by jstockdale (Off by One) https://github.com/jstockdale/meshtastic-lite (BSD-3-Clause)
 - Emojis from https://github.com/googlefonts/noto-emoji
 - Emoji converted to .bin with ImageMagick

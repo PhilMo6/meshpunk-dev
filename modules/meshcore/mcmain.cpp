@@ -52,6 +52,10 @@ class McPolledRadio : public mesh::Radio {
 public:
     void setSpreadingFactor(uint8_t sf) { _sf = sf; }
 
+    // The chip was put in standby outside the transitions below
+    // (mc_apply_radio_params): the next recvRaw() restarts receive.
+    void onStandby() { _in_recv = false; }
+
     void begin() override {
         _noise_floor = 0;
         _threshold = 0;
@@ -211,10 +215,16 @@ BleCompanionIface* ble_companion = nullptr;
 static StdRNG          fast_rng;
 static SimpleMeshTables tables;
 
-// RadioLib begin() defaults, programmed explicitly by the host HAL
-// (RADIO_HAL_SYNC_WORD_DEFAULT/PREAMBLE — values are the wire contract).
+// The MeshCore wire contract, programmed by the host HAL. Sync word 0x12
+// (RadioLib's private-network value). Preamble 16 symbols: stock MeshCore
+// transmits 16 (lib/MeshCore helpers/radiolib CustomSX1262.h / CustomSX1268.h
+// / CustomLLCC68.h std_init: begin(..., LORA_TX_POWER, 16, tcxo)), and an
+// LR20xx receiver needs the programmed preamble to match the transmitter's
+// (LR20xx datasheet rev 2.2 section 9.2.1): with 8 the T-Display P4's
+// LR2021 decoded 1 of 163 frames from two stock-MeshCore repeaters, with 16
+// 127 of 130.
 #define MC_SYNC_WORD    0x12
-#define MC_PREAMBLE_LEN 8
+#define MC_PREAMBLE_LEN 16
 
 // ── LoraProtoOps ────────────────────────────────────────────────────────────
 static bool mc_init(const MeshHostApi* host, const char* proto_dir) {
@@ -322,8 +332,11 @@ static int mc_get_peers(LoraProtoPeer* out, int max) {
 // Live radio reconfiguration for the settings bindings (mclua.cpp's
 // radio_apply_* divergences call these). mesh_lock blocks the dispatcher
 // (its loop runs under the mesh mutex) across the standby+config pair —
-// the atomicity the firmware version got from holding SPI_LOCK. The
-// dispatcher's next recvRaw re-arms RX with the new params.
+// the atomicity the firmware version got from holding SPI_LOCK. radio_config()
+// leaves the chip in standby; onStandby() clears the wrapper's receive state,
+// so the dispatcher's next recvRaw re-arms RX with the new params. A
+// transmission the standby cut off ends through the dispatcher's send timeout
+// (onSendFinished() re-enters RX).
 void mc_apply_radio_params(float freq, float bw, uint8_t sf, uint8_t cr,
                            int8_t tx_dbm) {
     mesh_lock();
@@ -331,6 +344,7 @@ void mc_apply_radio_params(float freq, float bw, uint8_t sf, uint8_t cr,
     MCH->radio_config(freq, bw, sf, cr, tx_dbm, true,
                       MC_SYNC_WORD, MC_PREAMBLE_LEN);
     s_radio.setSpreadingFactor(sf);
+    s_radio.onStandby();
     mesh_unlock();
 }
 

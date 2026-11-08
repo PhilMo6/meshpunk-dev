@@ -1,20 +1,54 @@
 # Build Gwenesis (Sega Genesis / Mega Drive) as a loadable ELF module for
 # ESP32-S3 T-Deck. Uses the Xtensa toolchain from PlatformIO.
+#
+# -Arch s3 (default) = the Xtensa artifact genesis.app.elf, unchanged.
+# -Arch rv32 = genesis.app.rv32.elf for the T-Display P4 (the gameboy
+# module's pattern): the riscv32-esp toolchain, the P4 firmware's ISA and
+# float ABI (rv32imafc, ilp32f), -mno-relax, objects in obj-rv32/, and no
+# -lgcc: the rv32 libgcc.a is not position-independent, so every builtin
+# comes from host_exports[] (src/elf_host.cpp) and the UND audit below
+# hard-fails on anything else. The loader leaves .iram.text where it was
+# loaded on RISC-V (lib/elf_loader/elf_loader.c), so the rv32 build drops
+# the Xtensa section flags and the l32r audit.
+param(
+    [ValidateSet("s3", "rv32")]
+    [string]$Arch = "s3"
+)
 
-$toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
-$CC = "$toolchain\xtensa-esp32s3-elf-gcc.exe"
-$READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
+if ($Arch -eq "rv32") {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-riscv32-esp\bin"
+    $CC = "$toolchain\riscv32-esp-elf-gcc.exe"
+    $READELF = "$toolchain\riscv32-esp-elf-readelf.exe"
+    $OBJCOPY = "$toolchain\riscv32-esp-elf-objcopy.exe"
+    # Musashi's m68kcpu.h / m68kops.h use the uint*_t types without including
+    # <stdint.h>; the Xtensa toolchain's headers bring it in on the way, the
+    # riscv32-esp ones do not.
+    $ARCH_CFLAGS = @("-march=rv32imafc_zicsr_zifencei", "-mabi=ilp32f", "-mno-relax",
+                     "-include", "stdint.h")
+    $ARCH_LDFLAGS = @("-Wl,--no-relax")
+    $LIBS = @()
+    $OUT = "genesis.app.rv32.elf"
+    $obj_dir = "obj-rv32"
+} else {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
+    $CC = "$toolchain\xtensa-esp32s3-elf-gcc.exe"
+    $READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
+    $OBJCOPY = "$toolchain\xtensa-esp32s3-elf-objcopy.exe"
+    $ARCH_CFLAGS = @("-mlongcalls")
+    $ARCH_LDFLAGS = @()
+    $LIBS = @("-lgcc")
+    $OUT = "genesis.app.elf"
+    $obj_dir = "obj"
+}
 
 $SRC = "gwenesis-src"
-$OUT = "genesis.app.elf"
 
 # GNW_TARGET_MARIO selects gwenesis's embedded build throughout the core: the
 # VDP writes RGB565 shorts straight into the frame buffer instead of expanding
 # to RGB888 through a separate palette pass. It is the Game & Watch target
 # name upstream, but it is really "small MCU with a 16-bit framebuffer".
-$CFLAGS = @(
+$CFLAGS = $ARCH_CFLAGS + @(
     "-shared", "-fPIC", "-fno-common",
-    "-mlongcalls",
     "-ffunction-sections", "-fdata-sections",
     "-fno-strict-aliasing",
     "-DGNW_TARGET_MARIO=1",
@@ -42,8 +76,8 @@ $CFLAGS = @(
 )
 
 $LDFLAGS = @(
-    "-nostartfiles", "-nodefaultlibs", "-nostdlib",
-    "-lgcc",
+    "-nostartfiles", "-nodefaultlibs", "-nostdlib"
+) + $LIBS + $ARCH_LDFLAGS + @(
     "-Wl,-e,main",
     "-Wl,--gc-sections"
 )
@@ -64,7 +98,6 @@ $core_sources = @(
 # Platform glue: -Os
 $glue_sources = @("main_tdeck.c")
 
-$obj_dir = "obj"
 if (-not (Test-Path $obj_dir)) { New-Item -ItemType Directory $obj_dir | Out-Null }
 
 # Newest header mtime anywhere under the source tree. Headers are shared, so a
@@ -95,7 +128,7 @@ foreach ($src in ($core_sources + $glue_sources)) {
     # literals must live inside the section (-mtext-section-literals) and no
     # jump tables may be emitted into it (-fno-jump-tables), or the audit
     # below reads that data as code and reports false escapes.
-    $extra = if ($name -eq "gwenesis_vdp_gfx" -or $name -eq "ym2612") {
+    $extra = if ($Arch -eq "s3" -and ($name -eq "gwenesis_vdp_gfx" -or $name -eq "ym2612")) {
         @("-mtext-section-literals", "-fno-jump-tables")
     } else { @() }
     Write-Host "  CC $name.c ($opt)"
@@ -125,7 +158,6 @@ if ($LASTEXITCODE -ne 0) {
 # is only needed by the linker for relaxation, and the symbol table is not read
 # at load (the loader resolves imports through .dynsym, which strip-debug
 # keeps). Together they are ~280KB of the file.
-$OBJCOPY = "$toolchain\xtensa-esp32s3-elf-objcopy.exe"
 & $OBJCOPY --strip-debug --remove-section=.xt.prop --remove-section=.comment $OUT
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Strip failed!"
@@ -138,10 +170,15 @@ Write-Host "Success: $OUT ($([math]::Round($size/1024, 1)) KB)"
 # .iram.text is copied into internal SRAM at load, which changes its distance
 # to every other section. Absolute references survive (the loader relocates
 # them), but l32r is PC-relative and fixed at link time, so every literal it
-# reaches must live inside the section itself.
+# reaches must live inside the section itself. RISC-V: the loader runs the
+# section in place (PSRAM), so there is nothing to audit.
 $OBJDUMP = "$toolchain\xtensa-esp32s3-elf-objdump.exe"
 $iram = & $READELF -S -W $OUT | Select-String '\.iram\.text\s+PROGBITS\s+([0-9a-f]+)\s+[0-9a-f]+\s+([0-9a-f]+)'
-if ($iram) {
+if ($iram -and $Arch -eq "rv32") {
+    $sec_size = [Convert]::ToUInt32($iram.Matches[0].Groups[2].Value, 16)
+    Write-Host ""
+    Write-Host ".iram.text: $sec_size bytes, run in place from PSRAM on the P4"
+} elseif ($iram) {
     $sec_addr = [Convert]::ToUInt32($iram.Matches[0].Groups[1].Value, 16)
     $sec_size = [Convert]::ToUInt32($iram.Matches[0].Groups[2].Value, 16)
     $sec_end  = $sec_addr + $sec_size
@@ -180,11 +217,37 @@ if ($iram) {
 }
 
 # Every UND symbol must be resolvable from host_exports[] in src/elf_host.cpp,
-# or the module will fail to load on device. Audit at build time instead.
+# or the module will fail to load on device. Audit at build time instead:
+# the table is parsed from the source; a miss is printed for both arches and
+# fails the rv32 build (the Xtensa build keeps its print-only behaviour).
+$hostSrc = Get-Content (Join-Path $PSScriptRoot "..\..\src\elf_host.cpp") -Raw
+$tbl = [regex]::Match($hostSrc, 'host_exports\[\]\s*=\s*\{(.*?)\n\};', 'Singleline')
+$exported = @{}
+if ($tbl.Success) {
+    foreach ($em in [regex]::Matches($tbl.Groups[1].Value, '\{\s*"([^"]+)"')) {
+        $exported[$em.Groups[1].Value] = $true
+    }
+} else {
+    Write-Host "WARNING: could not parse host_exports[] from src/elf_host.cpp"
+}
+$missing = @()
 Write-Host ""
 Write-Host "Undefined symbols (each must be a host export):"
-& $READELF --dyn-syms $OUT | Select-String "\bUND\b" | ForEach-Object {
+& $READELF -W --dyn-syms $OUT | Select-String "\bUND\b" | ForEach-Object {
     $parts = ($_ -replace '\s+', ' ').Trim().Split(' ')
     $sym = $parts[$parts.Length - 1]
-    if ($sym -and $sym -ne "UND") { Write-Host "  $sym" }
+    if ($sym -and $sym -ne "UND" -and $sym -ne "Name") {
+        if ($tbl.Success -and -not $exported.ContainsKey($sym)) {
+            Write-Host "  $sym   <-- NOT IN host_exports[]"
+            $missing += $sym
+        } else {
+            Write-Host "  $sym"
+        }
+    }
+}
+if ($missing.Count -gt 0 -and $Arch -eq "rv32") {
+    Write-Host ""
+    Write-Host "ERROR: $($missing.Count) symbol(s) missing from host_exports[] - the elf WILL fail to load:"
+    $missing | ForEach-Object { Write-Host "  $_" }
+    exit 1
 }

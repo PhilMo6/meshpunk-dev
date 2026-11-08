@@ -467,6 +467,18 @@
 //                  Tools/Flasher (Browse) and Code Editor 1.1.0 (its whole
 //                  file side), so Code Editor needs min_fw 15. No ELF
 //                  host_export.
+//                  ALSO this level: `_device_caps()` gained `arch` ("xtensa"
+//                  | "rv32" — the build target of the ELF modules this CPU
+//                  loads) and `chip` ("esp32s3" | "esp32p4"), and
+//                  `_elf_arch_path(path) -> path` returns the file the ELF
+//                  loader opens for `path` on this CPU ("<x>.rv32.elf" on
+//                  the T-Display P4, the path itself elsewhere). The App
+//                  Library's `requires` tokens and `files_<target>` lists
+//                  read them (lib/downloader `requires_unmet` /
+//                  `device_files`); firmware without them is an Xtensa
+//                  build. Catalog entries that only GAIN `files_rv32` need
+//                  no min_fw change; single-target or capability-gated
+//                  entries carry min_fw 15. No ELF host_export.
 #define MESHPUNK_FW_API 15
 
 // BLE companion protocol identity (reported in the DEVICE_INFO frame — see

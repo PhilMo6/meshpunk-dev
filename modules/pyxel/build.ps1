@@ -1,20 +1,46 @@
 # Build the Pyxel game player (MicroPython + pyxel API) as a loadable ELF
 # module for the ESP32-S3, and install it with its Python library into the
 # firmware data tree (data/lua/apps/Games/Pyxel).
+#
+# -Arch s3 (default) = the Xtensa artifact pyxel.app.elf, unchanged.
+# -Arch rv32 = pyxel.app.rv32.elf for the T-Display P4 (the gameboy module's
+# pattern): the riscv32-esp toolchain, the P4 firmware's ISA and float ABI
+# (rv32imafc, ilp32f), -mno-relax, objects in obj-rv32/, and no -lgcc: the
+# rv32 libgcc.a is not position-independent, so every builtin comes from
+# host_exports[] (src/elf_host.cpp). The loader leaves .iram.text where it
+# was loaded on RISC-V (lib/elf_loader/elf_loader.c), so the rv32 build
+# drops the Xtensa section flags and the l32r audit. Both install into the
+# same data directory; data_filter.py ships each file to its own arch.
+param(
+    [ValidateSet("s3", "rv32")]
+    [string]$Arch = "s3"
+)
 
-$toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
-$CC = "$toolchain\xtensa-esp32s3-elf-gcc.exe"
-$READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
-$OBJDUMP = "$toolchain\xtensa-esp32s3-elf-objdump.exe"
+if ($Arch -eq "rv32") {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-riscv32-esp\bin"
+    $CC = "$toolchain\riscv32-esp-elf-gcc.exe"
+    $READELF = "$toolchain\riscv32-esp-elf-readelf.exe"
+    $ARCH_CFLAGS = @("-march=rv32imafc_zicsr_zifencei", "-mabi=ilp32f", "-mno-relax")
+    $LIBS = @()
+    $OUT = "pyxel.app.rv32.elf"
+    $obj_dir = "obj-rv32"
+} else {
+    $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
+    $CC = "$toolchain\xtensa-esp32s3-elf-gcc.exe"
+    $READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
+    $OBJDUMP = "$toolchain\xtensa-esp32s3-elf-objdump.exe"
+    $ARCH_CFLAGS = @("-mlongcalls")
+    $LIBS = @("-lgcc")
+    $OUT = "pyxel.app.elf"
+    $obj_dir = "obj"
+}
 
-$OUT = "pyxel.app.elf"
 $MP = "micropython"
 $LODEPNG = "..\pico8\fake08-src\libs\lodepng"
 $DEST = "..\..\data\lua\apps\Games\Pyxel"
 
-$CFLAGS = @(
+$CFLAGS = $ARCH_CFLAGS + @(
     "-shared", "-fPIC", "-fno-common",
-    "-mlongcalls",
     "-ffunction-sections", "-fdata-sections",
     "-fno-strict-aliasing",
     "-std=gnu99",
@@ -60,7 +86,6 @@ $sources += (Get-Item "$MP\extmod\modjson.c").FullName
 $sources += Get-ChildItem "src\*.c" | ForEach-Object { $_.FullName }
 $sources += (Get-Item "$LODEPNG\lodepng.cpp").FullName
 
-$obj_dir = "obj"
 if (-not (Test-Path $obj_dir)) { New-Item -ItemType Directory $obj_dir | Out-Null }
 
 # Any header newer than an object makes that object stale (no per-file deps).
@@ -87,7 +112,7 @@ foreach ($src in $sources) {
     # src/: no fused multiply-add (madd.s), so float rounding matches upstream's
     # (Rust never contracts) and blit transforms pick the same source pixels.
     $extra = @(if (($iram_files -contains $srcname) -and ($dir -eq "py")) {
-        "-mtext-section-literals", "-fno-jump-tables"
+        if ($Arch -eq "s3") { "-mtext-section-literals", "-fno-jump-tables" }
     } elseif ($dir -eq "src") {
         "-ffp-contract=off"
     })
@@ -105,7 +130,7 @@ if ($failed) {
 }
 
 Write-Host "Linking..."
-& $CC $CFLAGS $LDFLAGS -o $OUT @objects "-lgcc"
+& $CC $CFLAGS $LDFLAGS -o $OUT @objects @LIBS
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Link failed!"
     exit 1
@@ -116,33 +141,40 @@ Write-Host "Success: $OUT ($([math]::Round($size/1024, 1)) KB)"
 
 # l32r is PC-relative and fixed at link time: every literal an .iram.text
 # instruction loads must lie inside the section, or it breaks once moved.
+# RISC-V: PX_IRAM puts nothing in the section there (micropython/
+# mpconfigport.h defines it for __xtensa__ only), so there is nothing to
+# audit.
 $iram = & $READELF -S -W $OUT | Select-String '\.iram\.text\s+PROGBITS\s+([0-9a-f]+)\s+[0-9a-f]+\s+([0-9a-f]+)'
-if (-not $iram) {
-    Write-Host "No .iram.text section!"
-    exit 1
-}
-$sec_addr = [Convert]::ToUInt32($iram.Matches[0].Groups[1].Value, 16)
-$sec_size = [Convert]::ToUInt32($iram.Matches[0].Groups[2].Value, 16)
-$sec_end = $sec_addr + $sec_size
 Write-Host ""
-Write-Host ".iram.text: $sec_size bytes of internal SRAM at load"
-$escapes = 0
-$literals = 0
-foreach ($line in (& $OBJDUMP -d --section=.iram.text $OUT)) {
-    if ($line -match 'l32r\s+a\d+,\s*(?:0x)?([0-9a-fA-F]+)') {
-        $literals++
-        $t = [Convert]::ToUInt32($matches[1], 16)
-        if ($t -lt $sec_addr -or $t -ge $sec_end) {
-            if ($escapes -lt 5) { Write-Host "  ESCAPES SECTION: $($line.Trim())" }
-            $escapes++
+if ($Arch -eq "rv32") {
+    Write-Host ".iram.text: none on rv32 (PX_IRAM is Xtensa-only)"
+} else {
+    if (-not $iram) {
+        Write-Host "No .iram.text section!"
+        exit 1
+    }
+    $sec_addr = [Convert]::ToUInt32($iram.Matches[0].Groups[1].Value, 16)
+    $sec_size = [Convert]::ToUInt32($iram.Matches[0].Groups[2].Value, 16)
+    $sec_end = $sec_addr + $sec_size
+    Write-Host ".iram.text: $sec_size bytes of internal SRAM at load"
+    $escapes = 0
+    $literals = 0
+    foreach ($line in (& $OBJDUMP -d --section=.iram.text $OUT)) {
+        if ($line -match 'l32r\s+a\d+,\s*(?:0x)?([0-9a-fA-F]+)') {
+            $literals++
+            $t = [Convert]::ToUInt32($matches[1], 16)
+            if ($t -lt $sec_addr -or $t -ge $sec_end) {
+                if ($escapes -lt 5) { Write-Host "  ESCAPES SECTION: $($line.Trim())" }
+                $escapes++
+            }
         }
     }
+    if ($escapes -gt 0) {
+        Write-Host "  $escapes of $literals l32r targets fall outside .iram.text."
+        exit 1
+    }
+    Write-Host "  all $literals l32r targets resolve inside the section"
 }
-if ($escapes -gt 0) {
-    Write-Host "  $escapes of $literals l32r targets fall outside .iram.text."
-    exit 1
-}
-Write-Host "  all $literals l32r targets resolve inside the section"
 
 # Every UND symbol must be in host_exports[] (src/elf_host.cpp) or the module
 # fails to load: checked against the table itself, and fatal here.
@@ -168,6 +200,6 @@ if ($missing.Count -gt 0) {
 
 if (-not (Test-Path $DEST)) { New-Item -ItemType Directory $DEST | Out-Null }
 if (-not (Test-Path "$DEST\pylib")) { New-Item -ItemType Directory "$DEST\pylib" | Out-Null }
-Copy-Item $OUT "$DEST\pyxel.app.elf" -Force
+Copy-Item $OUT "$DEST\$OUT" -Force
 Copy-Item "pylib\*" "$DEST\pylib\" -Recurse -Force
 Write-Host "Installed to $DEST"
