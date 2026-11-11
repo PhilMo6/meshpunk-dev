@@ -10,7 +10,11 @@ Highlights:
 - Background apps - music keeps playing while you do other things
 ]]
 
-if dev.usb_power then
+if dev.name == "tdisplay_p4" then
+    body = body .. [[
+- USB accessories: keyboard, mouse, gamepad, thumb drive - plugged into the USB-A socket, powered while the device is on USB power (see the USB accessories page)
+]]
+elseif dev.usb_power then
     body = body .. [[
 - USB accessories: keyboard, mouse, gamepad, audio adapter, thumb drive - powered by the device itself (see the USB accessories page)
 ]]
@@ -27,10 +31,20 @@ if caps.keyboard and caps.trackball then
     body = body .. [[
 
 You have a keyboard, a trackball and a touchscreen, so every part of this guide applies to you.]]
+elseif caps.keyboard and caps.touch then
+    body = body .. [[
+
+You have a keyboard and a touchscreen. The keyboard types, its arrow keys move the focus and Enter selects; the touchscreen works everywhere too. The on-screen keyboard and the on-screen game pads stay available through the input mode, which the Meta key or the BOOT button cycles - the Touch controls page covers them.]]
 elseif caps.touch then
     body = body .. [[
 
 This device is driven by its touchscreen. There is no built-in keyboard, so text is typed on the on-screen keyboard and games use on-screen buttons - the Touch controls page covers both.]]
+end
+
+if dev.eth then
+    body = body .. [[
+
+With Ethernet switched on (Settings > WiFi) the BOOT button is not an input - its pin carries Ethernet data - so the touchscreen selects and the keyboard's Meta key cycles the input mode.]]
 end
 
 if dev.audio == "buzzer" then

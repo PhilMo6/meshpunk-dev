@@ -58,6 +58,8 @@ bool power_dev_usb_host_begin(void);
 void power_dev_usb_host_tick(void);
 void power_dev_usb_host_end(void);
 
-// True when host mode will supply 5 V on the USB-C port to an attached
-// device (_device_caps().usb_power). Wio L2: the AW35615 answered at boot.
+// True when host mode will supply 5 V on the board's host port to an
+// attached device (_device_caps().usb_power). Wio L2: the AW35615 answered
+// at boot. T-Display P4: its USB-A socket is powered while a cable feeds the
+// board (the gauge sees no discharge), so the answer can change at runtime.
 bool power_dev_usb_port_power(void);

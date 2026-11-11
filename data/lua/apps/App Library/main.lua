@@ -2240,6 +2240,9 @@ end
 -- ── Start ────────────────────────────────────────────────────────────────────
 
 dl.cleanup_staging()
+-- The catalog source (S:/meshpunk/appstore.toml) is re-read at every launch;
+-- a downloader from before reload_source() keeps its once-per-session read.
+if dl.reload_source then dl.reload_source() end
 start()
 
 return root

@@ -69,6 +69,49 @@ local function refresh_wifi_status()
 end
 refresh_wifi_status()
 
+-- Wired Ethernet, on boards with a port: the button starts or stops it at
+-- once and persists the choice; the line under it is the port's state.
+local eth_status_lbl = nil
+if _device_caps().eth and type(_eth_get_enabled) == "function" then
+    local eth_on = _eth_get_enabled()
+    local btn_eth = content:Button { w = lvgl.PCT(60), h = 30 }
+    local lbl_eth = btn_eth:Label { align = lvgl.ALIGN.CENTER }
+    local function refresh_eth_toggle()
+        eth_on = _eth_get_enabled()
+        lbl_eth.text = "Ethernet: " .. (eth_on and "ON" or "OFF")
+    end
+    refresh_eth_toggle()
+    btn_eth:onClicked(function()
+        _eth_set_enabled(not eth_on)
+        refresh_eth_toggle()
+        status.text = "Ethernet: " .. (eth_on and "ON" or "OFF")
+    end)
+    eth_status_lbl = content:Label { text = "", w = lvgl.PCT(100), h = 16 }
+end
+
+local function refresh_eth_status()
+    if not eth_status_lbl then return end
+    local on, state, ip = _eth_get_enabled()
+    if not on then
+        eth_status_lbl.text = "Disabled"
+    elseif state == "connected" then
+        eth_status_lbl.text = "Cable: " .. ip
+    elseif state == "link" then
+        eth_status_lbl.text = "Cable: link, waiting for an address"
+    elseif state == "nolink" then
+        eth_status_lbl.text = "No cable"
+    else
+        eth_status_lbl.text = "Not started"
+    end
+end
+refresh_eth_status()
+
+-- Both state lines follow the ports while the screen is open.
+apps.add_timer { period = 1000, cb = function()
+    refresh_wifi_status()
+    refresh_eth_status()
+end }
+
 -- Saved networks (multi-slot): tap the list to enter select, click a network
 -- to reveal its Connect/Forget actions.
 content:Label { text = "Saved networks:", w = lvgl.PCT(100), h = 16 }

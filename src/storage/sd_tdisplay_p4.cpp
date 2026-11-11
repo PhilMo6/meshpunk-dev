@@ -133,4 +133,6 @@ bool sd_dev_write_raw(const uint8_t* buf, uint32_t sector) {
   return s_card && sdmmc_write_sectors(s_card, buf, sector, 1) == ESP_OK;
 }
 
+void* sd_dev_native_handle(void) { return s_card; }
+
 #endif // BOARD_TDISPLAY_P4

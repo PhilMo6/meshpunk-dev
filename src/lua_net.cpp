@@ -41,6 +41,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include "ethernet.h"   // net_is_up: WiFi or Ethernet
 extern "C" {
 #include <lua.h>
 #include <lauxlib.h>
@@ -477,7 +478,7 @@ static bool lnet_step(int i, NetSlot *s, bool wifi_up) {
 static void lnet_task(void *) {
   SLog.printf("[NET] worker start core=%d\n", xPortGetCoreID());
   for (;;) {
-    bool wifi_up = (WiFi.status() == WL_CONNECTED);
+    bool wifi_up = net_is_up();   // WiFi or Ethernet
     bool any = false;
     for (int i = 0; i < LNET_SLOTS; i++)
       any |= lnet_step(i, &s_slots[i], wifi_up);
@@ -738,8 +739,8 @@ static int l_tcp_open(lua_State *L) {
     lua_pushnil(L); lua_pushstring(L, "bad host or port");
     return 2;
   }
-  if (WiFi.status() != WL_CONNECTED) {
-    lua_pushnil(L); lua_pushstring(L, "wifi not connected");
+  if (!net_is_up()) {
+    lua_pushnil(L); lua_pushstring(L, "not connected");
     return 2;
   }
 

@@ -5,9 +5,11 @@
 // This file owns the invariants (see memory: usb-host-experiments):
 //   - install the host stack from a task pinned to CORE 1 (esp_intr_alloc is
 //     calling-core-local and core 0's slots are full), intr_flags = 0;
-//   - the internal PHY select is an RTC-domain register that SURVIVES warm
-//     resets — restore it to Serial-JTAG on teardown and on boot, or USB
-//     serial stays dead (Windows Code 43) until a full power cycle;
+//   - on the S3 the internal PHY select is an RTC-domain register that
+//     SURVIVES warm resets — restore it to Serial-JTAG on teardown and on
+//     boot, or USB serial stays dead (Windows Code 43) until a full power
+//     cycle (the T-Display P4's OTG high-speed PHY is its own and its
+//     console is a CH343 UART: nothing to restore there);
 //   - EP0 control-transfer completions route through the LIBRARY event
 //     handler first, so every wait loop must pump BOTH lib and client
 //     handlers or control requests silently time out;
@@ -28,8 +30,10 @@
 #include <Arduino.h>
 #include <usb/usb_host.h>
 #include <esp_heap_caps.h>
-#include <soc/rtc_cntl_struct.h>
+#if CONFIG_IDF_TARGET_ESP32S3
+#include <soc/rtc_cntl_struct.h>    // the S3's PHY select (restore_serial_jtag_phy)
 #include <soc/usb_serial_jtag_struct.h>
+#endif
 #include "elf_host.h"               // elf_input_inject + elf_usb_driver_load/unload
 #include "usb_fs.h"                 // usb_fs_mounted — Lua bridge status field
 #include "meshpunk_sync.h"          // sd_spi_take — SD-base driver-dir scans
@@ -63,6 +67,13 @@ static void ulog_line(const char* line) {
     s_log_head = (s_log_head + 1) % ULOG_LINES;
     if (s_log_head == s_log_tail) s_log_tail = (s_log_tail + 1) % ULOG_LINES;
     portEXIT_CRITICAL(&s_log_mux);
+#if CONFIG_IDF_TARGET_ESP32P4
+    // The T-Display P4's console is a CH343 UART, up throughout host mode,
+    // so every line goes to the serial log as well. On the S3 boards the
+    // OTG controller owns the USB pins while host mode runs and USB serial
+    // is dead: the on-screen panel (ulog_pop) is the only view there.
+    SLog.printf("[USB] %s\n", line);
+#endif
 }
 
 void usbcore_log(const char* fmt, ...) {
@@ -411,17 +422,22 @@ static void dyn_scan_and_load(const IfTriple* triples, int ntriples) {
     }
 }
 
-// ── PHY restore (RTC-domain; survives warm reset) ───────────────────────────
+// ── PHY restore (S3: RTC-domain; survives warm reset) ───────────────────────
 // Hand-inlined usb_phy_ll_int_jtag_enable() — hal/usb_phy_ll.h can't be
 // included from C++ (an unrelated inline copies a volatile struct).
 // Non-static: usb_msc_dev.cpp calls it when a drive-mode session ends.
+// The S3 shares one PHY between USB-Serial-JTAG and OTG; the T-Display P4's
+// OTG high-speed PHY is its own and its console is a CH343 UART, so there
+// is nothing to hand back on that board.
 void restore_serial_jtag_phy() {
+#if CONFIG_IDF_TARGET_ESP32S3
     USB_SERIAL_JTAG.conf0.phy_sel           = 0;
     USB_SERIAL_JTAG.conf0.pad_pull_override = 0;
     USB_SERIAL_JTAG.conf0.dp_pullup         = 1;
     USB_SERIAL_JTAG.conf0.usb_pad_enable    = 1;
     RTCCNTL.usb_conf.sw_hw_usb_phy_sel = 1;
     RTCCNTL.usb_conf.sw_usb_phy_sel    = 0;
+#endif
 }
 
 // ── Enumeration events + helpers ─────────────────────────────────────────────
@@ -1074,7 +1090,12 @@ static void describe_device(uint8_t addr) {
         char mfg[32];
         str_desc_ascii(info.str_desc_manufacturer, mfg, sizeof(mfg));
         str_desc_ascii(info.str_desc_product, s_info.product, sizeof(s_info.product));
+#if CONFIG_IDF_TARGET_ESP32P4
+        ulog("speed: %s", info.speed == USB_SPEED_HIGH ? "high (480M)" :
+                          info.speed == USB_SPEED_FULL ? "full (12M)" : "low (1.5M)");
+#else
         ulog("speed: %s", info.speed == USB_SPEED_FULL ? "full (12M)" : "low (1.5M)");
+#endif
         if (mfg[0])            ulog("mfg:  %s", mfg);
         if (s_info.product[0]) ulog("prod: %s", s_info.product);
     }
@@ -1165,9 +1186,25 @@ static void describe_device(uint8_t addr) {
         else if (usb_registry_probed("kbd"))
             ulog(">>> Keyboard detected — driver starting.");
         else if (!any) {
-            if (s_info.kind == UKIND_HUB)
+            if (s_info.kind == UKIND_HUB) {
+#if CONFIG_USB_HOST_HUBS_SUPPORTED
+                // The host library's hub driver runs the hub. Releasing it
+                // frees the single device slot for the accessory behind it;
+                // one the library enumerated before this point is taken
+                // from the address list.
+                ulog(">>> Hub — handed to the host library; one accessory behind it is served.");
+                usb_host_device_close(s_client, s_dev);
+                s_dev = NULL; s_dd = NULL; s_cfg = NULL;
+                memset(&s_info, 0, sizeof(s_info));
+                uint8_t addrs[8];
+                int n = 0;
+                if (usb_host_device_addr_list_fill(8, addrs, &n) == ESP_OK)
+                    for (int k = 0; k < n; k++)
+                        if (addrs[k] != addr) { s_new_addr = addrs[k]; break; }
+#else
                 ulog(">>> Hub — unsupported until IDF5 (single device only).");
-            else
+#endif
+            } else
                 ulog(">>> Device kind: %s (no driver yet).", kind_name(s_info.kind));
         }
     }
@@ -1330,9 +1367,16 @@ void usb_manager_init(void (*prefs_save_fn)()) {
 bool usb_manager_start() {
     if (s_running) return true;
 
-    // The OTG device stack (USB drive mode) has no uninstall in this TinyUSB;
-    // once it has run, the OTG controller can't be handed to the host library
-    // until a reboot. Drive mode refuses while host runs (usb_msc_dev.cpp).
+    // Drive mode and host mode take turns on the OTG controller: drive mode
+    // refuses while host runs (usb_msc_dev.cpp), and the reverse here. On
+    // the S3 boards the Arduino TinyUSB device stack has no uninstall, so
+    // once a drive session has run the controller can't be handed to the
+    // host library until a reboot; the T-Display P4's esp_tinyusb stack
+    // uninstalls at session end.
+    if (usbdrive_active()) {
+        ulog("host unavailable: USB drive mode is running (stop it first)");
+        return false;
+    }
     if (usbdrive_used_this_boot()) {
         ulog("host unavailable: USB drive mode was used (restart required)");
         return false;
@@ -1344,7 +1388,9 @@ bool usb_manager_start() {
     }
 
     ulog("Switching USB port to HOST mode.");
+#if CONFIG_IDF_TARGET_ESP32S3
     ulog("(USB serial is OFF until Stop or reboot)");
+#endif
 
     drv_cmd_clear_all();
     s_stop_req = false; s_new_addr = 0; s_dev_gone = false;

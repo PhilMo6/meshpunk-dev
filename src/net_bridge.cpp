@@ -18,6 +18,7 @@
 #include "meshpunk_sync.h"   // SLog
 
 #include <WiFi.h>
+#include "ethernet.h"   // net_is_up / net_local_ip: WiFi or Ethernet
 #include <esp_wifi.h>
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
@@ -100,20 +101,20 @@ static bool would_block() {
 extern "C" {
 
 int host_net_status(void) {
-    return WiFi.status() == WL_CONNECTED ? 1 : 0;
+    return net_is_up() ? 1 : 0;
 }
 
 unsigned host_net_local_ip(void) {
-    if (WiFi.status() != WL_CONNECTED) return 0;
+    if (!net_is_up()) return 0;
     // IPAddress's uint32 is the address in memory order = network order.
-    return ntohl((uint32_t)WiFi.localIP());
+    return ntohl((uint32_t)net_local_ip());
 }
 
 unsigned host_net_resolve(const char* name) {
     if (!name || !*name) return 0;
     uint32_t a = ipaddr_addr(name);            // dotted quad: no lookup
     if (a != IPADDR_NONE) return ntohl(a);
-    if (WiFi.status() != WL_CONNECTED) return 0;
+    if (!net_is_up()) return 0;
     struct hostent* h = lwip_gethostbyname(name);
     if (!h || !h->h_addr_list || !h->h_addr_list[0]) return 0;
     struct in_addr in;

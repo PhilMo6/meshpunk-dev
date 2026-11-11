@@ -1,8 +1,8 @@
 // BleHostApi serial transport — the firmware half of the BLE slot's module
-// seam. Wraps its OWN PunkBLEInterface instance (the Bluedroid stack stays
-// firmware). Polled + frame-based, one-to-one with MeshCore's
-// BaseSerialInterface: the ported companion's McBleSerial calls straight
-// through these.
+// seam. Wraps its OWN PunkBLEInterface instance (the BLE stack stays
+// firmware: Bluedroid on the S3 boards, NimBLE over the C6 on the P4).
+// Polled + frame-based, one-to-one with MeshCore's BaseSerialInterface: the
+// ported companion's McBleSerial calls straight through these.
 
 #include "ble_proto.h"
 
@@ -14,9 +14,23 @@
 
 #include "../punk_ble_interface.h"
 #include <BLEDevice.h>
+#if defined(CONFIG_BLUEDROID_ENABLED)
 #include <esp_bt_main.h>        // esp_bluedroid_*
+#endif
 
 static PunkBLEInterface* s_bt = nullptr;
+
+#if defined(CONFIG_NIMBLE_ENABLED)
+
+// NimBLE over esp-hosted (T-Display P4): BLEDevice::init(), called by
+// begin() in ble_transport_open(), brings the C6 controller and the host up
+// together, so there is no earlier stage to run here. Reports whether that
+// has happened.
+bool ble_transport_stack_up(void) {
+    return BLEDevice::getInitialized();
+}
+
+#else
 
 // The controller, then the Bluedroid host. The order and status checks are
 // BLEDevice::init()'s own; ble_transport_open()'s begin() calls it, and it
@@ -39,6 +53,8 @@ bool ble_transport_stack_up(void) {
         SLog.printf("[BLE] FAIL: Bluedroid host bring-up: %s\n", esp_err_to_name(err));
     return err == ESP_OK;
 }
+
+#endif  // backend
 
 bool ble_transport_open(const char* name_prefix, const char* dev_name,
                         uint32_t pin) {

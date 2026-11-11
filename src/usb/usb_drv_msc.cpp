@@ -3,9 +3,9 @@
 // SCSI over a bulk IN/OUT pair, entirely through the UsbHostApi pipe layer
 // (which is this driver's old dual-context engine, promoted into the core).
 // Two pipes, retargeted between the endpoints the way the monolith reused
-// its transfer objects: s_pipe_cmd (64B — CBW out, CSW in) and s_pipe_data
-// (MSC_CHUNK_BYTES — data phases, either direction). Same 16KB+64B internal
-// DMA footprint as before.
+// its transfer objects: s_pipe_cmd (one IN packet: 64B full speed, 512B high
+// speed — CBW out, CSW in) and s_pipe_data (MSC_CHUNK_BYTES — data phases,
+// either direction). 16KB + one packet of internal DMA memory.
 //
 // Task/locking model unchanged: SCSI transactions are serialized by
 // s_msc_mutex and may originate on ANY task (Lua file I/O on core 0,
@@ -38,7 +38,7 @@ static MscProfile s_msc_prof;
 #define MSC_IO_TIMEOUT_MS 5000        // per-phase completion timeout
 
 static const UsbHostApi* s_mapi      = NULL;    // captured at probe
-static UsbPipe*          s_pipe_cmd  = NULL;    // 64B: CBW out / CSW in
+static UsbPipe*          s_pipe_cmd  = NULL;    // one IN packet: CBW out / CSW in
 static UsbPipe*          s_pipe_data = NULL;    // 16KB: data phases
 static volatile bool     s_msc_on    = false;   // claimed + unit ready
 static SemaphoreHandle_t s_msc_mutex = nullptr; // serializes transactions
@@ -296,8 +296,13 @@ static bool msc_start(const UsbHostApi* api) {
         s_msc_prof.valid = false;
         return false;
     }
+    // The command pipe holds one packet at the IN endpoint's size: the CSW
+    // read is submitted at mps_in (64 on a full-speed drive, 512 on a
+    // high-speed one), and the host library refuses a transfer longer than
+    // its buffer.
+    uint32_t cmd_bytes = s_msc_prof.mps_in > 64 ? s_msc_prof.mps_in : 64;
     s_pipe_data = api->pipe_open(s_msc_prof.ep_in, s_msc_prof.mps_in, MSC_CHUNK_BYTES);
-    s_pipe_cmd  = api->pipe_open(s_msc_prof.ep_out, s_msc_prof.mps_out, 64);
+    s_pipe_cmd  = api->pipe_open(s_msc_prof.ep_out, s_msc_prof.mps_out, cmd_bytes);
     if (!s_pipe_data || !s_pipe_cmd) {
         ulog("msc pipe alloc failed (%dK internal)", MSC_CHUNK_BYTES / 1024);
         msc_abort_start(api);

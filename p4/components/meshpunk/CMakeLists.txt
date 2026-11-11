@@ -25,17 +25,13 @@ file(GLOB_RECURSE MESHPUNK_SOURCES
 # Not in the P4 build:
 #  - src/updater/: the standalone updater firmware (its own envs on the S3
 #    boards); it defines its own setup()/loop().
-#  - the USB-OTG subsystem (src/usb/, usb_fs.cpp, usb_manager.cpp) and the
-#    T-Deck peer link (tdeck_link.cpp): they use the S3's USB PHY registers,
-#    TinyUSB device mode and the IDF USB host, none of which is wired for the
-#    P4 until its USB data path is confirmed (docs/P4_PORT_PLAN_2026-10-12.md
-#    §3, §9). src/usb/usb_none.cpp implements their public headers for this
-#    board.
-# Every other board-specific file compiles to nothing outside its own
-# BOARD_<NAME> define and needs no exclusion.
+# The USB-OTG subsystem (src/usb/, usb_fs.cpp, usb_manager.cpp) and the peer
+# link (tdeck_link.cpp) build for this board: the P4's USB 2.0 OTG
+# high-speed pair reaches the USB-C port USB1 and the USB-A host socket (the
+# board schematic; docs/P4_PORT_PLAN_2026-10-12.md §9). Every other
+# board-specific file compiles to nothing outside its own BOARD_<NAME>
+# define and needs no exclusion.
 list(FILTER MESHPUNK_SOURCES EXCLUDE REGEX "/src/updater/")
-list(FILTER MESHPUNK_SOURCES EXCLUDE REGEX "/src/usb/usb_(core|drv_audio|drv_hid|drv_msc|msc_dev|pool)\\.cpp$")
-list(FILTER MESHPUNK_SOURCES EXCLUDE REGEX "/src/(usb_fs|usb_manager|tdeck_link)\\.cpp$")
 
 idf_component_register(
     SRCS ${MESHPUNK_SOURCES}
@@ -58,4 +54,7 @@ idf_component_register(
         # brings in FFat.h -> wear_levelling.h, SD.h -> diskio.h (fatfs),
         # SD_MMC.h -> driver/sdmmc_types.h); the Arduino component requires
         # them privately, so they do not propagate to us.
-        fatfs wear_levelling sdmmc esp_driver_sdmmc)
+        fatfs wear_levelling sdmmc esp_driver_sdmmc
+        # the USB host library (src/usb/usb_core.cpp) and esp_tinyusb with
+        # the TinyUSB core (src/usb/usb_msc_dev.cpp, drive mode)
+        usb espressif__esp_tinyusb espressif__tinyusb)

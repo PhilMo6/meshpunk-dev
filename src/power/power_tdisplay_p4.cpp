@@ -29,6 +29,7 @@
 
 #define BQ27220_ADDR          0x55
 #define BQ27220_CMD_VOLTAGE   0x08   // Voltage(): mV, 16-bit little-endian
+#define BQ27220_CMD_CURRENT   0x0C   // Current(): mA, signed 16-bit little-endian
 
 static i2c_master_dev_handle_t s_gauge = NULL;
 
@@ -155,10 +156,19 @@ void power_dev_standby_disarm(bool radio) {
   gpio_wakeup_disable((gpio_num_t)TDP4_EXP_INT_GPIO);
 }
 
-// USB host port power: no USB path on this board yet (port plan §9).
-bool power_dev_usb_host_begin(void) { return false; }
+// USB host port power. 5 V for an accessory on the USB-A host socket comes
+// from a TPS2051C fed by VCC_5V, which only a cable on either USB-C port
+// provides: the board has no boost from the cell (schematic, power sheet).
+// The gauge's current sign tells the states apart: on the cell alone the
+// current is negative; charging or full on a cable it is zero or positive.
+bool power_dev_usb_port_power(void) {
+  uint16_t raw = 0;
+  if (!gauge_read_u16(BQ27220_CMD_CURRENT, &raw)) return false;
+  return (int16_t)raw >= 0;
+}
+
+bool power_dev_usb_host_begin(void) { return power_dev_usb_port_power(); }
 void power_dev_usb_host_tick(void) {}
 void power_dev_usb_host_end(void) {}
-bool power_dev_usb_port_power(void) { return false; }
 
 #endif // BOARD_TDISPLAY_P4

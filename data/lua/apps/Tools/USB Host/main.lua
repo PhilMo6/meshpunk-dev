@@ -1,15 +1,21 @@
 -- Tools > USB Host — USB-OTG host manager.
--- Puts the T-Deck's USB port in host mode to drive a USB device. Today: a
+-- Puts the device's USB port in host mode to drive a USB device. Today: a
 -- USB-C audio dongle, with all device audio (tones, notifications, music,
--- game audio) routed to it. The dongle needs external VBUS: power source ->
--- powered adapter/hub -> dongle -> T-Deck.
--- Host mode takes the USB pins from Serial-JTAG, so USB serial (logs + PC
--- file transfer) is DEAD while it runs; Stop restores it (a boot-time
--- self-heal covers resets mid-session).
+-- game audio) routed to it. On the S3 boards the dongle needs external VBUS:
+-- power source -> powered adapter/hub -> dongle -> T-Deck; the T-Display
+-- P4's USB-A socket is powered while the board is on USB power.
+-- On the S3 boards host mode takes the USB pins from Serial-JTAG, so USB
+-- serial (logs + PC file transfer) is DEAD while it runs; Stop restores it
+-- (a boot-time self-heal covers resets mid-session). The P4's console is a
+-- separate UART bridge and stays up.
 local lvgl  = require("lvgl")
 local apps  = require("lib/apps")
 local nav   = require("lib/nav")
 local theme = require("lib/theme")
+
+-- The T-Display P4: accessories go into its USB-A socket, and its USB
+-- console is a separate UART bridge that stays up in host mode.
+local p4 = _device_caps().name == "tdisplay_p4"
 
 local root = apps.new_root()
 root:set { w = lvgl.HOR_RES(), h = lvgl.VER_RES(), pad_all = 0, border_width = 0, bg_opa = 0 }
@@ -41,7 +47,11 @@ if not (_usb_start and _usb_poll) then
     return root
 end
 
-local status  = content:Label { text = "Idle. Start switches USB to host mode\n(USB serial off until Stop).", w = lvgl.PCT(100), h = 32 }
+local status  = content:Label {
+    text = p4 and "Idle. Start switches the USB port to host mode.\nAccessories go in the USB-A socket."
+               or "Idle. Start switches USB to host mode\n(USB serial off until Stop).",
+    w = lvgl.PCT(100), h = 32,
+}
 local dev_lbl  = content:Label { text = "No device.", w = lvgl.PCT(100), h = 16 }
 
 local start_btn = content:Button { w = lvgl.PCT(48), h = 28 }
@@ -105,14 +115,15 @@ end
 start_btn:onClicked(function()
     if _usb_running() then status.text = "Already running."; return end
     local ok = _usb_start()
-    status.text = ok and "Host starting (watch the log)...\nPlug in: power > adapter > dongle > T-Deck"
+    status.text = ok and (p4 and "Host starting (watch the log)...\nPlug the accessory into the USB-A socket."
+                             or "Host starting (watch the log)...\nPlug in: power > adapter > dongle > T-Deck")
                      or "Start FAILED - see log."
 end)
 
 stop_btn:onClicked(function()
     if not _usb_running() then status.text = "Not running."; return end
     _usb_stop()
-    status.text = "Stopping... USB serial should return\n(replug PC cable if needed)."
+    status.text = p4 and "Stopping." or "Stopping... USB serial should return\n(replug PC cable if needed)."
 end)
 
 tone_btn:onClicked(function()
