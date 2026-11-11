@@ -4314,6 +4314,28 @@ bool Audio::setPinout(uint8_t BCLK, uint8_t LRC, uint8_t DOUT, int8_t DIN, int8_
     return (result == ESP_OK);
 }
 //---------------------------------------------------------------------------------------------------------------------
+// MESHPUNK: duplex reinstall for a microphone session on the shared port (Audio.h).
+bool Audio::setDuplexInput(int8_t DIN) {
+    if (!m_f_i2sInstalled) return false;
+    i2s_driver_uninstall((i2s_port_t)m_i2s_num);
+    m_i2s_config.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX);
+    m_f_i2sInstalled = (i2s_driver_install((i2s_port_t)m_i2s_num, &m_i2s_config, 0, NULL) == ESP_OK);
+    if (!m_f_i2sInstalled) return false;
+    i2s_zero_dma_buffer((i2s_port_t)m_i2s_num);
+    m_pin_config.data_in_num = DIN;
+    return i2s_set_pin((i2s_port_t)m_i2s_num, &m_pin_config) == ESP_OK;
+}
+bool Audio::clearDuplexInput() {
+    if (!m_f_i2sInstalled) return false;
+    i2s_driver_uninstall((i2s_port_t)m_i2s_num);
+    m_i2s_config.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
+    m_f_i2sInstalled = (i2s_driver_install((i2s_port_t)m_i2s_num, &m_i2s_config, 0, NULL) == ESP_OK);
+    if (!m_f_i2sInstalled) return false;
+    i2s_zero_dma_buffer((i2s_port_t)m_i2s_num);
+    m_pin_config.data_in_num = I2S_PIN_NO_CHANGE;
+    return i2s_set_pin((i2s_port_t)m_i2s_num, &m_pin_config) == ESP_OK;
+}
+//---------------------------------------------------------------------------------------------------------------------
 uint32_t Audio::getFileSize() {
 #ifdef AUDIO_NO_SD_FS
     return 0;

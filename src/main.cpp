@@ -43,6 +43,7 @@
 #include "ota_update.h"
 #include "lua_net.h"
 #include "ethernet.h"   // wired port (T-Display P4) + net_is_up
+#include "audio/mic_lua.h"   // microphone bindings + session close (mic_dev.h underneath)
 #include "tdeck_link.h"
 
 // Radio + MeshCore helper classes (the protocol itself lives in the meshcore
@@ -5033,6 +5034,11 @@ void setupLuaVGL() {
     lua_pushboolean(L, power_dev_battery_mv() > 0);  lua_setfield(L, -2, "battery");
     lua_pushboolean(L, power_dev_usb_port_power()); lua_setfield(L, -2, "usb_power");
     lua_pushboolean(L, ethernet_available());      lua_setfield(L, -2, "eth");
+    switch (mic_hw_kind()) {                       // absent = no microphone
+      case MIC_DEV_ES7210: lua_pushstring(L, "es7210"); lua_setfield(L, -2, "mic"); break;
+      case MIC_DEV_ES8311: lua_pushstring(L, "es8311"); lua_setfield(L, -2, "mic"); break;
+      default: break;
+    }
     lua_pushboolean(L, radio_hal_antenna_switch()); lua_setfield(L, -2, "antenna_switch");
     lua_pushstring(L, lora_proto_active());         lua_setfield(L, -2, "lora_proto");
     return 1;
@@ -5804,6 +5810,7 @@ void setupLuaVGL() {
 
   // ── Sound ──────────────────────────────────────────────────────────────────
   sound_register_lua(L);
+  mic_register_lua(L);
 
   // ── Input (keyboard/trackball/touch policy + capture + emoji keymap) ──────
   input_ui_register_lua(L);
@@ -6977,6 +6984,9 @@ void luaTearDown() {
   MESH_UNLOCK();
   // Lua sockets die with their owner; this also ends the Core-1 net worker,
   // so its 16KB internal-SRAM stack is free before an ELF module allocates.
+  // A microphone session ends with it (the player resumes; the module's own
+  // takeover suspends it again).
+  mic_lua_close_all("lua teardown");
   lua_net_close_all("lua teardown");
   lua_close(dead);                            // GCs luavgl widgets -> lv_obj_del
   // Free the non-Lua global caches that survive lua_close and otherwise leave a
@@ -7795,6 +7805,7 @@ static void standby_run() {
 #endif
   // Lua sockets close before the radio drops (TLS close_notify still has a
   // link); apps see reason "standby" and reconnect after wake.
+  mic_lua_close_all("standby");
   lua_net_close_all("standby");
   bool wifi_was_on = (WiFi.getMode() != WIFI_OFF);
   if (wifi_was_on) WiFi.mode(WIFI_OFF);

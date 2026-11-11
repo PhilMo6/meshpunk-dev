@@ -210,3 +210,15 @@ bool es8311_init(TwoWire& wire, uint8_t addr) {
   SLog.println("[AUDIO] ES8311 up: I2S slave, 16-bit, MCLK 256 x fs, DAC 0 dB");
   return true;
 }
+
+bool es8311_mic_gain_set(uint8_t step) {
+  if (!s_wire) return false;
+  if (step > 7) step = 7;
+  s_fail_step = 0;
+  if (!rmw(0x16, 0xF8, step)) {
+    SLog.printf("[AUDIO] FAIL: ES8311 REG16 (ADC gain) %s, code %u\n",
+                s_fail_op, (unsigned)s_fail_code);
+    return false;
+  }
+  return true;
+}

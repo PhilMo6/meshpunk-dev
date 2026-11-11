@@ -62,6 +62,11 @@ struct MelodyNote {
 
 void sound_init(Audio* audio_ptr, void (*prefs_save_fn)());
 
+// The player's Audio object, the I2S port owner: the microphone seam's
+// duplex session on the boards whose codec shares the port (audio/mic_es8311.cpp).
+// NULL on the buzzer boards.
+Audio* sound_audio(void);
+
 int  sound_create_tone(const ToneParams& p);
 int  sound_create_tone(uint16_t freq_hz, uint16_t duration_ms);
 int  sound_create_chord(const uint16_t* freqs, int freq_count, const ToneParams& base);

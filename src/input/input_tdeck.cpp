@@ -308,6 +308,14 @@ bool input_dev_kbd_mic_edge(void) {
   return mic_now && !mic_prev;
 }
 
+// Held state from the raw matrix; legacy-mode keyboards report no matrix,
+// so the key is never held there.
+bool input_dev_kbd_mic_held(void) {
+  return (s_cur_matrix[KB_KEY_MIC_COL] & (1 << KB_KEY_MIC_ROW)) != 0;
+}
+
+bool input_dev_kbd_has_mic_key(void) { return input_dev_has_keyboard(); }
+
 // ── Legacy ASCII mode facet ────────────────────────────────────────────────
 
 bool input_dev_kbd_legacy_get(void) { return s_kb_legacy_mode; }

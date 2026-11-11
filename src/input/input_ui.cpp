@@ -182,7 +182,9 @@ void input_ui_set_legacy(bool on, bool save) {
 // ── Deferred shortcuts (flags set here, dispatched from loop()) ────────────
 // Bare mic press = notifications shortcut: the keyboard reader (LVGL indev
 // callback) only sets the flag; loop() dispatches it into Lua
-// (topbar.on_shortcut) outside of indev processing.
+// (topbar.on_shortcut) outside of indev processing. While a mic app holds
+// the microphone (audio/mic_lua.h) the key is push-to-talk instead.
+bool mic_lua_owner_active(void);
 static bool s_topbar_shortcut_pending = false;
 
 // Alt+mic while typing = emoji search popup (lib/emoji_popup). Same flag/
@@ -350,7 +352,9 @@ static void keyboard_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
           s_emoji_popup_target  = foc;
           s_emoji_popup_pending = true;
         }
-      } else {
+      } else if (!mic_lua_owner_active()) {
+        // With a mic app holding the microphone the key is push-to-talk
+        // (_mic_ptt reads it held); the shortcut returns when it closes.
         s_topbar_shortcut_pending = true;
       }
     }
@@ -947,6 +951,7 @@ void input_ui_register_lua(lua_State *L) {
     lua_pushboolean(L, input_dev_has_trackball());     lua_setfield(L, -2, "trackball");
     lua_pushboolean(L, input_dev_has_touch());         lua_setfield(L, -2, "touch");
     lua_pushboolean(L, input_dev_has_kbd_backlight()); lua_setfield(L, -2, "kbd_backlight");
+    lua_pushboolean(L, input_dev_kbd_has_mic_key());   lua_setfield(L, -2, "mic_key");
     return 1;
   });
 
