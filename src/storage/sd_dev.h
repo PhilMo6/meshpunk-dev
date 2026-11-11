@@ -40,3 +40,9 @@ uint32_t sd_dev_num_sectors(void);
 uint32_t sd_dev_sector_size(void);
 bool     sd_dev_read_raw(uint8_t* buf, uint32_t sector);
 bool     sd_dev_write_raw(const uint8_t* buf, uint32_t sector);
+
+// The card library's own handle, for a subsystem that drives the card
+// itself: USB drive mode on the SDMMC boards hands it to TinyUSB's MSC
+// storage. The sdmmc_card_t* on the T-Display P4 and the Wio L2, NULL on
+// the SPI-card boards.
+void*    sd_dev_native_handle(void);

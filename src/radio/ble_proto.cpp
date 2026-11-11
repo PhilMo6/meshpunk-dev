@@ -186,8 +186,9 @@ void ble_proto_select_and_init(void) {
     strncpy(s_active, ops->id, sizeof(s_active) - 1);
     s_active[sizeof(s_active) - 1] = '\0';
     SLog.printf("[BLEPROTO] active: %s (%s)\n", ops->id, ops->name ? ops->name : "");
-    // Controller + host now, before LVGL/Lua; the protocol's start() opens
-    // the GATT service over them later (ble_transport_open).
+    // Bluedroid boards: controller + host now, before LVGL/Lua (a no-op on
+    // the P4's NimBLE build, where the stack comes up in ble_transport_open);
+    // the protocol's start() opens the GATT service over them later.
     ble_transport_stack_up();
 }
 

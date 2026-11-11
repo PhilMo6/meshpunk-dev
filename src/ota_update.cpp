@@ -37,6 +37,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include "ethernet.h"   // net_is_up: WiFi or Ethernet
 #include <HTTPClient.h>
 #include <FS.h>
 #include "storage/sd_dev.h"
@@ -642,7 +643,7 @@ static int lua_ota_info(lua_State* L) {
 }
 
 static int lua_ota_check(lua_State* L) {
-  if (WiFi.status() != WL_CONNECTED) return push_fail(L, "WiFi not connected");
+  if (!net_is_up()) return push_fail(L, "not connected");
   HTTPClient http;
   http.setUserAgent("meshpunk/1.0");
   http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
@@ -697,7 +698,7 @@ static int lua_ota_begin(lua_State* L) {
   session_abort();
 
   if (strcmp(source, "url") == 0) {
-    if (WiFi.status() != WL_CONNECTED) return push_fail(L, "WiFi not connected");
+    if (!net_is_up()) return push_fail(L, "not connected");
     String tag = tag_from_name(String(arg));
     if (tag.length() == 0) return push_fail(L, "release file is not for this board");
     String path = sd_mounted ? kStageSd : kStageLfs;

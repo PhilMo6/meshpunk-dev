@@ -2,15 +2,21 @@
 -- The deck enumerates as a USB thumb drive backed by the SD card's raw
 -- sectors (MSC device mode, usb_msc_dev.cpp). While sharing, the PC owns the
 -- card exclusively: firmware apps see it as absent, the mesh radio pauses
--- (nothing may write the volume the PC owns), and USB serial is off (the OTG
--- side owns the pins). Stop — or closing this app by any path — disconnects,
--- remounts the card and resumes the mesh; the C-side watchdog force-stops if
--- this app dies without cleanup. After a session USB HOST mode (Tools > USB Host)
--- needs a reboot: the device stack has no uninstall.
+-- (nothing may write the volume the PC owns), and on the S3 boards USB serial
+-- is off (the OTG side owns the pins). Stop — or closing this app by any path
+-- — disconnects, remounts the card and resumes the mesh; the C-side watchdog
+-- force-stops if this app dies without cleanup. On the S3 boards the device
+-- stack has no uninstall, so after a session USB HOST mode (Tools > USB Host)
+-- needs a reboot (status field host_latched); the T-Display P4's stack
+-- uninstalls at Stop.
 local lvgl  = require("lvgl")
 local apps  = require("lib/apps")
 local nav   = require("lib/nav")
 local theme = require("lib/theme")
+
+-- The T-Display P4's USB console is a separate UART bridge, so its serial
+-- link stays up while the OTG port is shared.
+local serial_note = (_device_caps().name == "tdisplay_p4") and "" or " USB serial off."
 
 local root = apps.new_root()
 root:set { w = lvgl.HOR_RES(), h = lvgl.VER_RES(), pad_all = 0, border_width = 0, bg_opa = 0 }
@@ -85,7 +91,7 @@ local function refresh()
         local conn = st.connected and "connected to PC"
                   or (st.ejected and "ejected by PC - safe to stop" or "waiting for PC...")
         status:set { text = "Sharing SD card: " .. conn ..
-            "\nMesh paused. USB serial off.\nEject on the PC before Stop." }
+            "\nMesh paused." .. serial_note .. "\nEject on the PC before Stop." }
         xfer_lbl:set { text = string.format("%s transferred (%d rd / %d wr)",
             fmt_bytes(st.bytes), st.reads, st.writes) }
     end
@@ -120,7 +126,7 @@ stop_btn:onClicked(function()
     if stop_sharing() then
         local st = _usbdrive_status()
         status:set { text = "Stopped. SD card remounted." ..
-            "\nUSB host mode needs a reboot." }
+            (st.host_latched and "\nUSB host mode needs a reboot." or "") }
         xfer_lbl:set { text = string.format("Session: %s transferred", fmt_bytes(st.bytes)) }
         refresh_card()
     end

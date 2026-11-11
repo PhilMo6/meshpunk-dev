@@ -4,10 +4,10 @@
 // Touch-first board, like the Heltec and the Wio L2: a GT9895 capacitive
 // controller (10 points) on the shared I2C bus (tdisplay_p4_board.h) and the
 // BOOT button on GPIO35, the board's only button, as the input-mode (aux)
-// button that cycles the shared touch mode; touch selects. No keyboard, no
-// trackball (the keyboard accessory is a later phase of
-// docs/P4_PORT_PLAN_2026-10-12.md), so the on-screen keyboard and the touch
-// pads carry text and games.
+// button that cycles the shared touch mode; touch selects. No trackball.
+// LilyGo's keyboard expansion (a TCA8418 scanner on its own I2C bus, the
+// keyboard section below) is probed at init: attached, it is the keyboard;
+// absent, the on-screen keyboard and the touch pads carry text and games.
 //
 // GT9895 protocol (rung 3 of the bring-up ladder, p4/main/rung3_touch.c —
 // LilyGo's cpp_bus_driver gt9895 driver cross-checked against the mainline
@@ -107,10 +107,13 @@ static void IRAM_ATTR ISR_boot_btn() {
 }
 
 // ── Capabilities ───────────────────────────────────────────────────────────
-bool input_dev_has_keyboard(void)      { return false; }
+// The keyboard expansion is probed in input_dev_init (kbd_init below).
+static bool s_kbd_present = false;
+
+bool input_dev_has_keyboard(void)      { return s_kbd_present; }
 bool input_dev_has_trackball(void)     { return false; }
 bool input_dev_has_touch(void)         { return true; }
-bool input_dev_has_kbd_backlight(void) { return false; }
+bool input_dev_has_kbd_backlight(void) { return s_kbd_present; }
 
 // ── GT9895 ─────────────────────────────────────────────────────────────────
 static i2c_master_dev_handle_t s_gt = NULL;
@@ -500,6 +503,242 @@ static bool touch_init(void) {
   return true;
 }
 
+// ── Keyboard expansion (LilyGo T-Display-P4-Keyboard) ──────────────────────
+// Pogo-pin accessory: a TCA8418 keypad scanner and an XL9555 expander on
+// their own I2C bus (the 1x4 expansion header P2, "I2C port 3" in LilyGo's
+// lilygo_device_driver, v1 keyboard_expansion_config.h), the SY7200A
+// backlight EN and the scanner's INT line on header P1. INT is pulled up on
+// the keyboard; with the P4's pull-down it reads high only while the
+// keyboard is attached. Probed once in input_dev_init: absent, this board
+// stays touch-only. The T-MixRF radios on the keyboard are left disabled.
+#define KBD_I2C_PORT   1
+#define KBD_I2C_SDA    46
+#define KBD_I2C_SCL    45
+#define KBD_INT_GPIO   48
+#define KBD_BL_GPIO    47
+#define KBD_BL_PWM_HZ  20000     // LilyGo's SY7200A PWM rate
+#define KBD_EXP_ADDR   0x20
+#define KBD_TCA_ADDR   0x34
+
+// XL9555 (PCA9535-compatible, the registers of the board's XL9535): port 0
+// output register 0x02, configuration register 0x06 (bit 1 = input). Lines
+// on port 0: IO0 T-MixRF enable, IO3/IO4/IO5 LEDs (low = lit), IO6 TCA8418
+// reset.
+#define KBD_XL_REG_OUT0   0x02
+#define KBD_XL_REG_CFG0   0x06
+#define KBD_XL_TMIXRF_EN  0x01
+#define KBD_XL_LED1       0x08
+#define KBD_XL_LED2       0x10
+#define KBD_XL_LED3       0x20
+#define KBD_XL_TCA_RST    0x40
+#define KBD_XL_OUTPUTS    (KBD_XL_TMIXRF_EN | KBD_XL_LED1 | KBD_XL_LED2 | KBD_XL_LED3 | KBD_XL_TCA_RST)
+
+// TCA8418 registers (datasheet): CFG 0x01 (bit 7 auto-increment, bit 5
+// overflow flush), INT_STAT 0x02 (bit 3 FIFO overflow, bit 0 key events;
+// writing 1 clears), KEY_LCK_EC 0x03 (bits 0-3 = events waiting in the
+// 10-deep FIFO), KEY_EVENT_A 0x04 (reading pops one event: bit 7 press /
+// release, bits 0-6 key number = row * 10 + column + 1), KP_GPIO1-3
+// 0x1D-0x1F (ROW0-7, COL0-7, COL8-9 as keypad lines). The keyboard uses
+// rows 0-6 and columns 0-9: key numbers 1..70.
+#define TCA_REG_CFG        0x01
+#define TCA_REG_INT_STAT   0x02
+#define TCA_REG_KEY_LCK_EC 0x03
+#define TCA_REG_KEY_EVENT  0x04
+#define TCA_REG_KP_GPIO1   0x1D
+#define TCA_CFG_AI         0x80
+#define TCA_CFG_OVR_FLUSH  0x20
+#define TCA_INT_OVR_FLOW   0x08
+#define TCA_INT_ALL        0x1F
+#define TCA_KEYS           70
+
+// Key numbers of the keys that are not characters (LilyGo's kMap).
+#define KN_CAPS    31
+#define KN_ALT     41
+#define KN_UP      50
+#define KN_FN_A    51
+#define KN_META    52
+#define KN_SHIFT   53
+#define KN_FN_B    58
+#define KN_LEFT    59
+#define KN_DOWN    60
+#define KN_RECORD  65
+#define KN_RIGHT   68
+
+// Arrow keys feed the nav pulse counters: one pulse at the press, then one
+// every KBD_REPEAT_MS once held for KBD_REPEAT_DELAY_MS.
+#define KBD_REPEAT_DELAY_MS 400
+#define KBD_REPEAT_MS       100
+
+// Normal / Fn layer per key number (LilyGo's kMap). F1-F11 and Control
+// report nothing; Esc is 0x1B (LV_KEY_ESC for the UI, Esc for modules), Tab
+// 0x09 (LV_KEY_NEXT); Enter and Backspace 0x0D / 0x08 in both fields as
+// input_dev.h requires; the modifiers, the arrows, Meta and Record are read
+// from the key state and report nothing here.
+static const InputKeyEv kbd_map[TCA_KEYS + 1] = {
+  {0, 0},                                                       // no key
+  {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0},                       //  1-5  F1-F5
+  {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0},                       //  6-10 F6-F10
+  {0x1B, 0x1B}, {0x1B, 0x1B},                                   // 11-12 Esc
+  {'1', '!'}, {'2', '@'}, {'3', '#'}, {'4', '$'},               // 13-16
+  {'5', '%'}, {'6', '^'}, {'7', '&'}, {'8', '*'},               // 17-20
+  {'q', '\''}, {'w', '_'}, {'e', '-'}, {'r', '+'}, {'t', '='},  // 21-25
+  {'y', '\\'}, {'u', '|'}, {'i', ';'}, {'o', ':'}, {'p', '"'},  // 26-30
+  {0, 0},                                                       // 31 Caps Lock
+  {'a', '~'}, {'s', '['}, {'d', ']'}, {'f', '{'}, {'g', '}'},   // 32-36
+  {'h', ','}, {'j', '`'}, {'k', '/'}, {'l', '?'},               // 37-40
+  {0, 0},                                                       // 41 Alt
+  {'z', 0}, {'x', 0}, {'c', 0}, {'v', 0},                       // 42-45
+  {'b', '.'}, {'n', '<'}, {'m', '>'},                           // 46-48
+  {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0},                       // 49-53 Control, Up, Fn, Meta, Shift
+  {0x09, 0x09},                                                 // 54 Tab
+  {' ', ' '}, {' ', ' '}, {' ', ' '},                           // 55-57 Space
+  {0, 0}, {0, 0}, {0, 0}, {0, 0},                               // 58-61 Fn, Left, Down, F11
+  {'9', '('},                                                   // 62
+  {0x08, 0x08},                                                 // 63 Backspace
+  {0x0D, 0x0D},                                                 // 64 Enter
+  {0, 0},                                                       // 65 Record
+  {0x0D, 0x0D},                                                 // 66 Enter
+  {'0', ')'},                                                   // 67
+  {0, 0},                                                       // 68 Right
+  {0, 0}, {0, 0},                                               // 69-70 no key
+};
+
+static i2c_master_bus_handle_t s_kbd_bus = NULL;
+static i2c_master_dev_handle_t s_kbd_exp = NULL;
+static i2c_master_dev_handle_t s_tca     = NULL;
+static uint8_t  s_kbd_exp_out0 = 0;             // XL9555 port 0 output shadow
+static uint8_t  s_key_down[TCA_KEYS + 1];       // 1 while held, by key number
+static uint8_t  s_key_prev[TCA_KEYS + 1];       // the previous poll's s_key_down
+static bool     s_caps = false;                 // Caps Lock latch (LED1 shows it)
+static uint32_t s_arrow_next_ms[4];             // auto-repeat deadlines: up, down, left, right
+static bool     s_kbd_read_failing  = false;
+static int      s_kbd_overflow_logs = 0;
+static bool     s_kbd_bl_ready      = false;
+
+static bool kbd_exp_write(uint8_t reg, uint8_t val) {
+  uint8_t buf[2] = { reg, val };
+  return i2c_master_transmit(s_kbd_exp, buf, sizeof(buf), 100) == ESP_OK;
+}
+
+static bool kbd_exp_out(uint8_t mask, bool high) {
+  if (high) s_kbd_exp_out0 |= mask;
+  else      s_kbd_exp_out0 &= (uint8_t)~mask;
+  return kbd_exp_write(KBD_XL_REG_OUT0, s_kbd_exp_out0);
+}
+
+// The LEDs sink current through the expander: low = lit.
+static void kbd_led(uint8_t mask, bool lit) {
+  kbd_exp_out(mask, !lit);
+}
+
+static bool tca_write(uint8_t reg, uint8_t val) {
+  uint8_t buf[2] = { reg, val };
+  return i2c_master_transmit(s_tca, buf, sizeof(buf), 100) == ESP_OK;
+}
+
+static bool tca_read(uint8_t reg, uint8_t* val) {
+  return i2c_master_transmit_receive(s_tca, &reg, 1, val, 1, 100) == ESP_OK;
+}
+
+// Pops and discards every event waiting in the FIFO, then clears the flags.
+static bool tca_flush(void) {
+  uint8_t ec = 0;
+  if (!tca_read(TCA_REG_KEY_LCK_EC, &ec)) return false;
+  for (int i = ec & 0x0F; i > 0; i--) {
+    uint8_t ev = 0;
+    if (!tca_read(TCA_REG_KEY_EVENT, &ev)) return false;
+  }
+  return tca_write(TCA_REG_INT_STAT, TCA_INT_ALL);
+}
+
+static void kbd_backlight_set(uint8_t value) {
+  if (!s_kbd_bl_ready) return;
+  ledcWrite(KBD_BL_GPIO, value);
+}
+
+static bool kbd_init(uint8_t backlight_boot) {
+  pinMode(KBD_INT_GPIO, INPUT_PULLDOWN);
+  const bool int_high = digitalRead(KBD_INT_GPIO) == HIGH;
+
+  i2c_master_bus_config_t bus_cfg = {};
+  bus_cfg.i2c_port = KBD_I2C_PORT;
+  bus_cfg.sda_io_num = (gpio_num_t)KBD_I2C_SDA;
+  bus_cfg.scl_io_num = (gpio_num_t)KBD_I2C_SCL;
+  bus_cfg.clk_source = I2C_CLK_SRC_DEFAULT;
+  bus_cfg.glitch_ignore_cnt = 7;
+  bus_cfg.flags.enable_internal_pullup = true;
+  if (i2c_new_master_bus(&bus_cfg, &s_kbd_bus) != ESP_OK) {
+    s_kbd_bus = NULL;
+    SLog.printf("[KBD] FAIL: I2C master bus create (port %d, SDA %d, SCL %d)\n",
+                KBD_I2C_PORT, KBD_I2C_SDA, KBD_I2C_SCL);
+    return false;
+  }
+  if (i2c_master_probe(s_kbd_bus, KBD_EXP_ADDR, 50) != ESP_OK) {
+    SLog.printf("[KBD] no keyboard expansion (XL9555 at 0x%02X silent, INT %s)\n",
+                KBD_EXP_ADDR, int_high ? "high" : "low");
+    i2c_del_master_bus(s_kbd_bus);
+    s_kbd_bus = NULL;
+    return false;
+  }
+
+  i2c_device_config_t dev_cfg = {};
+  dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+  dev_cfg.device_address = KBD_EXP_ADDR;
+  dev_cfg.scl_speed_hz = 400000;
+  if (i2c_master_bus_add_device(s_kbd_bus, &dev_cfg, &s_kbd_exp) != ESP_OK) {
+    s_kbd_exp = NULL;
+    SLog.println("[KBD] FAIL: XL9555 device add");
+    return false;
+  }
+  dev_cfg.device_address = KBD_TCA_ADDR;
+  if (i2c_master_bus_add_device(s_kbd_bus, &dev_cfg, &s_tca) != ESP_OK) {
+    s_tca = NULL;
+    SLog.println("[KBD] FAIL: TCA8418 device add");
+    return false;
+  }
+
+  // Expander: LEDs off (high), T-MixRF disabled (low), the scanner held in
+  // reset (low); those five lines as outputs, the rest inputs. Then the
+  // reset released (LilyGo: 10 ms low, 10 ms high).
+  s_kbd_exp_out0 = KBD_XL_LED1 | KBD_XL_LED2 | KBD_XL_LED3;
+  if (!kbd_exp_write(KBD_XL_REG_OUT0, s_kbd_exp_out0) ||
+      !kbd_exp_write(KBD_XL_REG_CFG0, (uint8_t)~KBD_XL_OUTPUTS)) {
+    SLog.println("[KBD] FAIL: XL9555 setup");
+    return false;
+  }
+  delay(10);
+  if (!kbd_exp_out(KBD_XL_TCA_RST, true)) {
+    SLog.println("[KBD] FAIL: XL9555 write (scanner reset release)");
+    return false;
+  }
+  delay(10);
+
+  // Scanner: auto-increment + overflow flush, rows 0-6 and columns 0-9 as
+  // the keypad (KP_GPIO1-3 in one auto-incremented write), FIFO and flags
+  // cleared.
+  const uint8_t kp[4] = { TCA_REG_KP_GPIO1, 0x7F, 0xFF, 0x03 };
+  if (!tca_write(TCA_REG_CFG, TCA_CFG_AI | TCA_CFG_OVR_FLUSH) ||
+      i2c_master_transmit(s_tca, kp, sizeof(kp), 100) != ESP_OK ||
+      !tca_flush()) {
+    SLog.printf("[KBD] FAIL: TCA8418 setup (no scanner at 0x%02X?)\n", KBD_TCA_ADDR);
+    return false;
+  }
+  memset(s_key_down, 0, sizeof(s_key_down));
+  memset(s_key_prev, 0, sizeof(s_key_prev));
+  s_caps = false;
+
+  // Backlight: the SY7200A EN pin PWM-dimmed by LEDC, 8-bit at 20 kHz.
+  s_kbd_bl_ready = ledcAttach(KBD_BL_GPIO, KBD_BL_PWM_HZ, 8);
+  if (!s_kbd_bl_ready) SLog.println("[KBD] FAIL: backlight PWM attach");
+  kbd_backlight_set(backlight_boot);
+
+  s_kbd_present = true;
+  SLog.printf("[KBD] T-Display-P4-Keyboard up: TCA8418 10x7 at 0x%02X, XL9555 at 0x%02X, I2C port %d (SDA %d, SCL %d), INT %s, backlight %u\n",
+              KBD_TCA_ADDR, KBD_EXP_ADDR, KBD_I2C_PORT, KBD_I2C_SDA, KBD_I2C_SCL,
+              int_high ? "high" : "low", backlight_boot);
+  return true;
+}
+
 // ── Lifecycle ──────────────────────────────────────────────────────────────
 
 void input_dev_preinit(void) {
@@ -508,11 +747,13 @@ void input_dev_preinit(void) {
 }
 
 void input_dev_init(uint8_t kbd_backlight_boot) {
-  (void)kbd_backlight_boot;   // no keyboard, no backlight
   touch_init();
+  kbd_init(kbd_backlight_boot);
 }
 
-void input_dev_shutdown_prepare(void) {}
+void input_dev_shutdown_prepare(void) {
+  kbd_backlight_set(0);
+}
 
 void input_dev_wake_pin_release(void) {
   detachInterrupt(PIN_BOOT_BTN);
@@ -523,20 +764,98 @@ void input_dev_wake_pin_restore(void) {
   attachInterrupt(PIN_BOOT_BTN, ISR_boot_btn, FALLING);
 }
 
-// ── Keyboard facet: no keyboard on this board ──────────────────────────────
+// ── Keyboard facet: the expansion keyboard (kbd_init above) ──────────────────────────────
 
-void    input_dev_kbd_poll(bool detect_legacy_fw) { (void)detect_legacy_fw; }
+// One poll = the scanner's status and event count, then one read per
+// waiting event (each read pops it). The key state is a pressed set kept
+// across polls; a FIFO overflow (the scanner flushed events, a release may
+// be among them) resets it until the next events.
+void input_dev_kbd_poll(bool detect_legacy_fw) {
+  (void)detect_legacy_fw;   // no legacy protocol on this keyboard
+  if (!s_kbd_present) return;
+  memcpy(s_key_prev, s_key_down, sizeof(s_key_down));
+
+  uint8_t st = 0, ec = 0;
+  if (!tca_read(TCA_REG_INT_STAT, &st) || !tca_read(TCA_REG_KEY_LCK_EC, &ec)) {
+    if (!s_kbd_read_failing) {
+      SLog.println("[KBD] scanner read FAILING");
+      s_kbd_read_failing = true;
+    }
+    return;
+  }
+  if (s_kbd_read_failing) {
+    SLog.println("[KBD] scanner read recovered");
+    s_kbd_read_failing = false;
+  }
+
+  const int n = ec & 0x0F;
+  for (int i = 0; i < n; i++) {
+    uint8_t ev = 0;
+    if (!tca_read(TCA_REG_KEY_EVENT, &ev)) break;
+    const uint8_t num = ev & 0x7F;
+    if (num == 0 || num > TCA_KEYS) continue;
+    s_key_down[num] = (ev & 0x80) ? 1 : 0;
+  }
+  if (st & TCA_INT_OVR_FLOW) {
+    memset(s_key_down, 0, sizeof(s_key_down));
+    if (s_kbd_overflow_logs < 10) {
+      s_kbd_overflow_logs++;
+      SLog.println("[KBD] FIFO overflow: key states reset");
+    }
+  }
+  if (st) tca_write(TCA_REG_INT_STAT, TCA_INT_ALL);
+
+  const uint32_t now = millis();
+  if (s_key_down[KN_CAPS] && !s_key_prev[KN_CAPS]) {
+    s_caps = !s_caps;
+    kbd_led(KBD_XL_LED1, s_caps);
+  }
+  // Meta = the input-mode button, like BOOT.
+  if (s_key_down[KN_META] && !s_key_prev[KN_META]) s_aux_pending = true;
+
+  static const uint8_t k_arrow[4] = { KN_UP, KN_DOWN, KN_LEFT, KN_RIGHT };
+  volatile int* const k_ctr[4] = { &trackball_up, &trackball_down, &trackball_left, &trackball_right };
+  for (int i = 0; i < 4; i++) {
+    const uint8_t num = k_arrow[i];
+    if (!s_key_down[num]) continue;
+    if (!s_key_prev[num]) {
+      *k_ctr[i] = *k_ctr[i] + 1;
+      s_arrow_next_ms[i] = now + KBD_REPEAT_DELAY_MS;
+    } else if ((int32_t)(now - s_arrow_next_ms[i]) >= 0) {
+      *k_ctr[i] = *k_ctr[i] + 1;
+      s_arrow_next_ms[i] = now + KBD_REPEAT_MS;
+    }
+  }
+}
+
 uint8_t input_dev_kbd_legacy_byte(void) { return 0; }
 
 void input_dev_kbd_mods(bool* lshift, bool* rshift, bool* sym, bool* alt) {
-  if (lshift) *lshift = false;
+  if (lshift) *lshift = s_kbd_present && s_key_down[KN_SHIFT];
   if (rshift) *rshift = false;
-  if (sym)    *sym    = false;
-  if (alt)    *alt    = false;
+  if (sym)    *sym    = s_kbd_present && (s_key_down[KN_FN_A] || s_key_down[KN_FN_B]);
+  if (alt)    *alt    = s_kbd_present && s_key_down[KN_ALT];
 }
 
-int  input_dev_kbd_decode(InputKeyEv* out, int max) { (void)out; (void)max; return 0; }
-bool input_dev_kbd_mic_edge(void) { return false; }
+// Caps Lock is applied here (letters upcased in base) rather than reported
+// as shift: a latched shift would also arm the Shift+Alt chord.
+int input_dev_kbd_decode(InputKeyEv* out, int max) {
+  if (!s_kbd_present) return 0;
+  int n = 0;
+  for (int num = 1; num <= TCA_KEYS && n < max; num++) {
+    if (!s_key_down[num]) continue;
+    InputKeyEv ev = kbd_map[num];
+    if (ev.base == 0 && ev.sym == 0) continue;
+    if (s_caps && ev.base >= 'a' && ev.base <= 'z') ev.base = (uint8_t)(ev.base - 32);
+    out[n++] = ev;
+  }
+  return n;
+}
+
+// Record: the mic key's role (down this poll, up the last).
+bool input_dev_kbd_mic_edge(void) {
+  return s_kbd_present && s_key_down[KN_RECORD] && !s_key_prev[KN_RECORD];
+}
 
 bool input_dev_kbd_legacy_get(void)  { return false; }
 void input_dev_kbd_legacy_load(bool on) { (void)on; }
@@ -544,7 +863,9 @@ void input_dev_kbd_legacy_set(bool on)  { (void)on; }
 bool input_dev_kbd_legacy_autoswitch_pending(void) { return false; }
 void input_dev_kbd_autoswitch_close(void) { }
 
-void input_dev_kbd_backlight(uint8_t value)         { (void)value; }
+void input_dev_kbd_backlight(uint8_t value) { kbd_backlight_set(value); }
+// The T-Deck's keyboard MCU keeps an idle level of its own; this keyboard has
+// one PWM level, set by input_dev_kbd_backlight.
 void input_dev_kbd_backlight_default(uint8_t value) { (void)value; }
 
 // ── Nav click level ────────────────────────────────────────────────────────

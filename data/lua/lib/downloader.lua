@@ -54,7 +54,9 @@ local M = {}
 -- Repo the downloads come from. Override by writing S:/meshpunk/appstore.toml:
 --   [source]
 --   url = "https://raw.githubusercontent.com/you/your-apps-repo/main"
--- (Read once per Lua state — reboot/ELF-run picks up an edited config.)
+-- base_url() reads the file once and keeps the answer; reload_source() drops
+-- it, which the App Library does at every launch so an edited or deleted
+-- config takes effect without a reboot.
 M.DEFAULT_URL = "https://raw.githubusercontent.com/PhilMo6/meshpunk-apps/main"
 local CONFIG_PATH = "S:/meshpunk/appstore.toml"
 
@@ -76,6 +78,9 @@ function M.low_space_msg(loc)
 end
 
 local base_url = nil
+function M.reload_source()
+    base_url = nil
+end
 function M.base_url()
     if base_url then return base_url end
     base_url = M.DEFAULT_URL

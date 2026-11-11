@@ -42,6 +42,7 @@
 #include "usb_fs.h"
 #include "ota_update.h"
 #include "lua_net.h"
+#include "ethernet.h"   // wired port (T-Display P4) + net_is_up
 #include "tdeck_link.h"
 
 // Radio + MeshCore helper classes (the protocol itself lives in the meshcore
@@ -278,6 +279,7 @@ bool   ble_bond_clear_pref = false;
 // Newest messages the companion sync serves per conversation file (0 = all).
 static uint16_t ble_sync_max_per_channel = 100;
 static bool   wifi_enabled_pref = true;
+static bool   eth_enabled_pref  = false;   // wired Ethernet on boards with a port (ethernet.h); off until Settings > WiFi turns it on
 // Saved WiFi networks (multi-slot). /wifi_creds holds alternating ssid/pass
 // lines, so the legacy single-network file (2 lines) reads as one entry.
 #define WIFI_MAX_NETS 8
@@ -410,6 +412,7 @@ static void write_firmware_prefs(fs::FS& fs, const char* path) {
   f.printf("ble_bond_clear=%d\n", ble_bond_clear_pref ? 1 : 0);
   f.printf("ble_sync_max=%d\n", ble_sync_max_per_channel);
   f.printf("wifi_enabled=%d\n", wifi_enabled_pref ? 1 : 0);
+  f.printf("eth_enabled=%d\n", eth_enabled_pref ? 1 : 0);
   f.printf("lora_protocol=%s\n", lora_proto_requested());
   f.printf("antenna=%s\n", radio_hal_antenna_external() ? "external" : "internal");
   f.printf("ota_channel=%s\n", ota_channel_requested());
@@ -823,6 +826,8 @@ static void firmware_prefs_load() {
       if (v >= 0 && v <= 5000) ble_sync_max_per_channel = (uint16_t)v;
     } else if (strcmp(key, "wifi_enabled") == 0) {
       wifi_enabled_pref = (atoi(val) == 1);
+    } else if (strcmp(key, "eth_enabled") == 0) {
+      eth_enabled_pref = (atoi(val) == 1);
     } else if (strcmp(key, "lora_protocol") == 0) {
       lora_proto_set_requested(val);   // sanitizes; bad ids become "meshcore"
     } else if (strcmp(key, "antenna") == 0) {
@@ -1898,6 +1903,15 @@ static int lua_wifi_status(lua_State *L) {
   wl_status_t status = WiFi.status();
   const char *status_str = "unknown";
 
+  if (ethernet_connected()) {
+    // The wired port has an address and carries the default route: it is
+    // what the apps' "connected" means. "Ethernet" sits in the SSID slot.
+    lua_pushstring(L, "connected");
+    lua_pushstring(L, ethernet_ip().toString().c_str());
+    lua_pushstring(L, "Ethernet");
+    return 3;
+  }
+
   if (WiFi.getMode() == WIFI_MODE_NULL) {
     // Radio parked (no known network reachable) — not an error state.
     lua_pushstring(L, "off");
@@ -1967,11 +1981,11 @@ static int lua_wifi_fetch(lua_State *L) {
   // Parse headers if provided (table)
   lua_newtable(L); // Create result table
 
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!net_is_up()) {
     lua_pushboolean(L, 0); // success = false
     lua_setfield(L, -2, "success");
 
-    lua_pushstring(L, "WiFi not connected");
+    lua_pushstring(L, "not connected");
     lua_setfield(L, -2, "error");
 
     return 1;
@@ -2032,6 +2046,8 @@ static int lua_wifi_fetch(lua_State *L) {
     lua_pushstring(L, payload.c_str());
     lua_setfield(L, -2, "body");
   } else {
+    SLog.printf("[HTTP] %s %s: %s (%d)\n", method, url,
+                http.errorToString(httpCode).c_str(), httpCode);
     lua_pushboolean(L, 0); // success = false
     lua_setfield(L, -2, "success");
 
@@ -2157,11 +2173,11 @@ static int lua_wifi_download_file(lua_State *L) {
 
   lua_newtable(L);
 
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!net_is_up()) {
     wifi_dl_client_close();
     lua_pushboolean(L, 0);
     lua_setfield(L, -2, "success");
-    lua_pushstring(L, "WiFi not connected");
+    lua_pushstring(L, "not connected");
     lua_setfield(L, -2, "error");
     return 1;
   }
@@ -2433,6 +2449,27 @@ static int lua_wifi_set_enabled(lua_State *L) {
   }
   if (wifi_enabled_pref) wifi_auto_kick();
   if (persist) firmware_prefs_save();
+  return 0;
+}
+
+// Wired Ethernet, on boards with a port (_device_caps().eth).
+// _eth_get_enabled() -> enabled, state ("off" | "nolink" | "link" |
+// "connected"), ip.
+static int lua_eth_get_enabled(lua_State *L) {
+  lua_pushboolean(L, eth_enabled_pref);
+  const char *state = "off";
+  if (ethernet_started())
+    state = ethernet_connected() ? "connected" : (ethernet_link() ? "link" : "nolink");
+  lua_pushstring(L, state);
+  lua_pushstring(L, ethernet_connected() ? ethernet_ip().toString().c_str() : "");
+  return 3;
+}
+
+// _eth_set_enabled(on): starts or stops the port now and persists the choice.
+static int lua_eth_set_enabled(lua_State *L) {
+  eth_enabled_pref = lua_toboolean(L, 1);
+  if (eth_enabled_pref) ethernet_begin(); else ethernet_end();
+  firmware_prefs_save();
   return 0;
 }
 
@@ -4158,7 +4195,7 @@ static bool tile_http_open(const char *url) {
 // "wifi" | "http" | "truncated" (network — count toward connection-loss
 // detection) or "size" | "oom" | "frag" | "decode" | "sd" (local).
 static const char *do_tile_fetch(const char *url, const char *bin_path) {
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!net_is_up()) {
     tile_http_close();
     return "wifi";
   }
@@ -4940,6 +4977,8 @@ void setupLuaVGL() {
   lua_register(L, "_wifi_forget_cred", lua_wifi_forget_cred);
   lua_register(L, "_wifi_connect_saved", lua_wifi_connect_saved);
   lua_register(L, "_wifi_auto_connect", lua_wifi_auto_connect);
+  lua_register(L, "_eth_get_enabled", lua_eth_get_enabled);
+  lua_register(L, "_eth_set_enabled", lua_eth_set_enabled);
   lua_register(L, "_inflate", lua_inflate);
 
   // Mesh bridge: the _mesh_* surface is the active protocol's
@@ -4993,6 +5032,7 @@ void setupLuaVGL() {
     lua_setfield(L, -2, "audio");
     lua_pushboolean(L, power_dev_battery_mv() > 0);  lua_setfield(L, -2, "battery");
     lua_pushboolean(L, power_dev_usb_port_power()); lua_setfield(L, -2, "usb_power");
+    lua_pushboolean(L, ethernet_available());      lua_setfield(L, -2, "eth");
     lua_pushboolean(L, radio_hal_antenna_switch()); lua_setfield(L, -2, "antenna_switch");
     lua_pushstring(L, lora_proto_active());         lua_setfield(L, -2, "lora_proto");
     return 1;
@@ -7281,10 +7321,11 @@ void setup() {
   // BLE protocol slot (two-slot model, docs/PROTOCOL_ABI.md §6): selected
   // independently of the LoRa protocol. The companion protocol declares
   // requires_lora="meshcore" and the selector enforces it loudly. This loads
-  // and inits the protocol module and brings up the BLE controller and host
-  // (ble_transport_stack_up), so their internal-RAM allocations are made
-  // before the Lua session; the protocol's start() opens the GATT service in
-  // ble_proto_start() below.
+  // and inits the protocol module and, on the Bluedroid boards, brings up
+  // the BLE controller and host (ble_transport_stack_up) so their
+  // internal-RAM allocations are made before the Lua session (the P4's
+  // NimBLE host comes up with the transport in ble_proto_start()); the
+  // protocol's start() opens the GATT service in ble_proto_start() below.
   ble_proto_select_and_init();
   log_boot_mem("after BLE early");
 
@@ -7339,6 +7380,10 @@ void setup() {
     SLog.println("WiFi disabled by preference");
   }
   log_boot_mem("after wifi");
+  if (eth_enabled_pref) {
+    ethernet_begin();
+    log_boot_mem("after ethernet");
+  }
 
   // I2C bus + touch controller + keyboard probe/mode (board input backend);
   // kbd_brightness is the persisted backlight level applied on probe success.
@@ -7684,6 +7729,7 @@ static void system_shutdown() {
   ble_proto_flush();
   if (ble_proto_running()) ble_proto_stop();
   WiFi.mode(WIFI_OFF);
+  ethernet_end();   // PHY in reset; GPIO35 is the BOOT button again for the off-wake arm
   MESH_LOCK();
   radio_driver.powerOff();   // SX1262 -> sleep (SPI-locked inside)
   MESH_UNLOCK();
@@ -7752,6 +7798,10 @@ static void standby_run() {
   lua_net_close_all("standby");
   bool wifi_was_on = (WiFi.getMode() != WIFI_OFF);
   if (wifi_was_on) WiFi.mode(WIFI_OFF);
+  // Ethernet does not run through light sleep, and its TXD1 pad is the wake
+  // button: down before the pin is armed, up again after the wake.
+  bool eth_was_on = ethernet_started();
+  if (eth_was_on) ethernet_end();
   // Halt the I2S DMA + sound task (the ELF-takeover seam) — no peripheral
   // DMA runs across the light-sleep freezes, and any playing music stops
   // cleanly instead of stuttering through the drain windows. The deferred
@@ -7944,6 +7994,7 @@ static void standby_run() {
   // (input_ui.h).
   input_ui_ignore_click_until_release();
   if (wifi_was_on && wifi_enabled_pref) { WiFi.mode(WIFI_STA); wifi_auto_kick(); }
+  if (eth_was_on) ethernet_begin();
 #if BLE_COMPANION_ENABLED
   if (ble_was_on) ble_proto_resume();
 #endif

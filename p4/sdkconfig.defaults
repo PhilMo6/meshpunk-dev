@@ -61,6 +61,15 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_HOSTED_AUTO_INIT=n
 # esp-hosted's console commands are not used.
 CONFIG_ESP_HOSTED_CLI_ENABLED=n
+# The SDIO transport's packet pool — 31 blocks of 1536 bytes, one contiguous
+# 64-byte-aligned DMA allocation made at the first use of the C6 (the WiFi
+# start; with WiFi off, the BLE start late in setup) — lives in PSRAM: the
+# P4's SDMMC can DMA to and from PSRAM (SOC_SDMMC_PSRAM_DMA_CAPABLE), and a
+# 46 KB contiguous internal block is not there any more once the Lua/LVGL
+# bring-up has run. 2026-11-11: with WiFi off, BLE on and Ethernet on, the
+# pool allocation at the BLE start failed and esp-hosted's assert rebooted
+# the board on every boot.
+CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
 
 # ── Firmware build (Phase 0 of docs/P4_PORT_PLAN_2026-10-12.md) ────────────
 
@@ -121,3 +130,47 @@ CONFIG_FATFS_ALLOC_PREFER_EXTRAM=y
 # SPIRAM_PRE_CONFIGURE_MEMORY_PROTECTION), as the S3 boards have no
 # execute restriction on PSRAM either.
 CONFIG_SPIRAM_PRE_CONFIGURE_MEMORY_PROTECTION=n
+
+# ── Bluetooth: NimBLE host on the P4, controller on the C6 ─────────────────
+
+# The C6 runs LilyGo's esp-hosted 2.12.3 image, which offers its BLE
+# controller over the SDIO link (HCI over SDIO). The host side is IDF's
+# NimBLE with esp-hosted's VHCI driver as the host-controller transport
+# (libraries/esp_hosted/host/drivers/bt/vhci_drv.c), so IDF's UART
+# transport, the default once the controller is disabled, is off. The
+# Arduino BLE library builds on the P4 only with ESP_HOSTED_ENABLE_BT_NIMBLE
+# (libraries/BLE/src/BLEDevice.h); the firmware's class for this backend is
+# src/radio/punk_serial_ble.cpp. Peripheral + broadcaster only (the
+# companion is an advertising GATT server), one connection, bonded
+# secure-connections or legacy pairing with the bonds kept in NVS, host
+# memory in PSRAM.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_CONTROLLER_DISABLED=y
+CONFIG_BT_NIMBLE_TRANSPORT_UART=n
+CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE=y
+CONFIG_ESP_HOSTED_NIMBLE_HCI_VHCI=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=y
+CONFIG_BT_NIMBLE_SM_LEGACY=y
+CONFIG_BT_NIMBLE_SM_SC=y
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+CONFIG_BT_NIMBLE_MAX_BONDS=3
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=n
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
+
+# ── USB: the OTG high-speed port (USB-C USB1 and the USB-A host socket) ────
+
+# Host mode (src/usb/usb_core.cpp) uses IDF's host library on its default
+# peripheral, the high-speed one; hubs on, the firmware serving one accessory
+# behind a hub. Drive mode (src/usb/usb_msc_dev.cpp) uses esp_tinyusb's MSC
+# class on the same port with the component's P4 FIFO default; the strings
+# are what the PC shows for the drive.
+CONFIG_USB_HOST_HUBS_SUPPORTED=y
+CONFIG_TINYUSB_MSC_ENABLED=y
+CONFIG_TINYUSB_DESC_MANUFACTURER_STRING="MeshPunk"
+CONFIG_TINYUSB_DESC_PRODUCT_STRING="T-Display P4 SD"
+CONFIG_TINYUSB_DESC_MSC_STRING="T-Display P4 SD"

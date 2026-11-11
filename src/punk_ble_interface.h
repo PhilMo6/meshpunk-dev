@@ -2,9 +2,52 @@
 
 #if BLE_COMPANION_ENABLED
 
-#include <helpers/esp32/SerialBLEInterface.h>
+#include <sdkconfig.h>
 
 extern bool ble_bond_clear_pref;
+
+#if defined(CONFIG_NIMBLE_ENABLED)
+
+// NimBLE backend (T-Display P4: NimBLE host on the P4, controller on the
+// C6): the Meshpunk serial-BLE class, NimBLE connection descriptors and
+// bond store.
+#include "radio/punk_serial_ble.h"
+#include <host/ble_store.h>
+
+class PunkBLEInterface : public PunkSerialBLE {
+  ble_addr_t _peer_addr;
+  bool _has_peer = false;
+
+protected:
+  using PunkSerialBLE::onAuthenticationComplete;
+  void onAuthenticationComplete(ble_gap_conn_desc* desc, int status) override {
+    if (status == 0) {
+      _peer_addr = desc->peer_id_addr;
+      _has_peer = true;
+
+      // 30-50 ms interval, latency 4, 6 s timeout (units 1.25 ms / 10 ms):
+      // the link parameters the Bluedroid build requests below.
+      pServer->requestConnParams(desc->conn_handle, 24, 40, 4, 600);
+    } else {
+      // Bond mismatch — clear stale bond so next attempt re-pairs cleanly
+      ble_store_util_delete_peer(&desc->peer_id_addr);
+    }
+    PunkSerialBLE::onAuthenticationComplete(desc, status);
+  }
+
+  using PunkSerialBLE::onDisconnect;
+  void onDisconnect(BLEServer* server) override {
+    if (_has_peer && ble_bond_clear_pref) {
+      ble_store_util_delete_peer(&_peer_addr);
+      _has_peer = false;
+    }
+    PunkSerialBLE::onDisconnect(server);
+  }
+};
+
+#else  // Bluedroid backend (the S3 boards)
+
+#include <helpers/esp32/SerialBLEInterface.h>
 
 class PunkBLEInterface : public SerialBLEInterface {
   esp_bd_addr_t _peer_addr;
@@ -39,4 +82,5 @@ protected:
   }
 };
 
-#endif
+#endif  // backend
+#endif  // BLE_COMPANION_ENABLED

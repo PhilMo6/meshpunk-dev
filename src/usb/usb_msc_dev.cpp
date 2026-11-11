@@ -1,14 +1,13 @@
 // USB drive mode — expose the SD card to a PC as a Mass Storage device.
 //
 // DEVICE-mode counterpart of the host stack in usb_core.cpp: the OTG port
-// enumerates as a thumb drive whose sectors are the SD card's, via
-// sd_dev_read_raw/sd_dev_write_raw. The PC owns the FAT volume for the whole session; two
-// filesystems must never write one FAT volume concurrently, so a session
-// holds three locks at once:
+// enumerates as a thumb drive whose sectors are the SD card's. The PC owns
+// the FAT volume for the whole session; two filesystems must never write one
+// FAT volume concurrently, so a session holds three locks at once:
 //   1. sd_mounted = false — every firmware FS path (Lua _fs_*, io.open,
 //      meshpunk_open, the _list_dir_sd helpers) already treats an unmounted
 //      card as absent; the card itself stays mounted (storage/sd_dev.h) so
-//      the raw-sector callbacks keep working.
+//      the sector access keeps working.
 //   2. mesh_task_paused = true — punkmesh persists contacts/messages/
 //      channels to SD from the mesh task; parking the dispatcher stops
 //      those writes at the source (and frees the shared SPI bus).
@@ -17,16 +16,22 @@
 //   3. emoji_font_reload(true) — the extended emoji set can hold an SD file
 //      open across sessions; close-only release before the PC takes over.
 //
-// The pins: while a session runs the OTG peripheral owns the USB pads, so
-// Serial-JTAG (SLog, link cable, flashing) is dead — identical to host mode.
-// HWCDC writes drop non-blocking when the pins are gone, so SLog is safe to
-// call throughout.
-//
-// TinyUSB here has no device-stack uninstall (tud_disconnect only, no
-// tud_deinit): USB.begin() runs once per boot and later sessions reconnect
-// the resident stack. Consequence: after drive mode has run, the OTG
-// controller can't be handed to the host library — usb_manager_start()
-// refuses until reboot (usbdrive_used_this_boot).
+// Two transports, one per USB stack:
+//   - S3 boards: the Arduino USB/USBMSC classes on the full-speed OTG port;
+//     sectors move through sd_dev_read_raw/sd_dev_write_raw. While a session
+//     runs the OTG peripheral owns the USB pads, so Serial-JTAG (SLog, link
+//     cable, flashing) is dead — identical to host mode; HWCDC writes drop
+//     non-blocking when the pins are gone, so SLog is safe to call
+//     throughout. This TinyUSB has no device-stack uninstall (tud_disconnect
+//     only, no tud_deinit): USB.begin() runs once per boot and later
+//     sessions reconnect the resident stack, so after drive mode has run the
+//     OTG controller can't be handed to the host library —
+//     usb_manager_start() refuses until reboot (usbdrive_used_this_boot).
+//   - T-Display P4: esp_tinyusb on the OTG high-speed port (USB-C USB1);
+//     its MSC class moves the sectors itself through the SDMMC card handle
+//     (sd_dev_native_handle). The console is the CH343 UART, so SLog stays
+//     up, and the stack uninstalls at session end, so host mode may follow
+//     without a reboot.
 //
 // Watchdog: the Tools/"USB Drive" app pings while it is alive; usbdrive_tick
 // (called from loop()) force-stops a session ~3s after pings stop, so no
@@ -44,6 +49,7 @@
 #include "sdkconfig.h"
 #if CONFIG_TINYUSB_MSC_ENABLED
 
+#if CONFIG_IDF_TARGET_ESP32S3
 #include "USB.h"
 #include "USBMSC.h"
 #include "esp32-hal-tinyusb.h"     // tud_connect/tud_disconnect/tud_mounted
@@ -51,15 +57,19 @@
                                    // tusb_option.h + tusb_config.h correctly)
 #include <soc/usb_serial_jtag_struct.h>
 #include <soc/rtc_cntl_struct.h>
+#else
+#include "tinyusb.h"
+#include "tinyusb_default_config.h"
+#include "tinyusb_msc.h"
+#include "tusb.h"                  // tud_mounted
+#include "sdmmc_cmd.h"             // sdmmc_card_t
+#endif
 
 extern bool sd_mounted;            // main.cpp
 extern bool meshpunk_sd_mount();   // main.cpp: boot/remount probe
 void sd_spi_release();             // main.cpp (take is inline in meshpunk_sync.h)
 
-static USBMSC s_msc;
-
 static volatile bool     s_active     = false;
-static bool              s_used_boot  = false;   // OTG device stack resident
 static volatile bool     s_ejected    = false;
 static volatile uint32_t s_reads      = 0;       // sectors
 static volatile uint32_t s_writes     = 0;       // sectors
@@ -68,6 +78,12 @@ static volatile uint32_t s_last_ping  = 0;
 static const char*       s_fail       = "";
 
 #define USBDRIVE_PING_TIMEOUT_MS 3000
+
+#if CONFIG_IDF_TARGET_ESP32S3
+// ── Transport: Arduino USB/USBMSC (S3 boards) ──────────────────────────────
+
+static USBMSC s_msc;
+static bool   s_used_boot = false;   // OTG device stack resident
 
 // ── MSC callbacks (TinyUSB device task context) ─────────────────────────────
 // The core hands sector-aligned bursts (CONFIG_TINYUSB_MSC_BUFSIZE = 4096 →
@@ -117,38 +133,7 @@ static void claim_otg_phy() {
     RTCCNTL.usb_conf.sw_usb_phy_sel    = 1;
 }
 
-// ── Session lifecycle (Lua-binding context, Core 0) ─────────────────────────
-
-bool usbdrive_start(void) {
-    if (s_active) return true;
-    if (usb_manager_running()) { s_fail = "USB host mode is running"; return false; }
-    if (!sd_mounted)           { s_fail = "no SD card";               return false; }
-
-    uint32_t sectors = 0;
-    uint16_t secsize = 0;
-    sd_spi_take();
-    sectors = sd_dev_num_sectors();
-    secsize = (uint16_t)sd_dev_sector_size();
-    sd_spi_release();
-    if (!sectors || !secsize) { s_fail = "card geometry read failed"; return false; }
-
-    SLog.printf("[usbdrive] start: %lu sectors x %u (USB serial off until stop)\n",
-                (unsigned long)sectors, (unsigned)secsize);
-
-    // Order matters: stop the SD writers before hiding the card, hide the
-    // card before the PC can touch it.
-    emoji_font_reload(true);                    // close-only: drop the SD blob handle
-    mesh_task_paused = true;
-    vTaskDelay(pdMS_TO_TICKS(100));             // let an in-flight dispatcher pass finish
-    sd_mounted = false;
-
-    s_ejected = false;
-    s_reads = s_writes = 0;
-    s_bytes = 0;
-    s_fail  = "";
-    s_last_ping = millis();
-    s_active = true;
-
+static bool transport_start(uint32_t sectors, uint16_t secsize) {
     if (!s_used_boot) {
         s_msc.vendorID("MeshPnk");
         s_msc.productID("T-Deck SD");
@@ -167,12 +152,123 @@ bool usbdrive_start(void) {
     return true;
 }
 
+static void transport_stop(void) {
+    tud_disconnect();
+    restore_serial_jtag_phy();                  // pads back to Serial-JTAG
+}
+
+static bool transport_connected(void) { return tud_mounted(); }
+static bool transport_latched(void)   { return s_used_boot; }
+static const char* const k_start_note = " (USB serial off until stop)";
+
+#else
+// ── Transport: esp_tinyusb MSC (T-Display P4) ──────────────────────────────
+// The component moves the sectors itself through the SDMMC card handle, so
+// the read/write counters above stay at zero on this board. auto_mount_off
+// keeps the component from mounting its own FAT view of the card when the
+// PC disconnects: the firmware remounts the card at session end.
+
+static tinyusb_msc_storage_handle_t s_storage = NULL;
+
+static bool transport_start(uint32_t sectors, uint16_t secsize) {
+    (void)sectors; (void)secsize;               // the component reads the card's geometry
+    sdmmc_card_t* card = (sdmmc_card_t*)sd_dev_native_handle();
+    if (!card) { s_fail = "no card handle"; return false; }
+
+    tinyusb_config_t cfg = TINYUSB_DEFAULT_CONFIG();   // the high-speed port, default descriptors
+    esp_err_t err = tinyusb_driver_install(&cfg);
+    if (err != ESP_OK) {
+        SLog.printf("[usbdrive] FAIL: tinyusb_driver_install: %s\n", esp_err_to_name(err));
+        s_fail = "device stack install failed";
+        return false;
+    }
+    tinyusb_msc_driver_config_t dcfg = {};
+    dcfg.user_flags.auto_mount_off = 1;
+    err = tinyusb_msc_install_driver(&dcfg);
+    if (err != ESP_OK) {
+        SLog.printf("[usbdrive] FAIL: tinyusb_msc_install_driver: %s\n", esp_err_to_name(err));
+        tinyusb_driver_uninstall();
+        s_fail = "MSC class install failed";
+        return false;
+    }
+    tinyusb_msc_storage_config_t scfg = {};
+    scfg.medium.card = card;
+    scfg.mount_point = TINYUSB_MSC_STORAGE_MOUNT_USB;
+    err = tinyusb_msc_new_storage_sdmmc(&scfg, &s_storage);
+    if (err != ESP_OK) {
+        SLog.printf("[usbdrive] FAIL: tinyusb_msc_new_storage_sdmmc: %s\n", esp_err_to_name(err));
+        s_storage = NULL;
+        tinyusb_msc_uninstall_driver();
+        tinyusb_driver_uninstall();
+        s_fail = "card storage create failed";
+        return false;
+    }
+    return true;
+}
+
+static void transport_stop(void) {
+    if (s_storage) {
+        tinyusb_msc_delete_storage(s_storage);
+        s_storage = NULL;
+    }
+    tinyusb_msc_uninstall_driver();
+    tinyusb_driver_uninstall();
+}
+
+static bool transport_connected(void) { return tud_mounted(); }
+static bool transport_latched(void)   { return false; }
+static const char* const k_start_note = "";
+
+#endif
+
+// ── Session lifecycle (Lua-binding context, Core 0) ─────────────────────────
+
+bool usbdrive_start(void) {
+    if (s_active) return true;
+    if (usb_manager_running()) { s_fail = "USB host mode is running"; return false; }
+    if (!sd_mounted)           { s_fail = "no SD card";               return false; }
+
+    uint32_t sectors = 0;
+    uint16_t secsize = 0;
+    sd_spi_take();
+    sectors = sd_dev_num_sectors();
+    secsize = (uint16_t)sd_dev_sector_size();
+    sd_spi_release();
+    if (!sectors || !secsize) { s_fail = "card geometry read failed"; return false; }
+
+    SLog.printf("[usbdrive] start: %lu sectors x %u%s\n",
+                (unsigned long)sectors, (unsigned)secsize, k_start_note);
+
+    // Order matters: stop the SD writers before hiding the card, hide the
+    // card before the PC can touch it.
+    emoji_font_reload(true);                    // close-only: drop the SD blob handle
+    mesh_task_paused = true;
+    vTaskDelay(pdMS_TO_TICKS(100));             // let an in-flight dispatcher pass finish
+    sd_mounted = false;
+
+    s_ejected = false;
+    s_reads = 0;
+    s_writes = 0;
+    s_bytes = 0;
+    s_fail  = "";
+    s_last_ping = millis();
+    s_active = true;
+
+    if (!transport_start(sectors, secsize)) {   // the card goes back to the firmware
+        s_active = false;
+        sd_mounted = true;
+        mesh_task_paused = false;
+        SLog.printf("[usbdrive] start FAILED: %s\n", s_fail);
+        return false;
+    }
+    return true;
+}
+
 void usbdrive_stop(void) {
     if (!s_active) return;
     s_active = false;                           // callbacks refuse from here on
 
-    tud_disconnect();
-    restore_serial_jtag_phy();                  // pads back to Serial-JTAG
+    transport_stop();
 
     // Remount: drop every FAT structure the PC's writes invalidated.
     sd_spi_take();
@@ -187,7 +283,7 @@ void usbdrive_stop(void) {
 }
 
 bool usbdrive_active(void)         { return s_active; }
-bool usbdrive_used_this_boot(void) { return s_used_boot; }
+bool usbdrive_used_this_boot(void) { return transport_latched(); }
 void usbdrive_ping(void)           { s_last_ping = millis(); }
 
 void usbdrive_tick(void) {
@@ -199,9 +295,9 @@ void usbdrive_tick(void) {
 
 void usbdrive_status(UsbDriveStatus* out) {
     out->active       = s_active;
-    out->connected    = s_active && tud_mounted();
+    out->connected    = s_active && transport_connected();
     out->ejected      = s_ejected;
-    out->host_latched = s_used_boot;
+    out->host_latched = transport_latched();
     out->reads        = s_reads;
     out->writes       = s_writes;
     out->bytes        = s_bytes;

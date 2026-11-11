@@ -48,4 +48,6 @@ bool sd_dev_write_raw(const uint8_t* buf, uint32_t sector) {
   return SD.writeRAW((uint8_t*)buf, sector);
 }
 
+void* sd_dev_native_handle(void) { return NULL; }
+
 #endif // BOARD_TDECK || BOARD_HELTEC_V4
