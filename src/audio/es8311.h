@@ -20,3 +20,11 @@ class TwoWire;
 // digital volume 0 dB (the player's software volume sets loudness),
 // unmuted. False (logged) on any I2C failure.
 bool es8311_init(TwoWire& wire, uint8_t addr);
+
+// ADC gain scale, REG16 bits 2:0: 6 dB per step, 0..7 = 0..42 dB (the
+// steps of Espressif's es8311_mic_gain_t). es8311_init() leaves step 4
+// (REG16 = 0x24) with the analog PGA at REG14's init value; this changes
+// the scale only. The ADC itself runs from init on: Espressif's start
+// sequence powers it (REG0E) and unmutes its serial output (REG0A bit 6).
+// False (logged) on an I2C failure.
+bool es8311_mic_gain_set(uint8_t step);

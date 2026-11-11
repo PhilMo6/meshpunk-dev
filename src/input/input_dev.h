@@ -81,6 +81,8 @@ uint8_t input_dev_kbd_legacy_byte(void);   // legacy mode: byte fresh THIS poll
 void    input_dev_kbd_mods(bool* lshift, bool* rshift, bool* sym, bool* alt);
 int     input_dev_kbd_decode(InputKeyEv* out, int max);  // pressed non-modifier keys
 bool    input_dev_kbd_mic_edge(void);      // mic key: down this poll, up last poll
+bool    input_dev_kbd_mic_held(void);      // mic key down this poll (push-to-talk, audio/mic_lua.cpp)
+bool    input_dev_kbd_has_mic_key(void);   // a mic/record key exists on the attached keyboard
 
 // ── Legacy ASCII mode facet ────────────────────────────────────────────────
 // T-Deck-specific: keyboard-MCU firmware older than LilyGo's 250620 build has

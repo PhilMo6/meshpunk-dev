@@ -857,6 +857,9 @@ bool input_dev_kbd_mic_edge(void) {
   return s_kbd_present && s_key_down[KN_RECORD] && !s_key_prev[KN_RECORD];
 }
 
+bool input_dev_kbd_mic_held(void)    { return s_kbd_present && s_key_down[KN_RECORD]; }
+bool input_dev_kbd_has_mic_key(void) { return s_kbd_present; }
+
 bool input_dev_kbd_legacy_get(void)  { return false; }
 void input_dev_kbd_legacy_load(bool on) { (void)on; }
 void input_dev_kbd_legacy_set(bool on)  { (void)on; }

@@ -219,6 +219,8 @@ void sound_init(Audio* audio_ptr, void (*prefs_save_fn)()) {
     );
 }
 
+Audio* sound_audio(void) { return s_audio; }
+
 // ── Suspend / resume (for native-module takeover) ───────────────────────────────
 
 void sound_suspend() {

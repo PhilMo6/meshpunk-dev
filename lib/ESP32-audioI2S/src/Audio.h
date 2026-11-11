@@ -194,6 +194,13 @@ public:
     bool audioFileSeek(const float speed);
     bool setTimeOffset(int sec);
     bool setPinout(uint8_t BCLK, uint8_t LRC, uint8_t DOUT, int8_t DIN = I2S_PIN_NO_CHANGE, int8_t MCK = I2S_PIN_NO_CHANGE);
+    // MESHPUNK: a microphone session on a codec that shares this port (the
+    // ES8311's ADC on the Wio L2 and the T-Display P4) reinstalls the driver
+    // with RX enabled and the data-in pin set; clearDuplexInput() puts the
+    // TX-only install back. The reinstalled port runs at the rate the config
+    // holds; the caller sets the capture rate after.
+    bool setDuplexInput(int8_t DIN);
+    bool clearDuplexInput();
     bool pauseResume();
     bool isRunning() {return m_f_running;}
     void loop();

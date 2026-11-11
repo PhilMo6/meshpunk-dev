@@ -479,7 +479,7 @@
 //                  build. Catalog entries that only GAIN `files_rv32` need
 //                  no min_fw change; single-target or capability-gated
 //                  entries carry min_fw 15. No ELF host_export.
-#define MESHPUNK_FW_API 15
+#define MESHPUNK_FW_API 16
 
 // BLE companion protocol identity (reported in the DEVICE_INFO frame — see
 // the meshcore package's ble_companion.cpp, which compiles against this

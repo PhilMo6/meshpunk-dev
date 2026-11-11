@@ -138,6 +138,8 @@ void input_dev_kbd_mods(bool* lshift, bool* rshift, bool* sym, bool* alt) {
 
 int  input_dev_kbd_decode(InputKeyEv* out, int max) { (void)out; (void)max; return 0; }
 bool input_dev_kbd_mic_edge(void) { return false; }
+bool input_dev_kbd_mic_held(void) { return false; }
+bool input_dev_kbd_has_mic_key(void) { return false; }
 
 bool input_dev_kbd_legacy_get(void)  { return false; }
 void input_dev_kbd_legacy_load(bool on) { (void)on; }

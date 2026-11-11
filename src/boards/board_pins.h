@@ -139,6 +139,10 @@ SPIClass& board_sd_spi(void);
 // button sits on the I/O expander (P00), not on a GPIO.
 #define PIN_BOOT_BTN   0
 
+// Microphone: the ES8311 codec's own ADC; the codec's data out is GPIO 15
+// (Seeed's pin list, CODEC_I2S0_SDOUT) into the speaker's I2S port.
+#define PIN_MIC_I2S_DIN 15
+
 #elif defined(BOARD_TDISPLAY_P4)
 
 // LilyGo T-Display P4 v1 (ESP32-P4 + ESP32-C6 co-processor; LR2021 on this
@@ -181,6 +185,10 @@ SPIClass& board_sd_spi(void);
 
 // BOOT button = GPIO35, active LOW, the board's only button.
 #define PIN_BOOT_BTN   35
+
+// Microphone: the ES8311 codec's own ADC; the codec's data out is GPIO 11
+// (LilyGo's v1 config.h, es8311 kAdcData) into the speaker's I2S port.
+#define PIN_MIC_I2S_DIN 11
 
 #else
 #error "No board selected: define BOARD_<NAME> (platformio.ini build_flags, or p4/CMakeLists.txt for the T-Display P4)"
