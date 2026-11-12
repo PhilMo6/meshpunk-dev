@@ -4325,6 +4325,22 @@ bool Audio::setDuplexInput(int8_t DIN) {
     m_pin_config.data_in_num = DIN;
     return i2s_set_pin((i2s_port_t)m_i2s_num, &m_pin_config) == ESP_OK;
 }
+bool Audio::setCaptureInput(int8_t DIN, uint32_t rate, i2s_bits_per_sample_t bits) {
+    if (!m_f_i2sInstalled) return false;
+    i2s_driver_uninstall((i2s_port_t)m_i2s_num);
+    i2s_config_t cfg = m_i2s_config;
+    cfg.mode            = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX);
+    cfg.sample_rate     = rate;
+    cfg.bits_per_sample = bits;
+    if (bits == I2S_BITS_PER_SAMPLE_32BIT) cfg.dma_buf_len = m_i2s_config.dma_buf_len / 2;
+    m_f_i2sInstalled = (i2s_driver_install((i2s_port_t)m_i2s_num, &cfg, 0, NULL) == ESP_OK);
+    if (!m_f_i2sInstalled) return false;
+    i2s_zero_dma_buffer((i2s_port_t)m_i2s_num);
+    i2s_pin_config_t pins = m_pin_config;
+    pins.data_out_num = I2S_PIN_NO_CHANGE;
+    pins.data_in_num  = DIN;
+    return i2s_set_pin((i2s_port_t)m_i2s_num, &pins) == ESP_OK;
+}
 bool Audio::clearDuplexInput() {
     if (!m_f_i2sInstalled) return false;
     i2s_driver_uninstall((i2s_port_t)m_i2s_num);

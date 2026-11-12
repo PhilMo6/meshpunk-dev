@@ -5037,6 +5037,7 @@ void setupLuaVGL() {
     switch (mic_hw_kind()) {                       // absent = no microphone
       case MIC_DEV_ES7210: lua_pushstring(L, "es7210"); lua_setfield(L, -2, "mic"); break;
       case MIC_DEV_ES8311: lua_pushstring(L, "es8311"); lua_setfield(L, -2, "mic"); break;
+      case MIC_DEV_ES7243E: lua_pushstring(L, "es7243e"); lua_setfield(L, -2, "mic"); break;
       default: break;
     }
     lua_pushboolean(L, radio_hal_antenna_switch()); lua_setfield(L, -2, "antenna_switch");

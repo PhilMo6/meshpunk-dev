@@ -139,8 +139,9 @@ SPIClass& board_sd_spi(void);
 // button sits on the I/O expander (P00), not on a GPIO.
 #define PIN_BOOT_BTN   0
 
-// Microphone: the ES8311 codec's own ADC; the codec's data out is GPIO 15
-// (Seeed's pin list, CODEC_I2S0_SDOUT) into the speaker's I2S port.
+// Microphone: the ES7243E ADC's data out is GPIO 15 into the speaker's I2S
+// port (Meshtastic variant.h ADC_I2S_DIN; Seeed's pin list names it
+// CODEC_I2S0_SDOUT). The ES8311's own ADC output is not wired.
 #define PIN_MIC_I2S_DIN 15
 
 #elif defined(BOARD_TDISPLAY_P4)
