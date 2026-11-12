@@ -7,6 +7,7 @@
 
 MicDevKind mic_hw_kind(void)                       { return MIC_DEV_NONE; }
 uint8_t    mic_hw_slot_bits(void)                  { return 16; }
+uint8_t    mic_hw_mic_slot(void)                   { return 0; }
 bool       mic_hw_start(uint32_t rate_hz, int* port) { (void)rate_hz; (void)port; return false; }
 void       mic_hw_stop(void)                       {}
 int        mic_hw_set_gain_step(uint8_t step)      { (void)step; return -1; }

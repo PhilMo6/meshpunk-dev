@@ -284,7 +284,7 @@ local function device_facts()
         sound     = caps.audio == "i2s" or caps.audio == "buzzer",
         i2s       = caps.audio == "i2s",
         battery   = caps.battery == true,
-        mic       = caps.mic == true,
+        mic       = caps.mic ~= nil,
         gps       = caps.gps == true,
         usb_host  = caps.usb_host == true,
     }

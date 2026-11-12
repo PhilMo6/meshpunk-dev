@@ -1,7 +1,7 @@
-// mic_es8311.cpp — mic_dev.h hardware layer for the boards whose ES8311
-// codec is both speaker and microphone: Wio Tracker L2 (the codec's data
-// out on GPIO 15) and T-Display P4 (GPIO 11), PIN_MIC_I2S_DIN in
-// boards/board_pins.h.
+// mic_es8311.cpp — mic_dev.h hardware layer for the T-Display P4, whose
+// ES8311 codec is both speaker and microphone (the codec's data out on
+// GPIO 11, PIN_MIC_I2S_DIN in boards/board_pins.h). The Wio L2's microphone
+// is a separate ADC: mic_wio_l2.cpp.
 //
 // The codec's ADC runs from es8311_init() on (Espressif's start sequence
 // powers it and unmutes its serial output), so a session only has to read
@@ -13,7 +13,7 @@
 
 #include "mic_dev.h"
 
-#if defined(BOARD_WIO_L2) || defined(BOARD_TDISPLAY_P4)
+#if defined(BOARD_TDISPLAY_P4)
 
 #include <Arduino.h>
 #include <driver/i2s.h>
@@ -29,6 +29,7 @@ static bool s_duplex = false;
 
 MicDevKind mic_hw_kind(void)      { return MIC_DEV_ES8311; }
 uint8_t    mic_hw_slot_bits(void) { return 16; }
+uint8_t    mic_hw_mic_slot(void)  { return 0; }
 
 bool mic_hw_start(uint32_t rate_hz, int* port) {
   Audio* a = sound_audio();
@@ -63,4 +64,4 @@ int mic_hw_set_gain_step(uint8_t step) {
   return es8311_mic_gain_set(step) ? (int)step : -1;
 }
 
-#endif // BOARD_WIO_L2 || BOARD_TDISPLAY_P4
+#endif // BOARD_TDISPLAY_P4

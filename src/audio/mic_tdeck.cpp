@@ -36,6 +36,7 @@ static const es7210_gain_value_t k_gain_steps[8] = {
 
 MicDevKind mic_hw_kind(void)   { return MIC_DEV_ES7210; }
 uint8_t    mic_hw_slot_bits(void) { return 32; }
+uint8_t    mic_hw_mic_slot(void)  { return 0; }   // mic 1
 
 bool mic_hw_start(uint32_t rate_hz, int* port) {
   i2s_config_t cfg = {};

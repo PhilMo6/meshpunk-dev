@@ -2,11 +2,13 @@
 //
 // A reader task (core 1, priority 2: below the sound task's 3 and the mesh
 // task) blocks in i2s_read() on the port the hardware layer named and moves
-// the left sample of every frame into the PSRAM ring (the top 16 bits of
-// the left slot word where the port delivers 32-bit slots); the Lua side
+// the microphone's sample of every frame into the PSRAM ring (the slot
+// mic_hw_mic_slot() names; the top 16 bits of the slot word where the port
+// delivers 32-bit slots); the Lua side
 // drains the ring from core 0. Single producer, single consumer: the
 // unwrapped head and tail counters are the only shared state. A full ring
-// drops the newest samples and counts them; the count is printed at stop.
+// drops the newest samples and counts them; the count is printed at stop,
+// with the session's left and right slot peaks.
 
 #include "mic_dev.h"
 
@@ -21,12 +23,15 @@
 
 static int16_t*          s_ring     = NULL;
 static uint8_t           s_slot_bits = 16;   // mic_hw_slot_bits() of the running port
+static uint8_t           s_mic_slot  = 0;    // mic_hw_mic_slot(): 0 = left, 1 = right
 static volatile uint32_t s_head     = 0;    // next write (samples, unwrapped)
 static volatile uint32_t s_tail     = 0;    // next read
 static volatile bool     s_running  = false;
 static volatile bool     s_stop_req = false;
 static volatile int16_t  s_peak     = 0;
 static volatile uint32_t s_dropped  = 0;
+static int32_t           s_sess_peak_l = 0;  // |sample| peaks of both slots over the session,
+static int32_t           s_sess_peak_r = 0;  // printed at stop
 static int               s_port     = 0;
 static TaskHandle_t      s_task     = NULL;
 
@@ -34,6 +39,7 @@ static void mic_reader_task(void* arg) {
   (void)arg;
   static int32_t chunk[MIC_CHUNK_FRAMES * 2];   // one read of stereo frames at 32-bit slots; 16-bit slots fill half
   const bool     wide        = (s_slot_bits == 32);
+  const bool     right       = (s_mic_slot == 1);
   const size_t   frame_bytes = wide ? 8 : 4;
   while (!s_stop_req) {
     size_t got = 0;
@@ -44,9 +50,16 @@ static void mic_reader_task(void* arg) {
     uint32_t tail    = s_tail;
     int32_t  peak    = s_peak;
     for (size_t i = 0; i < nframes; i++) {
-      int16_t s = wide ? (int16_t)(chunk[i * 2] >> 16)           // left slot, sample in its top 16 bits
-                       : ((const int16_t*)chunk)[i * 2];         // left channel
-      int32_t a = s < 0 ? -(int32_t)s : s;
+      int16_t l = wide ? (int16_t)(chunk[i * 2] >> 16)           // 32-bit slot: sample in its top 16 bits
+                       : ((const int16_t*)chunk)[i * 2];
+      int16_t r = wide ? (int16_t)(chunk[i * 2 + 1] >> 16)
+                       : ((const int16_t*)chunk)[i * 2 + 1];
+      int32_t al = l < 0 ? -(int32_t)l : l;
+      int32_t ar = r < 0 ? -(int32_t)r : r;
+      if (al > s_sess_peak_l) s_sess_peak_l = al;
+      if (ar > s_sess_peak_r) s_sess_peak_r = ar;
+      int16_t s = right ? r : l;
+      int32_t a = right ? ar : al;
       if (a > peak) peak = a;
       if (head - tail >= MIC_RING_SAMPLES) { s_dropped = s_dropped + 1; continue; }
       s_ring[head % MIC_RING_SAMPLES] = s;
@@ -71,12 +84,14 @@ bool mic_capture_start(void) {
     if (!s_ring) { SLog.println("[MIC] FAIL: ring allocation (PSRAM)"); return false; }
   }
   s_head = 0; s_tail = 0; s_peak = 0; s_dropped = 0; s_stop_req = false;
+  s_sess_peak_l = 0; s_sess_peak_r = 0;
   sound_suspend();                                 // playback muted for the session, every board
   if (!mic_hw_start(MIC_RATE_HZ, &s_port)) {
     sound_resume();
     return false;
   }
   s_slot_bits = mic_hw_slot_bits();
+  s_mic_slot  = mic_hw_mic_slot();
   s_running = true;
   if (xTaskCreatePinnedToCore(mic_reader_task, "mic_reader", 4096, NULL, 2, &s_task, 1) != pdPASS) {
     SLog.println("[MIC] FAIL: reader task");
@@ -85,8 +100,9 @@ bool mic_capture_start(void) {
     sound_resume();
     return false;
   }
-  SLog.printf("[MIC] capture on: %u Hz mono s16 from I2S%d (%u-bit slots), ring %u samples\n",
-              (unsigned)MIC_RATE_HZ, s_port, (unsigned)s_slot_bits, (unsigned)MIC_RING_SAMPLES);
+  SLog.printf("[MIC] capture on: %u Hz mono s16 from I2S%d (%u-bit slots, %s slot), ring %u samples\n",
+              (unsigned)MIC_RATE_HZ, s_port, (unsigned)s_slot_bits, s_mic_slot ? "right" : "left",
+              (unsigned)MIC_RING_SAMPLES);
   return true;
 }
 
@@ -100,8 +116,8 @@ void mic_capture_stop(void) {
   s_running = false;
   mic_hw_stop();
   sound_resume();
-  SLog.printf("[MIC] capture off: %lu samples captured, %lu dropped\n",
-              (unsigned long)s_head, (unsigned long)s_dropped);
+  SLog.printf("[MIC] capture off: %lu samples captured, %lu dropped; session peak left %ld, right %ld\n",
+              (unsigned long)s_head, (unsigned long)s_dropped, (long)s_sess_peak_l, (long)s_sess_peak_r);
 }
 
 bool mic_capture_running(void) { return s_running; }
