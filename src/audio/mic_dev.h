@@ -28,11 +28,16 @@ typedef enum {
 MicDevKind mic_hw_kind(void);
 
 // Bring the ADC up at `rate_hz` and leave its I2S port receiving; `*port`
-// receives the port number to read. Frames are stereo 16-bit (two samples
-// per frame; the engine keeps the left one: the mic on the ES8311, mic 1 on
-// the ES7210). False (logged) on failure.
+// receives the port number to read. Frames are stereo (two slots per frame;
+// the engine keeps the left one: the mic on the ES8311, mic 1 on the
+// ES7210). False (logged) on failure.
 bool mic_hw_start(uint32_t rate_hz, int* port);
 void mic_hw_stop(void);
+
+// Width of the slots the started port delivers: 16 (the slot is the 16-bit
+// sample: ES8311) or 32 (the 16-bit sample is the top half of the slot word,
+// the bottom half reads zero: ES7210).
+uint8_t mic_hw_slot_bits(void);
 
 // Gain step 0..7, 6 dB per step (ES8311: the REG16 ADC gain scale; ES7210:
 // its gain table, nearest entry). Returns the step applied, -1 on failure.

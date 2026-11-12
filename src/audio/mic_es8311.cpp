@@ -27,7 +27,8 @@
 
 static bool s_duplex = false;
 
-MicDevKind mic_hw_kind(void) { return MIC_DEV_ES8311; }
+MicDevKind mic_hw_kind(void)      { return MIC_DEV_ES8311; }
+uint8_t    mic_hw_slot_bits(void) { return 16; }
 
 bool mic_hw_start(uint32_t rate_hz, int* port) {
   Audio* a = sound_audio();
