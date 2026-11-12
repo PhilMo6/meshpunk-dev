@@ -5,9 +5,13 @@
 // I2S_NUM_1 as a slave with the port's MCLK (256 x fs) on GPIO 48, LRCK 21,
 // SCK 47, data 14 (tdeck-pins.h), over the shared I2C bus (Wire, address
 // 0x40: AD1/AD0 low). Its registers are set by lib/es7210 (Espressif's
-// driver): 16-bit standard I2S, mics 1 and 2 as the left and right channels
-// of one stereo frame. The codec is configured once per boot and started
-// and stopped per session.
+// driver): standard I2S, 16-bit word length, mics 1 and 2 as the left and
+// right channels of one stereo frame. The port reads 32-bit slots (64 SCLK
+// per frame, the frame LilyGo's T-Deck UnitTest clocks it with): the codec
+// spends 32 SCLK per channel, its 16-bit word in the first 16 and zeros
+// after, so the sample is the top half of each slot word (mic_hw_slot_bits
+// 32); with 16-bit slots every other frame reads zero. The codec is
+// configured once per boot and started and stopped per session.
 
 #include "mic_dev.h"
 
@@ -30,23 +34,24 @@ static const es7210_gain_value_t k_gain_steps[8] = {
   GAIN_0DB, GAIN_6DB, GAIN_12DB, GAIN_18DB, GAIN_24DB, GAIN_30DB, GAIN_36DB, GAIN_37_5DB,
 };
 
-MicDevKind mic_hw_kind(void) { return MIC_DEV_ES7210; }
+MicDevKind mic_hw_kind(void)   { return MIC_DEV_ES7210; }
+uint8_t    mic_hw_slot_bits(void) { return 32; }
 
 bool mic_hw_start(uint32_t rate_hz, int* port) {
   i2s_config_t cfg = {};
   cfg.mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX);
   cfg.sample_rate          = rate_hz;
-  cfg.bits_per_sample      = I2S_BITS_PER_SAMPLE_16BIT;
+  cfg.bits_per_sample      = I2S_BITS_PER_SAMPLE_32BIT;   // 32-bit slots, the sample in the top half (see above)
   cfg.channel_format       = I2S_CHANNEL_FMT_RIGHT_LEFT;
   cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
   cfg.intr_alloc_flags     = 0;
   cfg.dma_buf_count        = 8;
-  cfg.dma_buf_len          = 256;      // frames per buffer: 8 x 1 KB
+  cfg.dma_buf_len          = 256;      // frames per buffer: 8 x 2 KB
   cfg.use_apll             = false;
   cfg.tx_desc_auto_clear   = false;
   cfg.fixed_mclk           = 0;
   cfg.mclk_multiple        = I2S_MCLK_MULTIPLE_256;
-  cfg.bits_per_chan        = I2S_BITS_PER_CHAN_DEFAULT;
+  cfg.bits_per_chan        = I2S_BITS_PER_CHAN_DEFAULT;  // = the 32-bit sample
   esp_err_t err = i2s_driver_install(TDECK_MIC_I2S_PORT, &cfg, 0, NULL);
   if (err != ESP_OK) {
     SLog.printf("[MIC] FAIL: I2S%d install: %s\n", (int)TDECK_MIC_I2S_PORT, esp_err_to_name(err));

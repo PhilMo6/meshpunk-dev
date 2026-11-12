@@ -2,10 +2,11 @@
 //
 // A reader task (core 1, priority 2: below the sound task's 3 and the mesh
 // task) blocks in i2s_read() on the port the hardware layer named and moves
-// the left sample of every frame into the PSRAM ring; the Lua side drains
-// the ring from core 0. Single producer, single consumer: the unwrapped
-// head and tail counters are the only shared state. A full ring drops the
-// newest samples and counts them; the count is printed at stop.
+// the left sample of every frame into the PSRAM ring (the top 16 bits of
+// the left slot word where the port delivers 32-bit slots); the Lua side
+// drains the ring from core 0. Single producer, single consumer: the
+// unwrapped head and tail counters are the only shared state. A full ring
+// drops the newest samples and counts them; the count is printed at stop.
 
 #include "mic_dev.h"
 
@@ -16,9 +17,10 @@
 #include "../meshpunk_sync.h"   // SLog
 #include "../sound.h"           // sound_suspend / sound_resume
 
-#define MIC_CHUNK_FRAMES 256    // 1 KB of stereo 16-bit per i2s_read
+#define MIC_CHUNK_FRAMES 256    // stereo frames per i2s_read: 1 KB at 16-bit slots, 2 KB at 32-bit
 
 static int16_t*          s_ring     = NULL;
+static uint8_t           s_slot_bits = 16;   // mic_hw_slot_bits() of the running port
 static volatile uint32_t s_head     = 0;    // next write (samples, unwrapped)
 static volatile uint32_t s_tail     = 0;    // next read
 static volatile bool     s_running  = false;
@@ -30,17 +32,20 @@ static TaskHandle_t      s_task     = NULL;
 
 static void mic_reader_task(void* arg) {
   (void)arg;
-  static int16_t frames[MIC_CHUNK_FRAMES * 2];
+  static int32_t chunk[MIC_CHUNK_FRAMES * 2];   // one read of stereo frames at 32-bit slots; 16-bit slots fill half
+  const bool     wide        = (s_slot_bits == 32);
+  const size_t   frame_bytes = wide ? 8 : 4;
   while (!s_stop_req) {
     size_t got = 0;
-    esp_err_t err = i2s_read((i2s_port_t)s_port, frames, sizeof(frames), &got, pdMS_TO_TICKS(200));
+    esp_err_t err = i2s_read((i2s_port_t)s_port, chunk, MIC_CHUNK_FRAMES * frame_bytes, &got, pdMS_TO_TICKS(200));
     if (err != ESP_OK || got == 0) continue;
-    size_t   nframes = got / 4;
+    size_t   nframes = got / frame_bytes;
     uint32_t head    = s_head;
     uint32_t tail    = s_tail;
     int32_t  peak    = s_peak;
     for (size_t i = 0; i < nframes; i++) {
-      int16_t s = frames[i * 2];              // left channel
+      int16_t s = wide ? (int16_t)(chunk[i * 2] >> 16)           // left slot, sample in its top 16 bits
+                       : ((const int16_t*)chunk)[i * 2];         // left channel
       int32_t a = s < 0 ? -(int32_t)s : s;
       if (a > peak) peak = a;
       if (head - tail >= MIC_RING_SAMPLES) { s_dropped = s_dropped + 1; continue; }
@@ -71,6 +76,7 @@ bool mic_capture_start(void) {
     sound_resume();
     return false;
   }
+  s_slot_bits = mic_hw_slot_bits();
   s_running = true;
   if (xTaskCreatePinnedToCore(mic_reader_task, "mic_reader", 4096, NULL, 2, &s_task, 1) != pdPASS) {
     SLog.println("[MIC] FAIL: reader task");
@@ -79,8 +85,8 @@ bool mic_capture_start(void) {
     sound_resume();
     return false;
   }
-  SLog.printf("[MIC] capture on: %u Hz mono s16 from I2S%d, ring %u samples\n",
-              (unsigned)MIC_RATE_HZ, s_port, (unsigned)MIC_RING_SAMPLES);
+  SLog.printf("[MIC] capture on: %u Hz mono s16 from I2S%d (%u-bit slots), ring %u samples\n",
+              (unsigned)MIC_RATE_HZ, s_port, (unsigned)s_slot_bits, (unsigned)MIC_RING_SAMPLES);
   return true;
 }
 
