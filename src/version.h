@@ -507,7 +507,12 @@
 //                  capture task is made now and parked between sessions,
 //                  and the key becomes push-to-talk, without opening the
 //                  microphone, so sounds keep playing until the app opens a
-//                  session; err when the task does not fit). Playback is
+//                  session; err when the task does not fit), `_mic_input()
+//                  -> n, count` (the input sessions take and how many there
+//                  are: 2 on the T-Deck, 1 on the other boards with a
+//                  microphone, 0 without one) and `_mic_set_input(n) -> n |
+//                  nil` (from the next session on, until reboot, for every
+//                  app; an app shows a choice only when count > 1). Playback is
 //                  muted while a session is open; standby and Lua teardown
 //                  close it and disarm push-to-talk (`_mic_close()` closes
 //                  only the session); auto-standby waits while one runs.

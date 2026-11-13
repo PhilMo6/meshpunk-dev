@@ -42,7 +42,9 @@ static uint8_t s_pga_code = 10;       // 30 dB until the app sets a step
 
 MicDevKind mic_hw_kind(void)      { return MIC_DEV_ES7243E; }
 uint8_t    mic_hw_slot_bits(void) { return 32; }
-uint8_t    mic_hw_mic_slot(void)  { return 1; }   // the right slot: see the header
+uint8_t    mic_hw_inputs(void)    { return 1; }
+// The right slot word's top 16 bits: see the header.
+void       mic_hw_input_pos(uint8_t n, uint8_t* slot, uint8_t* shift) { (void)n; *slot = 1; *shift = 16; }
 
 bool mic_hw_start(uint32_t rate_hz, int* port) {
   Audio* a = sound_audio();

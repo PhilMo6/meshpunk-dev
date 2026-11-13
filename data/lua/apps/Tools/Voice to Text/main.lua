@@ -15,6 +15,10 @@
   onto the clipboard when none is, and Messenger's compose menu has Insert
   voice text. The home screen shows a row whose X unloads it. Quit unloads
   it. The home chord closes the app the same way as Quit.
+
+  On a board with more than one microphone input (the T-Deck) the Mic
+  button picks the input, for every app until reboot, from the next
+  recording on.
 ]]
 
 local app_dir   = assert(..., "Voice to Text: the launcher passed no app folder")
@@ -33,6 +37,7 @@ local CFG           = "L:/voice_to_text.cfg"
 local NAME          = "Voice to Text"           -- title, mic session owner, launcher row
 local DEFAULT_MODEL = app_dir .. "/model.bin"
 local PLUGIN        = app_dir .. "/stt.audioplug.elf"
+local MIC_INPUTS    = select(2, _mic_input())   -- > 1: the top row has a Mic button
 
 local root = apps.new_root()
 root:set { w = W, h = H, pad_all = 0, border_width = 0, bg_opa = 0 }
@@ -226,9 +231,9 @@ end
 
 -- One screen that fits: only the text box scrolls. Every button is a direct
 -- child of the nav container (the trackball reaches only those). Rows, top
--- to bottom: title + Home + Quit, the status line (one line; long ones
--- scroll sideways), the text box, Copy / Clear / Append-Overwrite / Model,
--- the talk button.
+-- to bottom: title + Mic (boards with more than one input) + Home + Quit,
+-- the status line (one line; long ones scroll sideways), the text box,
+-- Copy / Clear / Append-Overwrite / Model, the talk button.
 -- The box gets the height the rest leaves; the rows above it are measured
 -- (the font sets the status line's height).
 local function build()
@@ -242,6 +247,13 @@ local function build()
     nav.replace(c, { flags = nav.ROLLOVER + nav.SCROLL_FIRST })
 
     c:Label { text = NAME, flex_grow = 1 }
+    if MIC_INPUTS > 1 then
+        local mic_b, mic_l = button(c, "Mic " .. (_mic_input()), 64, TOP_H, nil)
+        mic_b:onClicked(function()
+            _mic_set_input((_mic_input()) % MIC_INPUTS + 1)
+            mic_l.text = "Mic " .. (_mic_input())
+        end)
+    end
     button(c, "Home", 64, TOP_H, leave_background)
     button(c, "Quit", 64, TOP_H, quit)
     ui.status = c:Label {

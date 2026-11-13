@@ -242,6 +242,12 @@ esp_err_t es7210_set_mute(bool enable);
 esp_err_t es7210_mic_select(es7210_input_mics_t mic);
 
 /**
+ * MESHPUNK: TDM on (register 0x12 = 0x02: the four ADCs on SDOUT1/TDMOUT,
+ * SDOUT2/TDMIN an input) or off (0x00). Call after es7210_adc_config_i2s().
+ */
+esp_err_t es7210_set_tdm(bool on);
+
+/**
  * @brief Read regs of ES7210
  *
  * @param[in] reg_addr:  reg_addr

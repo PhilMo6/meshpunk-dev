@@ -1,17 +1,25 @@
 // mic_tdeck.cpp — mic_dev.h hardware layer for the T-Deck: the ES7210 ADC
-// (two analog mics) on its own I2S port.
+// (four analog inputs) on its own I2S port.
 //
 // The speaker holds I2S_NUM_0 (the player's default port); the ES7210 takes
 // I2S_NUM_1 as a slave with the port's MCLK (256 x fs) on GPIO 48, LRCK 21,
 // SCK 47, data 14 (tdeck-pins.h), over the shared I2C bus (Wire, address
 // 0x40: AD1/AD0 low). Its registers are set by lib/es7210 (Espressif's
-// driver): standard I2S, 16-bit word length, mics 1 and 2 as the left and
-// right channels of one stereo frame. The port reads 32-bit slots (64 SCLK
-// per frame, the frame LilyGo's T-Deck UnitTest clocks it with): the codec
-// spends 32 SCLK per channel, its 16-bit word in the first 16 and zeros
-// after, so the sample is the top half of each slot word (mic_hw_slot_bits
-// 32); with 16-bit slots every other frame reads zero. The codec is
-// configured once per boot and started and stopped per session.
+// driver): I2S format, 16-bit word length, TDM (es7210_set_tdm). The
+// schematic has a mic footprint on each of the four inputs (MIC1-MIC4, bias
+// MICBIAS12 and MICBIAS34) and one data line to GPIO 14, joined through R7
+// to the codec's pin 11 (SDOUT1/TDMOUT) and through R8 to its pin 12
+// (SDOUT2/TDMIN). Outside TDM both pins drive the line and the samples read
+// back as the bitwise AND of inputs 1-2 and inputs 3-4 (each low bit set in
+// 25 % of the samples, not 50 %); in TDM pin 12 is an input and pin 11 sends
+// the four inputs back to back, 16 bits each, filling the port's frame of
+// two 32-bit slots (64 SCLK, the frame LilyGo's T-Deck UnitTest clocks it
+// with): inputs 1 and 2 are the top and bottom halves of the left slot word,
+// 3 and 4 of the right (mic_hw_input_pos). The board's two microphones are
+// inputs 1 and 2 (speech at RMS 270-300 on both at 24 dB, inputs 3 and 4 at
+// RMS 40-45 in the same takes), so a session chooses between those two
+// (mic_hw_inputs 2). All four inputs are powered, at one gain. The codec is
+// configured once per boot, at 24 dB, and started and stopped per session.
 
 #include "mic_dev.h"
 
@@ -36,7 +44,12 @@ static const es7210_gain_value_t k_gain_steps[8] = {
 
 MicDevKind mic_hw_kind(void)   { return MIC_DEV_ES7210; }
 uint8_t    mic_hw_slot_bits(void) { return 32; }
-uint8_t    mic_hw_mic_slot(void)  { return 0; }   // mic 1
+uint8_t    mic_hw_inputs(void)    { return 2; }
+
+void mic_hw_input_pos(uint8_t n, uint8_t* slot, uint8_t* shift) {
+  *slot  = (uint8_t)((n - 1) / 2);
+  *shift = ((n - 1) % 2) ? 0 : 16;
+}
 
 bool mic_hw_start(uint32_t rate_hz, int* port) {
   i2s_config_t cfg = {};
@@ -87,8 +100,10 @@ bool mic_hw_start(uint32_t rate_hz, int* port) {
       return false;
     }
     es7210_adc_config_i2s(AUDIO_HAL_CODEC_MODE_ENCODE, &ccfg.i2s_iface);
-    es7210_mic_select((es7210_input_mics_t)(ES7210_INPUT_MIC1 | ES7210_INPUT_MIC2));
-    es7210_adc_set_gain_all(GAIN_30DB);
+    es7210_set_tdm(true);
+    es7210_mic_select((es7210_input_mics_t)(ES7210_INPUT_MIC1 | ES7210_INPUT_MIC2 |
+                                            ES7210_INPUT_MIC3 | ES7210_INPUT_MIC4));
+    es7210_adc_set_gain_all(GAIN_24DB);
     s_codec_up = true;
   }
   es7210_adc_ctrl_state(AUDIO_HAL_CODEC_MODE_ENCODE, AUDIO_HAL_CTRL_START);
