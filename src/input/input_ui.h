@@ -57,11 +57,16 @@ void      input_ui_osk_release(void);
 // Not persisted: init() re-derives the default every boot, so a keyboardless
 // board comes up with touch controls live and a keyboard board comes up
 // clean until the user asks for them.
+// The two MOUSE modes exist only while an ELF module runs (elf_host.cpp,
+// host_touch_read): the Lua cycle never enters them, and a module that exits
+// in one leaves the mode at the board default (init()).
 enum {
     TOUCH_MODE_OFF = 0,       // touch is a plain pointer; no OSK on focus
     TOUCH_MODE_PAD,           // controller zones armed, indicators shown
     TOUCH_MODE_PAD_HIDDEN,    // zones armed, indicators hidden
     TOUCH_MODE_KB,            // on-screen keyboard
+    TOUCH_MODE_MOUSE,         // touch is the module's mouse, whole screen
+    TOUCH_MODE_MOUSE_PAD,     // mouse pad zones armed; touch between them is the mouse
     TOUCH_MODE_COUNT,
 };
 
@@ -71,7 +76,11 @@ void    input_ui_touch_mode_set(uint8_t mode);
 
 // Advance to the next applicable mode and return it. has_pad=false skips the
 // two PAD states (nothing to arm — an app or module with no layout).
-uint8_t input_ui_touch_mode_cycle(bool has_pad);
+// has_mouse=false skips both MOUSE states, has_mouse_pad=false skips
+// MOUSE_PAD; only the ELF host passes true for them, for a module that reads
+// touch as a mouse.
+uint8_t input_ui_touch_mode_cycle(bool has_pad, bool has_mouse,
+                                  bool has_mouse_pad);
 
 // Shift+Alt chord edge seen by the interactive keyboard reader; true once
 // per chord. The ELF host runs its own detector — this reader is dormant

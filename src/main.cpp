@@ -44,6 +44,8 @@
 #include "lua_net.h"
 #include "ethernet.h"   // wired port (T-Display P4) + net_is_up
 #include "audio/mic_lua.h"   // microphone bindings + session close (mic_dev.h underneath)
+#include "audio/audio_plugin.h"      // audio plugin loader + bindings
+#include "audio/audio_plugin_abi.h"  // AUDIO_PLUGIN_ABI_VERSION for _device_caps().audioplug
 #include "tdeck_link.h"
 
 // Radio + MeshCore helper classes (the protocol itself lives in the meshcore
@@ -5040,6 +5042,8 @@ void setupLuaVGL() {
       case MIC_DEV_ES7243E: lua_pushstring(L, "es7243e"); lua_setfield(L, -2, "mic"); break;
       default: break;
     }
+    // The audio plugin loader's ABI version (audio_plugin_abi.h).
+    lua_pushinteger(L, AUDIO_PLUGIN_ABI_VERSION);   lua_setfield(L, -2, "audioplug");
     lua_pushboolean(L, radio_hal_antenna_switch()); lua_setfield(L, -2, "antenna_switch");
     lua_pushstring(L, lora_proto_active());         lua_setfield(L, -2, "lora_proto");
     return 1;
@@ -5812,6 +5816,7 @@ void setupLuaVGL() {
   // ── Sound ──────────────────────────────────────────────────────────────────
   sound_register_lua(L);
   mic_register_lua(L);
+  audio_plugin_register_lua(L);
 
   // ── Input (keyboard/trackball/touch policy + capture + emoji keymap) ──────
   input_ui_register_lua(L);
@@ -6708,14 +6713,26 @@ void setupLuaVGL() {
   // file:seek([whence[, offset]]) — Lua io semantics. whence "set"|"cur"|"end"
   // (default "cur"), offset default 0. Returns the new absolute position, or
   // nil+message on error. Needed for tail reads (e.g. ID3v1 in the last 128B).
+  // The target is clamped to the file's end. For a handle open for writing
+  // that end is the stream's own (seek to the end, read the position):
+  // Arduino's VFS File::size() is the size stat() reports by path, which for
+  // a file being written is its size at the last flush, 0 before the first.
+  // A read handle's size() is current, so reads keep the one cheap call.
   lua_pushcfunction(L, [](lua_State *L) -> int {
     LuaFileHandle *ud = (LuaFileHandle *)luaL_checkudata(L, 1, "esp32_file");
     if (!ud->file) { lua_pushnil(L); lua_pushstring(L, "file closed"); return 2; }
     const char *whence = luaL_optstring(L, 2, "cur");
     long offset = (long)luaL_optinteger(L, 3, 0);
     if (ud->is_sd) sd_spi_take();
-    size_t sz  = ud->file->size();
     size_t cur = ud->file->position();
+    bool ok = true;
+    size_t sz;
+    if (ud->is_write) {
+      ok = ud->file->seek(0, fs::SeekEnd);
+      sz = ud->file->position();
+    } else {
+      sz = ud->file->size();
+    }
     long base;
     if      (strcmp(whence, "set") == 0) base = 0;
     else if (strcmp(whence, "end") == 0) base = (long)sz;
@@ -6723,7 +6740,7 @@ void setupLuaVGL() {
     long target = base + offset;
     if (target < 0) target = 0;
     if (target > (long)sz) target = (long)sz;
-    bool ok = ud->file->seek((uint32_t)target);
+    if (ok) ok = ud->file->seek((uint32_t)target);
     size_t newpos = ud->file->position();
     if (ud->is_sd) sd_spi_release();
     if (!ok) { lua_pushnil(L); lua_pushstring(L, "seek failed"); return 2; }
@@ -6986,7 +7003,9 @@ void luaTearDown() {
   // Lua sockets die with their owner; this also ends the Core-1 net worker,
   // so its 16KB internal-SRAM stack is free before an ELF module allocates.
   // A microphone session ends with it (the player resumes; the module's own
-  // takeover suspends it again).
+  // takeover suspends it again). An audio plugin goes first: its worker
+  // reads that session and its memory is the module's to reclaim.
+  audio_plugin_unload_all("lua teardown");
   mic_lua_close_all("lua teardown");
   lua_net_close_all("lua teardown");
   lua_close(dead);                            // GCs luavgl widgets -> lv_obj_del
@@ -7805,7 +7824,9 @@ static void standby_run() {
   if (ble_was_on) ble_proto_stop();
 #endif
   // Lua sockets close before the radio drops (TLS close_notify still has a
-  // link); apps see reason "standby" and reconnect after wake.
+  // link); apps see reason "standby" and reconnect after wake. An audio
+  // plugin's worker stops before the mic session it reads closes.
+  audio_plugin_unload_all("standby");
   mic_lua_close_all("standby");
   lua_net_close_all("standby");
   bool wifi_was_on = (WiFi.getMode() != WIFI_OFF);
@@ -8113,10 +8134,12 @@ void loop() {
   // Auto standby: enter the low-power state after the configured idle time,
   // on the same activity clock as the timeouts above. The standby binding's
   // guards apply here too (never while a USB drive or link session owns the
-  // hardware). wake_activity() at standby exit resets the idle clock, so
-  // the next idle period re-arms naturally.
+  // hardware), and it waits while a microphone session runs: standby closes
+  // the session, and a recording longer than the idle time sees no input.
+  // wake_activity() at standby exit resets the idle clock, so the next idle
+  // period re-arms naturally.
   if (auto_standby && auto_standby_mins > 0 && !s_standby_request &&
-      !usbdrive_active() && !mesh_task_paused &&
+      !usbdrive_active() && !mesh_task_paused && !mic_capture_running() &&
       millis() - last_activity_ms > (uint32_t)auto_standby_mins * 60000UL) {
     SLog.println("[POWER] auto standby (idle timeout)");
     s_standby_request = true;

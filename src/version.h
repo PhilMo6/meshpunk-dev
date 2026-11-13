@@ -479,6 +479,87 @@
 //                  build. Catalog entries that only GAIN `files_rv32` need
 //                  no min_fw change; single-target or capability-gated
 //                  entries carry min_fw 15. No ELF host_export.
+// 16 (unreleased since v0.5.0, which shipped level 15): ELF host_export
+//                  `int host_touch_read(int* x, int* y, int* downs)` — touch
+//                  as a module's mouse. The first call opts the module in:
+//                  its touch-mode cycle (aux button / Shift+Alt) gains two
+//                  module-only modes, TOUCH_MODE_MOUSE (the whole screen is
+//                  the mouse) and TOUCH_MODE_MOUSE_PAD (the mouse pad
+//                  layout's pads work and the touch between them is the
+//                  mouse). Returns -1 outside those modes, else the pointer
+//                  points down; x/y = the first one in 320x240 canvas
+//                  coordinates (or where the last one lifted), downs =
+//                  touch-down edges since the previous call. In both modes
+//                  the trackball sends no arrow keys and its motion is left
+//                  for host_trackball_read. `_elf_touch_layout(zones
+//                  [, mouse_zones])` takes the mouse pad layout as an
+//                  optional second table and returns both counts. A module
+//                  that imports host_touch_read needs min_fw 16.
+//                  ALSO this level: the microphone. `_mic_open(owner) ->
+//                  ok, err` (one session at a time; err names the holder),
+//                  `_mic_read(max_bytes) -> string | nil` (little-endian s16
+//                  mono at 16 kHz from a 2 s ring; nil = empty),
+//                  `_mic_level() -> peak, dropped`, `_mic_set_gain(step)
+//                  -> step | nil` (0..7, 6 dB steps), `_mic_close()`,
+//                  `_mic_owner() -> name | nil`, `_mic_ptt() -> held` (the
+//                  mic or Record key, while push-to-talk is armed or a
+//                  session is open), `_mic_ptt_arm(on) -> ok, err` (the
+//                  capture task is made now and parked between sessions,
+//                  and the key becomes push-to-talk, without opening the
+//                  microphone, so sounds keep playing until the app opens a
+//                  session; err when the task does not fit). Playback is
+//                  muted while a session is open; standby and Lua teardown
+//                  close it and disarm push-to-talk (`_mic_close()` closes
+//                  only the session); auto-standby waits while one runs.
+//                  `_device_caps().mic` = "es7210" (T-Deck) | "es8311"
+//                  (T-Display P4) | "es7243e" (Wio L2), absent without a
+//                  microphone; `_input_caps().mic_key` = the keyboard has a
+//                  mic or Record key. lib/wavrec records a session into a
+//                  WAV file (start / tick / stop; the header is rewritten
+//                  every 5 s of audio) and `utils.localTime(ts)` returns the
+//                  local y, mo, d, hour, min, sec; Tools/Recorder is the
+//                  first consumer. The App Library's `mic` requires token
+//                  reads `_device_caps().mic` (App Library 1.3.2 and
+//                  lib/downloader), so an entry that requires it needs
+//                  min_fw 16. No ELF host_export.
+//                  ALSO this level: Ethernet, the T-Display P4's wired port.
+//                  `_eth_get_enabled() -> enabled, state, ip` (state "off" |
+//                  "nolink" | "link" | "connected"), `_eth_set_enabled(on)`
+//                  (starts or stops the port and keeps the choice),
+//                  `_device_caps().eth` = the board has the port, and
+//                  `_wifi_status()` returns "connected", the address and
+//                  "Ethernet" while the wired port carries the network. No
+//                  ELF host_export.
+//                  ALSO this level, from the T-Display P4 port (commit
+//                  c714073, after the v0.5.0 tag): `_radio_antenna() ->
+//                  external` reads the LoRa antenna choice; with a boolean
+//                  it switches it and keeps it (-> ok, external, why);
+//                  `_device_caps().antenna_switch` = the board has the
+//                  switch. The same commit added `_device_caps().arch` /
+//                  `.chip` and `_elf_arch_path`, listed under 15 above: the
+//                  v0.5.0 tag does not have them, so they first ship at
+//                  this level. No ELF host_export.
+//                  ALSO this level, two fixes an app may rely on:
+//                  `file:seek` on a handle open for writing clamps to the
+//                  stream's real end (before, to the size at the file's
+//                  last flush: 0 before the first, so seeks into a file
+//                  being written landed at 0), and `_sound_get_duration` is
+//                  whole seconds (ESP32-audioI2S divided before multiplying,
+//                  so lengths came out in 8 s steps; WAV lengths were also
+//                  44 bytes short). No ELF host_export.
+//                  ALSO this level: audio plugins (src/audio/
+//                  audio_plugin_abi.h, ABI 1) — "<id>.audioplug.elf"
+//                  modules an app loads beside Lua, their worker on core 1.
+//                  `_audio_plug_load(path) -> true | nil, err` (one at a
+//                  time; err names a memory block that did not fit),
+//                  `_audio_plug_unload()`, `_audio_plug_loaded() -> name,
+//                  running | nil`, `_audio_plug_write(cmd) -> true | nil,
+//                  err` (<= 256 bytes), `_audio_plug_read() -> result | nil`,
+//                  `_audio_plug_status() -> line | nil`. Lua teardown and
+//                  standby unload the plugin. `_device_caps().audioplug` =
+//                  the ABI version. Plugins import only audio_plugin.cpp's
+//                  export table (libc string/memory, formatting, libm), not
+//                  host_exports.
 #define MESHPUNK_FW_API 16
 
 // BLE companion protocol identity (reported in the DEVICE_INFO frame — see

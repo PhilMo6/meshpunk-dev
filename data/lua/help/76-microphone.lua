@@ -4,15 +4,19 @@ local caps, dev = ...
 if not dev.mic then return nil end
 
 local body = [[
-The device has a microphone. Tools > Mic test shows its live level, sets the gain and records a short WAV file to meshpunk/recordings on the SD card, which plays back on the device or opens on a PC.
+The device has a microphone. Tools > Recorder records it into WAV files (16 kHz, mono) in meshpunk/recordings on the SD card, or another folder you pick, and plays them back; the files also open on a PC.
 
-While the microphone is open, sound is muted: notification melodies and music wait until it closes.
+While a recording runs, sound is muted: notification melodies and music wait until it stops. A recording keeps going when you leave the app; the home screen shows it with an X that stops and saves it.
 ]]
 
-if caps.mic_key then
+if dev.audioplug then
     body = body .. [[
 
-Holding the keyboard's mic or Record key records while the Mic test has the microphone open (push-to-talk). The key's usual role, opening the notifications, pauses for that time.
+Tools > Voice to Text turns speech into text: hold ]] ..
+        (caps.mic_key and "the mic key" or "its Talk button") ..
+        [[, speak, let go, and the text appears in its box a few seconds later. While it runs in the background,]] ..
+        (caps.mic_key and [[ the mic key types speech into the text box selected in any app (or onto the clipboard when none is), and]] or "") ..
+        [[ Messenger's message box has Insert voice text in its hold menu. It needs its speech model on the SD card; the app's help page has the details.
 ]]
 end
 

@@ -45,7 +45,8 @@ function utils.now()
 end
 
 local SECS_PER_DAY = 86400
--- Decompose a UTC epoch into local wall-clock components (y, mo, d, hour, min).
+-- Decompose a UTC epoch into local wall-clock components
+-- (y, mo, d, hour, min, sec).
 local function local_components(ts)
     local ok, off = pcall(_rtc_tz_offset_minutes)
     local local_ts = ts + ((ok and off or 0) * 60)
@@ -54,6 +55,7 @@ local function local_components(ts)
     local rem = local_ts - days * SECS_PER_DAY
     local hour = math.floor(rem / 3600)
     local min = math.floor((rem % 3600) / 60)
+    local sec = math.floor(rem % 60)
     local z = days + 719468
     local era = math.floor(z / 146097)
     local doe = z - era * 146097
@@ -64,7 +66,13 @@ local function local_components(ts)
     local d = doy - math.floor((153 * mp + 2) / 5) + 1
     local mo = mp + (mp < 10 and 3 or -9)
     if mo <= 2 then y = y + 1 end
-    return y, mo, d, hour, min
+    return y, mo, d, hour, min, sec
+end
+
+-- Local wall-clock components of a UTC epoch (device clock + tz offset):
+-- y, mo, d, hour, min, sec.
+function utils.localTime(ts)
+    return local_components(ts)
 end
 
 -- "HH:MM" honouring the 12/24h clock preference.

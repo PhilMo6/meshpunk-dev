@@ -182,9 +182,10 @@ void input_ui_set_legacy(bool on, bool save) {
 // ── Deferred shortcuts (flags set here, dispatched from loop()) ────────────
 // Bare mic press = notifications shortcut: the keyboard reader (LVGL indev
 // callback) only sets the flag; loop() dispatches it into Lua
-// (topbar.on_shortcut) outside of indev processing. While a mic app holds
-// the microphone (audio/mic_lua.h) the key is push-to-talk instead.
-bool mic_lua_owner_active(void);
+// (topbar.on_shortcut) outside of indev processing. While an app has armed
+// push-to-talk or holds the microphone (audio/mic_lua.h) the key is
+// push-to-talk instead.
+bool mic_lua_ptt_active(void);
 static bool s_topbar_shortcut_pending = false;
 
 // Alt+mic while typing = emoji search popup (lib/emoji_popup). Same flag/
@@ -352,9 +353,10 @@ static void keyboard_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
           s_emoji_popup_target  = foc;
           s_emoji_popup_pending = true;
         }
-      } else if (!mic_lua_owner_active()) {
-        // With a mic app holding the microphone the key is push-to-talk
-        // (_mic_ptt reads it held); the shortcut returns when it closes.
+      } else if (!mic_lua_ptt_active()) {
+        // With push-to-talk armed or a mic session open the key is
+        // push-to-talk (_mic_ptt reads it held); the shortcut returns when
+        // both end.
         s_topbar_shortcut_pending = true;
       }
     }
@@ -763,12 +765,15 @@ void input_ui_touch_mode_set(uint8_t mode) {
   if (mode < TOUCH_MODE_COUNT) s_touch_mode = mode;
 }
 
-uint8_t input_ui_touch_mode_cycle(bool has_pad) {
+uint8_t input_ui_touch_mode_cycle(bool has_pad, bool has_mouse,
+                                  bool has_mouse_pad) {
   if (!input_dev_has_touch()) return s_touch_mode;   // stays OFF
   uint8_t m = s_touch_mode;
   for (int i = 0; i < TOUCH_MODE_COUNT; i++) {
     m = (uint8_t)((m + 1) % TOUCH_MODE_COUNT);
     if (!has_pad && (m == TOUCH_MODE_PAD || m == TOUCH_MODE_PAD_HIDDEN)) continue;
+    if (!has_mouse && (m == TOUCH_MODE_MOUSE || m == TOUCH_MODE_MOUSE_PAD)) continue;
+    if (!has_mouse_pad && m == TOUCH_MODE_MOUSE_PAD) continue;
     break;
   }
   s_touch_mode = m;
@@ -934,13 +939,15 @@ void input_ui_register_lua(lua_State *L) {
   // ── Touch input mode (lib/touchlayout.lua applies it) ───────────────────
   // _touch_mode() -> current mode; _touch_mode_cycle(has_pad) -> next mode.
   // The Lua side passes has_pad because only it knows whether the running
-  // app ships a controller layout.
+  // app ships a controller layout. The MOUSE modes are module-only, so this
+  // cycle never enters them.
   lua_register(L, "_touch_mode", [](lua_State *L) -> int {
     lua_pushinteger(L, input_ui_touch_mode());
     return 1;
   });
   lua_register(L, "_touch_mode_cycle", [](lua_State *L) -> int {
-    lua_pushinteger(L, input_ui_touch_mode_cycle(lua_toboolean(L, 1)));
+    lua_pushinteger(L, input_ui_touch_mode_cycle(lua_toboolean(L, 1),
+                                                 false, false));
     return 1;
   });
 

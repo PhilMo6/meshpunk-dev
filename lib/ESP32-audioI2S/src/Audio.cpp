@@ -1356,7 +1356,9 @@ int Audio::read_WAV_Header(uint8_t* data, size_t len) {
         headerSize += 4;
         if(getDatamode() == AUDIO_LOCALFILE) m_contentlength = getFileSize();
         if(cs){
-            m_audioDataSize = cs  - 44;
+            // MESHPUNK: cs is the data chunk's own size, i.e. the audio's
+            // length (upstream subtracted 44, the whole header's size, from it).
+            m_audioDataSize = cs;
         }
         else { // sometimes there is nothing here
             if(getDatamode() == AUDIO_LOCALFILE) m_audioDataSize = getFileSize() - headerSize;
@@ -4385,10 +4387,12 @@ uint32_t Audio::getAudioFileDuration() {
 #endif
     if(m_streamType == ST_WEBFILE)   {if(!m_contentlength) return 0;}
 
-    if     (m_avr_bitrate && m_codec == CODEC_MP3)   m_audioFileDuration = 8 * (m_audioDataSize / m_avr_bitrate); // #289
-    else if(m_avr_bitrate && m_codec == CODEC_WAV)   m_audioFileDuration = 8 * (m_audioDataSize / m_avr_bitrate);
-    else if(m_avr_bitrate && m_codec == CODEC_M4A)   m_audioFileDuration = 8 * (m_audioDataSize / m_avr_bitrate);
-    else if(m_avr_bitrate && m_codec == CODEC_AAC)   m_audioFileDuration = 8 * (m_audioDataSize / m_avr_bitrate);
+    // MESHPUNK: seconds = 8 * bytes / bits-per-second, multiplied before the
+    // division (upstream divided first, so lengths came out in 8 s steps).
+    if     (m_avr_bitrate && m_codec == CODEC_MP3)   m_audioFileDuration = (uint32_t)((8ULL * m_audioDataSize) / m_avr_bitrate); // #289
+    else if(m_avr_bitrate && m_codec == CODEC_WAV)   m_audioFileDuration = (uint32_t)((8ULL * m_audioDataSize) / m_avr_bitrate);
+    else if(m_avr_bitrate && m_codec == CODEC_M4A)   m_audioFileDuration = (uint32_t)((8ULL * m_audioDataSize) / m_avr_bitrate);
+    else if(m_avr_bitrate && m_codec == CODEC_AAC)   m_audioFileDuration = (uint32_t)((8ULL * m_audioDataSize) / m_avr_bitrate);
     else if(                 m_codec == CODEC_FLAC)  m_audioFileDuration = FLACGetAudioFileDuration();
     else return 0;
     return m_audioFileDuration;

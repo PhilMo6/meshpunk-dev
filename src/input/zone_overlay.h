@@ -9,8 +9,11 @@
 // transparent pixels render as plain black (direct pushes land in the black
 // letterbox borders, so nothing is visibly filled).
 //
-// Single consumer (the ELF host's controller mode); not thread-safe beyond
-// build/clear happening while no stamper is running.
+// Single consumer (the ELF host's controller and mouse pad modes); not
+// thread-safe beyond build/add/clear happening while no stamper is running.
+// Chips come in SETS, one per layout, all built up front: select() only
+// chooses which set stamp and push_outside draw, so switching layouts while a
+// module runs allocates and frees nothing.
 
 #pragma once
 
@@ -21,25 +24,33 @@ typedef struct {
     int16_t   x, y;     // screen position (top-left)
     int16_t   w, h;     // chip size
     uint16_t* buf;      // RGB565 chip pixels (PSRAM); 0x0000 = transparent
+    uint8_t   set;      // layout this chip belongs to (zone_overlay_add)
 } ZoneChip;
 
 // Build chips for every zone with a non-empty label (MODE pseudo-zones are
-// skipped). Frees any previous set. Allocation failures skip that chip.
+// skipped) as set 0, and select set 0. Frees any previous chips. Allocation
+// failures skip that chip.
 void zone_overlay_build(const InputZone* zones, int count);
+// Append another layout's chips as `set`, by the same rules as build.
+void zone_overlay_add(const InputZone* zones, int count, uint8_t set);
 void zone_overlay_clear(void);
+
+// The set stamp and push_outside draw. Safe to change while a stamper runs.
+void    zone_overlay_select(uint8_t set);
+uint8_t zone_overlay_selected(void);
 
 int             zone_overlay_count(void);
 const ZoneChip* zone_overlay_chip(int i);
 
-// Stamp every chip that intersects a frame positioned at screen (fx,fy) with
-// size fw x fh into that RGB565 frame buffer (clipped; transparent pixels
-// leave the frame untouched).
+// Stamp every chip of the selected set that intersects a frame positioned at
+// screen (fx,fy) with size fw x fh into that RGB565 frame buffer (clipped;
+// transparent pixels leave the frame untouched).
 void zone_overlay_stamp(uint16_t* frame, int fx, int fy, int fw, int fh);
 
-// Push (or erase, with black) every chip PART lying outside that frame rect,
-// via push(x, y, w, h, pixels) — display_dev_blit's exact signature. Covers
-// the letterbox borders a module never redraws; chips fully inside the frame
-// are untouched (the stamp path owns them).
+// Push (or erase, with black) every PART of a selected-set chip lying outside
+// that frame rect, via push(x, y, w, h, pixels) — display_dev_blit's exact
+// signature. Covers the letterbox borders a module never redraws; chips fully
+// inside the frame are untouched (the stamp path owns them).
 void zone_overlay_push_outside(int fx, int fy, int fw, int fh, bool erase,
                                void (*push)(int x, int y, int w, int h,
                                             const uint16_t* px));

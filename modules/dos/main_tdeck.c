@@ -21,6 +21,9 @@
 //                  [-pitcap Hz]    cap channel-0 timer IRQ delivery (0 = off)
 //                  [-mlatch 0|1]   1 = trackball click latches the mouse
 //                                  button instead of following the press
+//                  [-tspeed N]     touch mouse speed, PS/2 counts per screen
+//                                  pixel (default 2); touch is the mouse only
+//                                  in the firmware's touch mouse modes
 //   Paths arrive in VFS form (/sd/... or /littlefs/...).
 //   -keymap / -trkball / -stackkb / -kbtoggle are consumed by the host but
 //   stay in argv.
@@ -61,6 +64,7 @@ void dos_video_flush(void);
 void dos_input_key(PS2KbdState *kbd, unsigned char key, int pressed);
 void dos_input_mouse_config(int speed);
 void dos_input_latch_config(int on);
+void dos_input_touch_config(int speed);
 void dos_input_poll_mouse(PS2MouseState *mouse);
 BlockDevice *dos_folderdisk_open(const char *manifest_path, int read_only);
 void dos_folderdisk_flush(BlockDevice *bs);
@@ -372,6 +376,7 @@ int main(int argc, char **argv)
     int sb_digital = 1;
     int pit_cap = 0;
     int m_latch = 0;
+    int touch_speed = 2;
 
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "-fda")     && i + 1 < argc) fda = argv[++i];
@@ -388,6 +393,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-sbdigi")  && i + 1 < argc) sb_digital = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-pitcap")  && i + 1 < argc) pit_cap = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-mlatch")  && i + 1 < argc) m_latch = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-tspeed")  && i + 1 < argc) touch_speed = atoi(argv[++i]);
         else if (argv[i][0] == '-') { if (i + 1 < argc) i++; }  // -keymap/-trkball/-stackkb
     }
     /* -sbdigi: 1 = on, 3 = no-dma, 2 = no-irq, 0 = DSP off */
@@ -452,9 +458,9 @@ int main(int argc, char **argv)
     if (hda)     conf.disks[0] = hda;
     if (cd)    { conf.disks[2] = cd; conf.iscd[2] = 1; }
 
-    printf("[dos] fda=%s hda=%s cd=%s cfolder=%s cpu=%d audio=%d mouse=%d\n",
+    printf("[dos] fda=%s hda=%s cd=%s cfolder=%s cpu=%d audio=%d mouse=%d tspeed=%d\n",
            fda ? fda : "-", hda ? hda : "-", cd ? cd : "-",
-           cfolder ? cfolder : "-", cpu_gen, audio_pct, mouse_speed);
+           cfolder ? cfolder : "-", cpu_gen, audio_pct, mouse_speed, touch_speed);
 
     dos_video_set_smoothing(smoothing);
     dos_video_set_render_gate(render_gate);
@@ -462,6 +468,7 @@ int main(int argc, char **argv)
     dos_video_init(fb, FB_W, FB_H);
     dos_input_mouse_config(mouse_speed);
     dos_input_latch_config(m_latch);
+    dos_input_touch_config(touch_speed);
 
     if (setjmp(s_exit_jmp)) {
         printf("[dos] module exited (code %d)\n", s_exit_code);

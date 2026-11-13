@@ -225,6 +225,32 @@ static uint32_t         s_zone_quit_since = 0;
 static uint8_t          s_osk_hover       = 0;
 #define ZONE_QUIT_HOLD_MS 600
 
+// Mouse pad layout — the optional second table of _elf_touch_layout. Armed
+// instead of the controller layout in TOUCH_MODE_MOUSE_PAD, by the same
+// out-code rules. Both layouts' indicator chips are built before the module
+// starts (zone_overlay sets); a mode change only selects one.
+static InputZone s_elf_mzones[INPUT_ZONES_MAX];
+static int       s_elf_mzone_count = 0;
+#define CHIP_SET_PAD   0
+#define CHIP_SET_MOUSE 1
+
+// ── Touch mouse (host_touch_read) ──────────────────────────────────────────
+// s_touch_mouse_ok: the module has called host_touch_read, which puts the two
+// mouse modes in its touch-mode cycle. s_mouse_mode: one of them is applied
+// (elf_apply_touch_mode is the only writer). s_touch_said_mouse: what the
+// module's latest host_touch_read reported; host_trackball_read reads it to
+// tell a read made for a mouse mode from a module's permanent raw opt-in.
+// The pointer fields are written by the input task (Core 1) and read by the
+// module (Core 0), under s_tp_mux.
+static volatile bool s_touch_mouse_ok   = false;
+static volatile bool s_mouse_mode       = false;
+static volatile bool s_touch_said_mouse = false;
+static portMUX_TYPE  s_tp_mux   = portMUX_INITIALIZER_UNLOCKED;
+static int16_t       s_tp_x     = 0;   // first pointer point, canvas coords
+static int16_t       s_tp_y     = 0;
+static uint8_t       s_tp_n     = 0;   // pointer points down
+static uint16_t      s_tp_downs = 0;   // 0 -> 1+ edges since the module's last read
+
 // ── Screenshot capture (SHOT zone 0xFD / the bindable Screenshot key) ──────
 // Both triggers set s_shot_requested; shot_service() (input task) claims the
 // staging buffer, and the blit path fills it from the module's OWN pixels
@@ -377,26 +403,66 @@ static uint32_t s_legacy_release_at = 0;
 static uint8_t s_legacy_hist[3]  = {0, 0, 0};
 static bool    s_legacy_flip_req = false;
 
-// Apply a touch-input mode to the running module: controller layout, host
-// keyboard, or nothing. Owns the panel cleanup each transition needs — the
-// module never redraws the letterbox borders, so indicator parts out there
-// must be erased explicitly the moment they stop being shown.
+// Enter or leave the two mouse modes. In them the trackball sends no arrow
+// keys and its counters are host_trackball_read's; on the way out, counts the
+// module left unread are dropped so they cannot replay as arrow keys, and the
+// momentum restarts from rest either way.
+static void touch_mouse_set(bool on) {
+    if (on == s_mouse_mode) return;
+    if (!on && !s_trk_raw_mode) {
+        int v;
+        v = trackball_up;    trackball_up    -= v;
+        v = trackball_down;  trackball_down  -= v;
+        v = trackball_left;  trackball_left  -= v;
+        v = trackball_right; trackball_right -= v;
+        v = trackball_click; trackball_click -= v;
+    }
+    trk_vel_x = 0;
+    trk_vel_y = 0;
+    portENTER_CRITICAL(&s_tp_mux);
+    s_tp_n     = 0;
+    s_tp_downs = 0;
+    portEXIT_CRITICAL(&s_tp_mux);
+    s_mouse_mode = on;
+}
+
+// The pointer points of one touch sample; defined with the canvas helpers in
+// the host-function block below, whose language linkage it shares.
+extern "C" {
+static void touch_ptr_update(const int16_t* xs, const int16_t* ys, int np,
+                             bool skip_zoned);
+}
+
+// Apply a touch-input mode to the running module: controller layout, mouse
+// pad layout, touch mouse, host keyboard, or nothing. Owns the panel cleanup
+// each transition needs — the module never redraws the letterbox borders, so
+// indicator parts out there must be erased explicitly the moment they stop
+// being shown.
 static void elf_apply_touch_mode(uint8_t mode) {
     bool has_pad    = (s_elf_zone_count > 0);
+    bool has_mpad   = (s_elf_mzone_count > 0);
     bool want_pad   = has_pad && (mode == TOUCH_MODE_PAD ||
                                   mode == TOUCH_MODE_PAD_HIDDEN);
-    bool want_chips = has_pad && (mode == TOUCH_MODE_PAD);
+    bool want_mpad  = has_mpad && (mode == TOUCH_MODE_MOUSE_PAD);
+    bool want_chips = (has_pad && mode == TOUCH_MODE_PAD) || want_mpad;
+    uint8_t chips   = want_mpad ? CHIP_SET_MOUSE : CHIP_SET_PAD;
     bool want_kb    = (mode == TOUCH_MODE_KB);
+    bool want_mouse = s_touch_mouse_ok && (mode == TOUCH_MODE_MOUSE ||
+                                           mode == TOUCH_MODE_MOUSE_PAD);
 
-    if (s_zone_overlay_on && !want_chips) {
+    // push_outside draws the SELECTED chip set, so the set leaving the screen
+    // is erased before the next one is selected.
+    if (s_zone_overlay_on && (!want_chips || chips != zone_overlay_selected())) {
         int ffx = s_zone_frame_seen ? s_zone_fx : 0;
         int ffy = s_zone_frame_seen ? s_zone_fy : 0;
         int ffw = s_zone_frame_seen ? s_zone_fw : 0;
         int ffh = s_zone_frame_seen ? s_zone_fh : 0;
         zone_overlay_push_outside(ffx, ffy, ffw, ffh, true, display_dev_blit);
     }
+    zone_overlay_select(chips);
     s_zone_overlay_on    = want_chips;
     s_zone_border_pushed = false;
+    touch_mouse_set(want_mouse);
 
     if (want_kb) {
         const InputZone* oz = nullptr;
@@ -414,6 +480,9 @@ static void elf_apply_touch_mode(uint8_t mode) {
 
     if (want_pad) {
         input_zones_set(s_elf_zones, s_elf_zone_count);
+        input_zones_enable(true);
+    } else if (want_mpad) {
+        input_zones_set(s_elf_mzones, s_elf_mzone_count);
         input_zones_enable(true);
     } else {
         input_zones_enable(false);
@@ -512,9 +581,10 @@ static void poll_input(bool kb_only = false) {
     // Shift state
     if (shift) cur_state[0x80] = true; // pseudo-code for shift
 
-    if (!kb_only && s_trk_raw_mode) {
+    if (!kb_only && (s_trk_raw_mode || s_mouse_mode)) {
         // Module reads raw deltas via host_trackball_read() (e.g. PC-XT's
-        // serial mouse) — leave the ISR counters alone, emit no 0x81-0x85.
+        // serial mouse, or any module in a touch mouse mode) — leave the ISR
+        // counters alone, emit no 0x81-0x85.
     } else if (!kb_only) {
         // Trackball — momentum or legacy mode
         if (trk_momentum) {
@@ -641,10 +711,16 @@ static void poll_input(bool kb_only = false) {
     // OUT already IS the module keycode — or plain ASCII while the OSK is
     // open. The quit zone (0xFF) fires only after a deliberate hold and is
     // swallowed like the bound quit key — the module never sees it.
+    // In the two mouse modes the same sample also feeds the module's mouse:
+    // every point that landed on no pad (in MOUSE no layout is armed, so
+    // that is every point).
     if (!kb_only) {
-        if (input_zones_enabled()) {
-            int16_t xs[INPUT_DEV_TOUCH_MAX], ys[INPUT_DEV_TOUCH_MAX];
-            int np = input_dev_touch_read_multi(xs, ys, INPUT_DEV_TOUCH_MAX);
+        bool zones_on = input_zones_enabled();
+        int16_t xs[INPUT_DEV_TOUCH_MAX], ys[INPUT_DEV_TOUCH_MAX];
+        int np = 0;
+        if (zones_on || s_mouse_mode)
+            np = input_dev_touch_read_multi(xs, ys, INPUT_DEV_TOUCH_MAX);
+        if (zones_on) {
             input_zones_touch_multi(xs, ys, np);
 
             uint8_t cur[INPUT_DEV_TOUCH_MAX];
@@ -714,6 +790,7 @@ static void poll_input(bool kb_only = false) {
             memcpy(s_zone_prev, cur, (size_t)cn);
             s_zone_prev_n = cn;
         }
+        if (s_mouse_mode) touch_ptr_update(xs, ys, np, zones_on);
 
         // Mode trigger — the board's aux button (Heltec IO key) or the
         // Shift+Alt chord where a keyboard exists. loop()'s own chord
@@ -746,8 +823,9 @@ static void poll_input(bool kb_only = false) {
             s_zone_prev_out = 0;
             s_zone_prev_n   = 0;
             s_osk_hover     = 0;
-            elf_apply_touch_mode(
-                input_ui_touch_mode_cycle(s_elf_zone_count > 0));
+            elf_apply_touch_mode(input_ui_touch_mode_cycle(
+                s_elf_zone_count > 0, s_touch_mouse_ok,
+                s_touch_mouse_ok && s_elf_mzone_count > 0));
         }
     }
 }
@@ -824,11 +902,14 @@ static void elf_input_start() {
     s_zone_frame_seen    = false;
     s_elf_chord_prev     = false;
     // Indicator chips are rendered up front (cheap, and the mode can turn
-    // them on later); the shared touch mode then decides what is armed —
-    // controller layout, host keyboard, or nothing. It carries over from
-    // the Lua side, so a board that came up with touch controls live starts
-    // the module the same way.
-    if (s_elf_zone_count > 0) zone_overlay_build(s_elf_zones, s_elf_zone_count);
+    // them on later), one set per layout; the shared touch mode then decides
+    // what is armed — controller layout, host keyboard, or nothing (the mouse
+    // modes exist only once the module calls host_touch_read). It carries
+    // over from the Lua side, so a board that came up with touch controls
+    // live starts the module the same way.
+    zone_overlay_build(s_elf_zones, s_elf_zone_count);
+    if (s_elf_mzone_count > 0)
+        zone_overlay_add(s_elf_mzones, s_elf_mzone_count, CHIP_SET_MOUSE);
     elf_apply_touch_mode(input_ui_touch_mode());
     s_input_task_run = true;
     // Priority 5: ABOVE usb_mgr (4), sound_task (3) and elf_blit (3). The
@@ -883,9 +964,16 @@ static void elf_zones_teardown() {
     input_zones_clear();
     zone_overlay_clear();
     s_elf_zone_count  = 0;
+    s_elf_mzone_count = 0;
     s_zone_overlay_on = false;
     s_zone_prev_out   = 0;
     s_zone_prev_n     = 0;
+    touch_mouse_set(false);
+    // The mouse modes exist only while a module runs: the Lua side gets the
+    // board default instead of a mode it has no meaning for.
+    uint8_t m = input_ui_touch_mode();
+    if (m == TOUCH_MODE_MOUSE || m == TOUCH_MODE_MOUSE_PAD)
+        input_ui_touch_mode_init();
 }
 
 // ── Firmware-internal injection (USB HID keyboard; see elf_host.h) ─────────
@@ -1508,6 +1596,34 @@ static void rect_canvas_origin(int* ox, int* oy) {
     *oy = (y > 0) ? y : 0;
 }
 
+// The mouse-mode pointer from one touch sample (poll_input): every point
+// that landed on no armed pad when skip_zoned, the first of them reported,
+// moved into canvas coordinates and clamped to the canvas. A count rising
+// from zero is one touch-down edge for host_touch_read.
+static void touch_ptr_update(const int16_t* xs, const int16_t* ys, int np,
+                             bool skip_zoned) {
+    int ox, oy;
+    rect_canvas_origin(&ox, &oy);
+    int n = 0, cx = 0, cy = 0;
+    for (int p = 0; p < np; p++) {
+        if (skip_zoned && input_zones_hit(xs[p], ys[p])) continue;
+        if (n == 0) { cx = xs[p] - ox; cy = ys[p] - oy; }
+        n++;
+    }
+    if (cx < 0) cx = 0;
+    if (cx > RECT_CANVAS_W - 1) cx = RECT_CANVAS_W - 1;
+    if (cy < 0) cy = 0;
+    if (cy > RECT_CANVAS_H - 1) cy = RECT_CANVAS_H - 1;
+    portENTER_CRITICAL(&s_tp_mux);
+    if (n > 0) {
+        if (s_tp_n == 0 && s_tp_downs < 0xFFFF) s_tp_downs++;
+        s_tp_x = (int16_t)cx;
+        s_tp_y = (int16_t)cy;
+    }
+    s_tp_n = (uint8_t)n;
+    portEXIT_CRITICAL(&s_tp_mux);
+}
+
 // Letterbox bookkeeping for a centred canvas, as host_blit_frame keeps it for
 // a centred frame: with controller chips shown, the canvas is the module's
 // frame for elf_apply_touch_mode, and chip parts in the borders are pushed
@@ -1694,8 +1810,11 @@ int host_trackball_button(void) {
     return input_dev_nav_click_held() ? 1 : 0;
 }
 
+// A read made while the module's latest host_touch_read reported a mouse mode
+// belongs to that mode, which already holds the counters: it does not opt
+// the module in, so arrow keys come back once the mode is left.
 void host_trackball_read(int* dx, int* dy, int* click) {
-    s_trk_raw_mode = true;
+    if (!s_touch_said_mouse) s_trk_raw_mode = true;
     int up = trackball_up;    trackball_up    -= up;
     int dn = trackball_down;  trackball_down  -= dn;
     int lt = trackball_left;  trackball_left  -= lt;
@@ -1704,6 +1823,35 @@ void host_trackball_read(int* dx, int* dy, int* click) {
     if (dx)    *dx = rt - lt;
     if (dy)    *dy = dn - up;
     if (click) *click = ck;
+}
+
+// Touch as a mouse. Returns -1 outside TOUCH_MODE_MOUSE and _MOUSE_PAD (touch
+// is not the module's then); otherwise the number of pointer points down —
+// in MOUSE_PAD only the points that landed on no pad. x/y: the first pointer
+// point in canvas coordinates (the 320x240 space host_blit_rect_async uses,
+// clamped to it), or where the last one lifted. downs: touch-down edges (no
+// point -> some) since the previous call, so a tap shorter than the caller's
+// poll interval still registers. The first call opts the module in: from
+// then on its touch-mode cycle includes MOUSE, and MOUSE_PAD when the
+// launcher passed a mouse pad layout. In both modes the trackball sends no
+// arrow keys and its motion is left for host_trackball_read.
+int host_touch_read(int* x, int* y, int* downs) {
+    s_touch_mouse_ok = true;
+    bool on = s_mouse_mode;
+    s_touch_said_mouse = on;
+    int n = -1, d = 0;
+    portENTER_CRITICAL(&s_tp_mux);
+    int px = s_tp_x, py = s_tp_y;
+    if (on) {
+        n = s_tp_n;
+        d = s_tp_downs;
+        s_tp_downs = 0;
+    }
+    portEXIT_CRITICAL(&s_tp_mux);
+    if (x)     *x = px;
+    if (y)     *y = py;
+    if (downs) *downs = d;
+    return n;
 }
 
 // Track the sample rate across calls so we only reconfigure the mixer when
@@ -2414,6 +2562,7 @@ static const elf_symbol_t host_exports[] = {
     { "host_get_key",       (void*)host_get_key },
     { "host_trackball_read", (void*)host_trackball_read },
     { "host_trackball_button", (void*)host_trackball_button },
+    { "host_touch_read",       (void*)host_touch_read },
     { "host_key_mods",         (void*)host_key_mods },
     { "host_kb_blink",         (void*)host_kb_blink },
     { "host_audio_push",    (void*)host_audio_push },
@@ -2962,6 +3111,8 @@ int elf_host_run_pending(void) {
     s_kb_toggle_enabled = false;   // opt-in: set below by -kbtoggle
     s_kb_layer_on = true;
     s_trk_raw_mode = false; // modules opt in via host_trackball_read()
+    s_touch_mouse_ok   = false;   // ...and into the mouse modes via host_touch_read()
+    s_touch_said_mouse = false;
 
     // Check for -keymap argument; default is passthrough (raw key codes).
     // Modules that need translated keycodes (e.g. Doom) pass their own
@@ -3226,19 +3377,15 @@ int elf_host_run_pending(void) {
     return result;
 }
 
-// _elf_touch_layout({ {x=,y=,w=,h=,out=,label=}, ... }) — controller zones
-// for the NEXT module launch. OUT codes are module keycodes (0xFF = quit);
-// lib/keybind.lua generates the table from a launcher's action list. Armed
-// in elf_input_start on keyboardless boards, cleared when the module exits —
-// call it before every _launch_elf. Returns the zone count accepted.
-static int lua_elf_touch_layout(lua_State* L) {
-    s_elf_zone_count = 0;
-    if (!lua_istable(L, 1)) { lua_pushinteger(L, 0); return 1; }
-    int len = (int)lua_rawlen(L, 1);
-    for (int i = 1; i <= len && s_elf_zone_count < INPUT_ZONES_MAX; i++) {
-        lua_rawgeti(L, 1, i);
+// One zone table from the Lua stack at `idx` into dst; returns the count.
+static int read_zone_table(lua_State* L, int idx, InputZone* dst) {
+    int count = 0;
+    if (!lua_istable(L, idx)) return 0;
+    int len = (int)lua_rawlen(L, idx);
+    for (int i = 1; i <= len && count < INPUT_ZONES_MAX; i++) {
+        lua_rawgeti(L, idx, i);
         if (lua_istable(L, -1)) {
-            InputZone* z = &s_elf_zones[s_elf_zone_count];
+            InputZone* z = &dst[count];
             memset(z, 0, sizeof(*z));
             lua_getfield(L, -1, "x");   z->x   = (int16_t)lua_tointeger(L, -1); lua_pop(L, 1);
             lua_getfield(L, -1, "y");   z->y   = (int16_t)lua_tointeger(L, -1); lua_pop(L, 1);
@@ -3249,12 +3396,26 @@ static int lua_elf_touch_layout(lua_State* L) {
             const char* lb = lua_tostring(L, -1);
             if (lb) { strncpy(z->label, lb, sizeof(z->label) - 1); }
             lua_pop(L, 1);
-            s_elf_zone_count++;
+            count++;
         }
         lua_pop(L, 1);
     }
+    return count;
+}
+
+// _elf_touch_layout(zones [, mouse_zones]) — touch layouts for the NEXT
+// module launch, each { {x=,y=,w=,h=,out=,label=}, ... }. zones is the
+// controller layout (PAD modes); mouse_zones the mouse pad layout, armed in
+// TOUCH_MODE_MOUSE_PAD for a module that reads touch as a mouse. OUT codes
+// are module keycodes (0xFF = quit). Armed in elf_input_start, cleared when
+// the module exits — call it before every _launch_elf. Returns the
+// controller zone count accepted, then the mouse pad's.
+static int lua_elf_touch_layout(lua_State* L) {
+    s_elf_zone_count  = read_zone_table(L, 1, s_elf_zones);
+    s_elf_mzone_count = read_zone_table(L, 2, s_elf_mzones);
     lua_pushinteger(L, s_elf_zone_count);
-    return 1;
+    lua_pushinteger(L, s_elf_mzone_count);
+    return 2;
 }
 
 void elf_host_register_lua(lua_State* L) {

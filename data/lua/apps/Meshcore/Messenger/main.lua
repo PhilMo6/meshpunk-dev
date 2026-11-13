@@ -191,6 +191,12 @@ end
 -- Contact field reads it back (also works across apps).
 local clipboard = require("lib/clipboard")
 
+-- Tools > Voice to Text's engine (lib/dictation): while it runs, compose's
+-- hold menu has Insert voice text, a recording into the message box
+-- (lib/voice_popup).
+local dictation   = require("lib/dictation")
+local voice_popup = require("lib/voice_popup")
+
 -- application/x-www-form-urlencoded (space -> '+', others -> %XX) for query URIs.
 local function url_encode(s)
     return (tostring(s or ""):gsub("[^%w%-_%.~]", function(c)
@@ -1785,6 +1791,16 @@ local function build_chat(target)
             clipboard.copy(textArea.text or "")
             close()
         end)
+
+        local dd = dictation.active
+        if dd and dd.state ~= "failed" then
+            local dict_b = pbox:Button { w = lvgl.PCT(100), h = 28 }
+            dict_b:Label { text = "Insert voice text", align = lvgl.ALIGN.CENTER }
+            dict_b:onevent(lvgl.EVENT.RELEASED, function()
+                close()
+                voice_popup.insert(dd, textArea, { inserted = enforce_wire_budget })
+            end)
+        end
 
         local cancel_b = pbox:Button { w = lvgl.PCT(100), h = 26 }
         cancel_b:Label { text = "Cancel", align = lvgl.ALIGN.CENTER }
