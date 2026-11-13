@@ -103,6 +103,23 @@ static int l_mic_set_gain(lua_State* L) {
   return 1;
 }
 
+static int l_mic_input(lua_State* L) {
+  uint8_t count = mic_hw_inputs();
+  lua_pushinteger(L, count ? mic_capture_input() : 0);
+  lua_pushinteger(L, count);
+  return 2;
+}
+
+static int l_mic_set_input(lua_State* L) {
+  lua_Integer n = luaL_checkinteger(L, 1);
+  if (n < 1 || n > (lua_Integer)mic_hw_inputs() || !mic_capture_set_input((uint8_t)n)) {
+    lua_pushnil(L);
+    return 1;
+  }
+  lua_pushinteger(L, n);
+  return 1;
+}
+
 static int l_mic_close(lua_State* L) {
   (void)L;
   session_close("closed by the app");
@@ -142,6 +159,8 @@ void mic_register_lua(lua_State* L) {
   lua_register(L, "_mic_read",     l_mic_read);
   lua_register(L, "_mic_level",    l_mic_level);
   lua_register(L, "_mic_set_gain", l_mic_set_gain);
+  lua_register(L, "_mic_input",    l_mic_input);
+  lua_register(L, "_mic_set_input", l_mic_set_input);
   lua_register(L, "_mic_close",    l_mic_close);
   lua_register(L, "_mic_owner",    l_mic_owner);
   lua_register(L, "_mic_ptt",      l_mic_ptt);

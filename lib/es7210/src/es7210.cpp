@@ -365,6 +365,16 @@ esp_err_t es7210_config_fmt(audio_hal_iface_format_t fmt)
     return ret;
 }
 
+// MESHPUNK: TDM on or off (register 0x12, SDP_INTERFACE2). 0x02 = I2S/LJ
+// TDM at 1 x fs (the value Espressif's esp-bsp es7210 driver writes for
+// tdm_enable), 0x00 = ADC1/2 on SDOUT1 and ADC3/4 on SDOUT2. In TDM the four
+// ADCs go out on SDOUT1/TDMOUT and SDOUT2/TDMIN is an input.
+// es7210_config_fmt() writes 0x00, so a call comes after it.
+esp_err_t es7210_set_tdm(bool on)
+{
+    return es7210_write_reg(ES7210_SDP_INTERFACE2_REG12, on ? 0x02 : 0x00);
+}
+
 esp_err_t es7210_set_bits(audio_hal_iface_bits_t bits)
 {
     esp_err_t ret = ESP_OK;

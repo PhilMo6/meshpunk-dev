@@ -15,6 +15,10 @@
   source has set it, rec_001.wav and up before that (the file system keeps
   no dates). The folder defaults to S:/meshpunk/recordings and is chosen
   with lib/filepick; it and the gain step live in L:/recorder.cfg.
+
+  On a board with more than one microphone input (the T-Deck) the Mic
+  button picks the input, for every app until reboot, from the next
+  recording on.
 ]]
 
 local lvgl     = require("lvgl")
@@ -53,6 +57,8 @@ if not dev.mic or type(_mic_open) ~= "function" then
     b:onClicked(function() apps.go_home() end)
     return root
 end
+
+local MIC_INPUTS = select(2, _mic_input())   -- > 1: the Record view has a Mic button
 
 -- ── Settings ──────────────────────────────────────────────────────────────────
 
@@ -441,6 +447,7 @@ local function refresh_record()
     ui.status.text  = record_status()
     ui.time.text    = rec and mmss(wavrec.seconds(st.session)) or "0:00"
     ui.gain.text    = "Gain " .. (cfg.gain * 6) .. " dB"
+    if ui.mic_lbl then ui.mic_lbl.text = "Mic " .. (_mic_input()) end
     ui.where.text   = "Save to " .. elide(cfg.dir, 30)
     ui.space.text   = space_text()
     if not rec then ui.level.fill:set { w = 0 } end
@@ -454,6 +461,15 @@ local function set_gain(g)
     save_cfg()
     if st.session then _mic_set_gain(g) end
     refresh_record()
+end
+
+local function next_input()
+    local n = _mic_input()
+    _mic_set_input(n % MIC_INPUTS + 1)
+    refresh_record()
+    if st.session then
+        ui.status.text = "Mic " .. (_mic_input()) .. " from the next recording."
+    end
 end
 
 local function toggle_record()
@@ -492,7 +508,12 @@ show_record = function()
     space.fresh = false
     swap_view(function(v)
         local c = content_of(v)
-        c:Label { text = "Recorder", w = lvgl.PCT(70), h = 22 }
+        if MIC_INPUTS > 1 then
+            c:Label { text = "Recorder", w = lvgl.PCT(38), h = 22 }
+            ui.mic_btn, ui.mic_lbl = button(c, "", lvgl.PCT(28), 22, next_input)
+        else
+            c:Label { text = "Recorder", w = lvgl.PCT(70), h = 22 }
+        end
         button(c, "Home", lvgl.PCT(28), 22, leave)
         local tbox = c:Object { w = lvgl.PCT(100), h = 36, bg_opa = 0, border_width = 0, pad_all = 0 }
         tbox:clear_flag(lvgl.FLAG.SCROLLABLE)

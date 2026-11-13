@@ -31,19 +31,26 @@ MicDevKind mic_hw_kind(void);
 
 // Bring the ADC up at `rate_hz` and leave its I2S port receiving; `*port`
 // receives the port number to read. Frames are stereo (two slots per frame);
-// the engine keeps the slot mic_hw_mic_slot() names. False (logged) on
-// failure.
+// mic_hw_input_pos() names where each input's sample sits. False (logged)
+// on failure.
 bool mic_hw_start(uint32_t rate_hz, int* port);
 void mic_hw_stop(void);
 
 // Width of the slots the started port delivers: 16 (the slot is the 16-bit
-// sample: ES8311) or 32 (the 16-bit sample is the top half of the slot word,
-// the bottom half reads zero: ES7210).
+// sample: ES8311) or 32 (32-bit slot words: ES7210, ES7243E).
 uint8_t mic_hw_slot_bits(void);
 
-// The slot of each frame that carries the microphone: 0 = left (the mic on
-// the ES8311, mic 1 on the ES7210), 1 = right (the Wio L2's ES7243E).
-uint8_t mic_hw_mic_slot(void);
+// The microphones a session can choose between (mic_capture_set_input):
+// 2 on the T-Deck (the ES7210's inputs 1 and 2), 1 on the other boards with
+// a microphone, 0 without one. At most MIC_MAX_INPUTS.
+#define MIC_MAX_INPUTS 4
+uint8_t mic_hw_inputs(void);
+
+// Where input n (1..mic_hw_inputs()) sits in each frame: *slot 0 = the left
+// slot, 1 = the right; *shift = the bit position of its 16-bit sample in the
+// slot word (16 = the top half of a 32-bit slot, 0 = the bottom half or a
+// 16-bit slot).
+void mic_hw_input_pos(uint8_t n, uint8_t* slot, uint8_t* shift);
 
 // Gain step 0..7, 6 dB per step (ES8311: the REG16 ADC gain scale; ES7210
 // and ES7243E: the PGA table, nearest entry). Returns the step applied, -1
@@ -64,3 +71,6 @@ bool     mic_capture_running(void);
 size_t   mic_capture_read(int16_t* out, size_t max_samples);   // drains the ring
 int16_t  mic_capture_peak(void);        // |sample| peak since the previous call
 uint32_t mic_capture_dropped(void);     // samples lost to a full ring this session
+bool     mic_capture_set_input(uint8_t n);   // 1..mic_hw_inputs(), from the next session
+                                             // on (until reboot); false out of range
+uint8_t  mic_capture_input(void);       // the input sessions take (1 at boot)

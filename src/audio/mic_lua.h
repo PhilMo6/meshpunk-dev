@@ -5,6 +5,11 @@
 //   _mic_read(max_bytes) -> string|nil little-endian s16 mono at 16 kHz; nil = ring empty
 //   _mic_level() -> peak, dropped       |sample| peak since the previous call, ring overflow count
 //   _mic_set_gain(step) -> step|nil     0..7, 6 dB per step
+//   _mic_input() -> n, count            the input sessions take (1..count) and how many
+//                                       there are to choose from: 2 on the T-Deck, 1 on the
+//                                       other boards with a microphone, 0 (n 0) without one
+//   _mic_set_input(n) -> n|nil          from the next session on, until reboot, for every
+//                                       app; nil out of range
 //   _mic_close()
 //   _mic_owner() -> name|nil
 //   _mic_ptt() -> held                  the mic key (T-Deck) / Record key (P4 keyboard) is down
