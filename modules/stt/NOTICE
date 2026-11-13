@@ -1,0 +1,35 @@
+stt.audioplug.elf - Meshpunk's speech-to-text audio plugin
+
+Meshpunk's own files: src/plugin.cpp, src/port.h, src/config.h (its
+memory and clip values; the audio and model-file values are upstream's),
+src/profile.*, src/dsp/exact_angle.*, src/tlib_ops/kernels_p4/,
+src/tlib_ops/src/tlib_linear_impl_c.cpp,
+src/tlib_ops/src/tlib_quantize_impl_c.cpp, test/, build.ps1.
+src/tlib_ops/inc/tlib_kernels_c.h and src/tlib_ops/src/tlib_kernels_c.cpp
+are Meshpunk's C versions of upstream's ESP32-S3 kernels (1. below), and
+src/dsp/fft4r_c.cpp Meshpunk's C versions of esp-dsp's ESP32-S3 code (2.
+below), each giving the same results; src/tlib_ops/inc/tlib_linear_tiled.h
+is upstream's code moved out of tlib_linear_impl_esp32s3.cpp.
+
+Third-party code and data:
+
+1. conformer-stt-s3 - https://github.com/lspr98/conformer-stt-s3
+   Copyright 2026 lspr98. Apache License 2.0 (LICENSE in this folder).
+   src/tlib, src/tlib_ops (with the assembly kernels in
+   src/tlib_ops/kernels) and src/conformer are this project's code. Files
+   changed for Meshpunk say so, and what changed, in their first lines.
+
+2. esp-dsp 1.8.2 - https://github.com/espressif/esp-dsp
+   Copyright 2018-2025 Espressif Systems (Shanghai) CO LTD. Apache
+   License 2.0. src/dsp/fft4r_aes3.S is dsps_fft4r_fc32_aes3_.S,
+   src/dsp/cplx2real_ae32.c is dsps_fft4r_fc32_ae32.c, and src/dsp/fft4r.cpp
+   is ported from dsps_fft4r_fc32_ansi.c; each says what changed.
+
+3. The model file the plugin reads (model.bin, not in this folder):
+   conformer-stt-s3's model, a quantized and distilled version of NVIDIA's
+   stt_en_conformer_ctc_small
+   (https://huggingface.co/nvidia/stt_en_conformer_ctc_small), under the
+   Creative Commons Attribution 4.0 International license
+   (https://creativecommons.org/licenses/by/4.0/). conformer-stt-s3's model
+   README lists the changes made to the original model. Neither project is
+   endorsed by the original model's authors.

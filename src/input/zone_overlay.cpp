@@ -80,10 +80,14 @@ static const uint8_t* glyph_for(char c) {
 #define ZO_SHADOW 0x2121
 #define ZO_CLEAR  0x0000
 
-static ZoneChip  s_chips[INPUT_ZONES_MAX];
+// Room for two full layouts: the controller pad and the mouse pad.
+#define ZO_CHIPS_MAX (2 * INPUT_ZONES_MAX)
+
+static ZoneChip  s_chips[ZO_CHIPS_MAX];
 static int       s_chip_count = 0;
 static uint16_t* s_scratch = nullptr;      // repack buffer, sized to largest chip
 static int       s_scratch_px = 0;
+static volatile uint8_t s_selected = 0;    // the set stamp/push_outside draw
 
 void zone_overlay_clear(void) {
     for (int i = 0; i < s_chip_count; i++) {
@@ -94,7 +98,11 @@ void zone_overlay_clear(void) {
     free(s_scratch);
     s_scratch = nullptr;
     s_scratch_px = 0;
+    s_selected = 0;
 }
+
+void zone_overlay_select(uint8_t set) { s_selected = set; }
+uint8_t zone_overlay_selected(void) { return s_selected; }
 
 static void draw_glyph_scaled(uint16_t* buf, int bw, int px, int py,
                               const uint8_t* g, int scale, uint16_t color) {
@@ -126,8 +134,13 @@ static void draw_glyph(uint16_t* buf, int bw, int px, int py, const uint8_t* g) 
 
 void zone_overlay_build(const InputZone* zones, int count) {
     zone_overlay_clear();
+    zone_overlay_add(zones, count, 0);
+}
+
+void zone_overlay_add(const InputZone* zones, int count, uint8_t set) {
     if (!zones) return;
-    for (int i = 0; i < count && s_chip_count < INPUT_ZONES_MAX; i++) {
+    int largest = s_scratch_px;
+    for (int i = 0; i < count && s_chip_count < ZO_CHIPS_MAX; i++) {
         const InputZone* z = &zones[i];
         if (z->out == INPUT_ZONE_MODE) continue;
         int len = (int)strnlen(z->label, sizeof(z->label));
@@ -161,11 +174,15 @@ void zone_overlay_build(const InputZone* zones, int count) {
         if (chip->x < 0) chip->x = 0;
         if (chip->y < 0) chip->y = 0;
         chip->buf = buf;
+        chip->set = set;
         s_chip_count++;
-        if (w * h > s_scratch_px) s_scratch_px = w * h;
+        if (w * h > largest) largest = w * h;
     }
-    if (s_chip_count > 0)
-        s_scratch = (uint16_t*)ps_malloc((size_t)s_scratch_px * sizeof(uint16_t));
+    if (largest > s_scratch_px) {
+        free(s_scratch);
+        s_scratch = (uint16_t*)ps_malloc((size_t)largest * sizeof(uint16_t));
+        s_scratch_px = s_scratch ? largest : 0;
+    }
 }
 
 int zone_overlay_count(void) { return s_chip_count; }
@@ -177,8 +194,10 @@ const ZoneChip* zone_overlay_chip(int i) {
 
 void zone_overlay_stamp(uint16_t* frame, int fx, int fy, int fw, int fh) {
     if (!frame) return;
+    uint8_t set = s_selected;
     for (int i = 0; i < s_chip_count; i++) {
         const ZoneChip* c = &s_chips[i];
+        if (c->set != set) continue;
         // Chip rectangle in frame coordinates, clipped to the frame.
         int x0 = c->x - fx, y0 = c->y - fy;
         int sx = 0, sy = 0;
@@ -218,8 +237,10 @@ void zone_overlay_push_outside(int fx, int fy, int fw, int fh, bool erase,
                                void (*push)(int, int, int, int,
                                             const uint16_t*)) {
     if (!push) return;
+    uint8_t set = s_selected;
     for (int i = 0; i < s_chip_count; i++) {
         const ZoneChip* c = &s_chips[i];
+        if (c->set != set) continue;
         // Frame rect in chip-local coordinates, clamped to the chip.
         int ix0 = fx - c->x, iy0 = fy - c->y;
         int ix1 = ix0 + fw,  iy1 = iy0 + fh;

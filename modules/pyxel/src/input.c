@@ -27,6 +27,8 @@ static char s_frame_text[32];
 static int s_frame_text_len;
 
 static int s_mouse_button;          // last trackball button level in mouse mode
+static int s_touch_down;            // a touch held the left button last frame
+static int s_left_down;             // the left button as last reported to the game
 
 // Pixels of mouse travel per trackball tick, in game coordinates.
 #define MOUSE_STEP 3
@@ -61,6 +63,8 @@ void px_input_reset(void) {
     s_frame_text_len = 0;
     s_frame_text[0] = 0;
     s_mouse_button = 0;
+    s_touch_down = 0;
+    s_left_down = 0;
 }
 
 static void press_key(uint32_t key) {
@@ -138,15 +142,35 @@ void px_input_poll(void) {
         if (px.mouse_x >= px.width) px.mouse_x = px.width - 1;
         if (px.mouse_y >= px.height) px.mouse_y = px.height - 1;
         int level = host_trackball_button();
+
+        // In the firmware's touch mouse modes a touch puts the pointer on the
+        // game pixel under the finger and holds the left button until it
+        // lifts; host_touch_read returns -1 in every other mode.
+        int tx = 0, ty = 0, downs = 0;
+        int tn = host_touch_read(&tx, &ty, &downs);
+        int touch = 0, touch_tap = 0;
+        if (tn >= 0) {
+            if (tn > 0 || downs > 0)
+                px_display_canvas_to_game(tx, ty, &px.mouse_x, &px.mouse_y);
+            touch = (tn > 0);
+            // Touch-downs beyond the one now showing began and ended between
+            // two frames.
+            touch_tap = downs > ((touch && !s_touch_down) ? 1 : 0);
+        }
+
+        int down = level || touch;
         // A click shorter than one poll shows up only in the edge count.
-        if (click > 0 && !level && !s_mouse_button) {
+        int tap = (click > 0 && !level && !s_mouse_button) || touch_tap;
+        if (tap && !down && !s_left_down) {
             press_key(PX_MOUSE_BUTTON_LEFT);
             release_key(PX_MOUSE_BUTTON_LEFT);
-        } else if (level != s_mouse_button) {
-            if (level) press_key(PX_MOUSE_BUTTON_LEFT);
+        } else if (down != s_left_down) {
+            if (down) press_key(PX_MOUSE_BUTTON_LEFT);
             else release_key(PX_MOUSE_BUTTON_LEFT);
         }
         s_mouse_button = level;
+        s_touch_down = touch;
+        s_left_down = down;
     }
 }
 
@@ -155,6 +179,7 @@ void px_input_enable_mouse(void) {
     px.mouse_mode = true;
     int dx, dy, click;
     host_trackball_read(&dx, &dy, &click);     // opt in; discard ticks from before
+    host_touch_read(NULL, NULL, NULL);         // offer the touch mouse modes
     if (px.mouse_x == 0 && px.mouse_y == 0) {
         px.mouse_x = px.width / 2;
         px.mouse_y = px.height / 2;

@@ -111,6 +111,22 @@ void px_display_end(void) {
     s_hrows = NULL;
 }
 
+// The frame is s_out_w x s_out_h, centred on the canvas the way the
+// firmware's frame blit places it; its pixels map back onto the screen at
+// the same ratio for both the integer-scale and the shrink-to-fit paths.
+bool px_display_canvas_to_game(int cx, int cy, int* gx, int* gy) {
+    if (s_out_w <= 0 || s_out_h <= 0) return false;
+    int fx = cx - (PX_SCREEN_MAX_W - s_out_w) / 2;
+    int fy = cy - (PX_SCREEN_MAX_H - s_out_h) / 2;
+    if (fx < 0) fx = 0;
+    if (fx > s_out_w - 1) fx = s_out_w - 1;
+    if (fy < 0) fy = 0;
+    if (fy > s_out_h - 1) fy = s_out_h - 1;
+    *gx = fx * px.width / s_out_w;
+    *gy = fy * px.height / s_out_h;
+    return true;
+}
+
 // Screen row y averaged across each panel column's pixels, into ring slot y % TAPS_MAX.
 static const uint16_t* hrow(const uint8_t* src, int w, int y) {
     int slot = y % TAPS_MAX;

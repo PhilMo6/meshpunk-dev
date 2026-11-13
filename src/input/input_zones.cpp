@@ -68,6 +68,10 @@ static int zone_hit(int16_t x, int16_t y) {
   return -1;
 }
 
+bool input_zones_hit(int16_t x, int16_t y) {
+  return input_zones_enabled() && zone_hit(x, y) >= 0;
+}
+
 bool input_zones_touch_multi(const int16_t* xs, const int16_t* ys, int n) {
   if (!input_zones_enabled()) {
     bits_clear();

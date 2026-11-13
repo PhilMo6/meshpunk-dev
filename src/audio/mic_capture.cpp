@@ -9,6 +9,11 @@
 // unwrapped head and tail counters are the only shared state. A full ring
 // drops the newest samples and counts them; the count is printed at stop,
 // with the session's left and right slot peaks.
+//
+// The reader task normally lives for one session. mic_capture_reserve(true)
+// creates it ahead of the sessions and keeps it parked between them, so a
+// session start needs no new memory (its stack must be internal RAM, the
+// scarcest pool); mic_capture_reserve(false) lets it end.
 
 #include "mic_dev.h"
 
@@ -34,9 +39,14 @@ static int32_t           s_sess_peak_l = 0;  // |sample| peaks of both slots ove
 static int32_t           s_sess_peak_r = 0;  // printed at stop
 static int               s_port     = 0;
 static TaskHandle_t      s_task     = NULL;
+static volatile bool     s_go       = false;  // a session asks the reader to read; the reader clears it when it stops
+static volatile bool     s_exit_req = false;  // the parked reader ends
+static bool              s_reserved = false;  // mic_capture_reserve(true): the reader stays between sessions
 
-static void mic_reader_task(void* arg) {
-  (void)arg;
+#define MIC_READER_STACK 4096
+
+// One session's reads, until s_stop_req.
+static void read_session(void) {
   static int32_t chunk[MIC_CHUNK_FRAMES * 2];   // one read of stereo frames at 32-bit slots; 16-bit slots fill half
   const bool     wide        = (s_slot_bits == 32);
   const bool     right       = (s_mic_slot == 1);
@@ -69,8 +79,56 @@ static void mic_reader_task(void* arg) {
     s_peak = (int16_t)peak;
     s_head = head;
   }
+}
+
+// Parked until a session sets s_go (and notifies), reads it, parks again;
+// ends when asked while parked, or after a session when not reserved.
+static void mic_reader_task(void* arg) {
+  (void)arg;
+  for (;;) {
+    while (!s_go) {
+      if (s_exit_req) { s_task = NULL; vTaskDelete(NULL); }
+      ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    }
+    read_session();
+    s_go = false;
+    if (!s_reserved) break;
+  }
   s_task = NULL;
   vTaskDelete(NULL);
+}
+
+static bool reader_create(void) {
+  s_go = false;
+  s_exit_req = false;
+  if (xTaskCreatePinnedToCore(mic_reader_task, "mic_reader", MIC_READER_STACK, NULL, 2, &s_task, 1) != pdPASS) {
+    s_task = NULL;
+    SLog.printf("[MIC] FAIL: reader task (%u B stack; internal RAM largest free %u B)\n",
+                (unsigned)MIC_READER_STACK,
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    return false;
+  }
+  return true;
+}
+
+// The parked reader ends; returns once it has.
+static void reader_end(void) {
+  if (!s_task) return;
+  s_exit_req = true;
+  xTaskNotifyGive(s_task);
+  for (int i = 0; i < 100 && s_task; i++) vTaskDelay(pdMS_TO_TICKS(10));
+  if (s_task) SLog.println("[MIC] reader task did not end within 1 s");
+}
+
+bool mic_capture_reserve(bool on) {
+  if (on) {
+    if (!s_task && !reader_create()) return false;
+    s_reserved = true;
+    return true;
+  }
+  s_reserved = false;
+  if (!s_running) reader_end();
+  return true;
 }
 
 bool mic_capture_start(void) {
@@ -92,27 +150,31 @@ bool mic_capture_start(void) {
   }
   s_slot_bits = mic_hw_slot_bits();
   s_mic_slot  = mic_hw_mic_slot();
-  s_running = true;
-  if (xTaskCreatePinnedToCore(mic_reader_task, "mic_reader", 4096, NULL, 2, &s_task, 1) != pdPASS) {
-    SLog.println("[MIC] FAIL: reader task");
-    s_running = false;
+  if (!s_task && !reader_create()) {
     mic_hw_stop();
     sound_resume();
     return false;
   }
-  SLog.printf("[MIC] capture on: %u Hz mono s16 from I2S%d (%u-bit slots, %s slot), ring %u samples\n",
+  s_running = true;
+  s_go = true;
+  xTaskNotifyGive(s_task);
+  SLog.printf("[MIC] capture on: %u Hz mono s16 from I2S%d (%u-bit slots, %s slot), ring %u samples%s\n",
               (unsigned)MIC_RATE_HZ, s_port, (unsigned)s_slot_bits, s_mic_slot ? "right" : "left",
-              (unsigned)MIC_RING_SAMPLES);
+              (unsigned)MIC_RING_SAMPLES, s_reserved ? ", reserved reader" : "");
   return true;
 }
 
 void mic_capture_stop(void) {
   if (!s_running) return;
   s_stop_req = true;
-  // The reader leaves within one i2s_read timeout; the port is torn down
-  // only after it has gone.
-  for (int i = 0; i < 100 && s_task; i++) vTaskDelay(pdMS_TO_TICKS(10));
-  if (s_task) SLog.println("[MIC] reader task did not stop within 1 s");
+  // The reader leaves its session within one i2s_read timeout (then parks,
+  // or ends when not reserved); the port is torn down only after that.
+  for (int i = 0; i < 100 && s_go; i++) vTaskDelay(pdMS_TO_TICKS(10));
+  if (s_go) SLog.println("[MIC] reader task did not stop within 1 s");
+  if (!s_reserved) {
+    for (int i = 0; i < 100 && s_task; i++) vTaskDelay(pdMS_TO_TICKS(10));
+    if (s_task) SLog.println("[MIC] reader task did not end within 1 s");
+  }
   s_running = false;
   mic_hw_stop();
   sound_resume();

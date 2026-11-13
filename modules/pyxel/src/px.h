@@ -19,6 +19,10 @@ extern void     host_sleep_ms(uint32_t ms);
 extern int      host_get_key(int* pressed, unsigned char* key);
 extern void     host_trackball_read(int* dx, int* dy, int* click);
 extern int      host_trackball_button(void);
+// Touch as the mouse: -1 outside the firmware's touch mouse modes, else the
+// points down, x/y in 320x240 canvas coordinates, downs = touch-downs since
+// the previous call. The first call offers those modes to the user.
+extern int      host_touch_read(int* x, int* y, int* downs);
 extern int      host_should_exit(void);
 extern void     host_log(const char* msg);
 // Whole-file write under the SD bus lock; creates missing parent directories.
@@ -218,6 +222,9 @@ void px_input_frame_text(char* out, size_t cap, uint32_t* keys, int* nkeys, int 
 bool px_display_begin(int w, int h, char* err, size_t errlen);
 void px_display_render(void);
 void px_display_end(void);
+// The game pixel under a 320x240 canvas point, clamped to the screen; false
+// before px_display_begin has sized the frame.
+bool px_display_canvas_to_game(int cx, int cy, int* gx, int* gy);
 void px_draw_cursor(void);
 
 // ---------------------------------------------------------------------------

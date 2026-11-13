@@ -57,6 +57,9 @@ int  mic_hw_set_gain_step(uint8_t step);
 
 bool     mic_capture_start(void);       // suspends playback, starts the hardware + the reader task
 void     mic_capture_stop(void);        // stops both, resumes playback
+bool     mic_capture_reserve(bool on);  // on: the reader task now, parked between sessions;
+                                        // off: it ends (after the session, if one runs).
+                                        // False (logged) when its stack does not fit
 bool     mic_capture_running(void);
 size_t   mic_capture_read(int16_t* out, size_t max_samples);   // drains the ring
 int16_t  mic_capture_peak(void);        // |sample| peak since the previous call

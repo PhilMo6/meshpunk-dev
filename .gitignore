@@ -12,6 +12,10 @@ Todo.txt
 docs
 modules/*/obj/
 modules/*/obj-rv32/
+modules/*/build/
+modules/stt/kcheck*.elf
+modules/stt/stt_c.audioplug.elf
+modules/stt/stt_prof.audioplug.rv32.elf
 __pycache__/
 *.pyc
 *.o

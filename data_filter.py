@@ -32,6 +32,7 @@ ARCH_RULES = [
     ("*.loraproto.elf", {"xtensa"}),
     ("*.bleproto.elf",  {"xtensa"}),
     ("*.drv.elf",       {"xtensa"}),
+    ("*.audioplug.elf", {"xtensa"}),
 ]
 
 # Per-board skips: board name -> list of patterns (same matching) that board

@@ -20,6 +20,7 @@
 
 extern void host_trackball_read(int *dx, int *dy, int *click);
 extern int  host_trackball_button(void);
+extern int  host_touch_read(int *x, int *y, int *downs);  // -1 outside mouse modes
 extern int  host_key_mods(void);    // bit0 shift, bit1 alt, bit2 sym
 extern void host_kb_blink(void);    // one keyboard-backlight blink
 extern uint32_t host_get_ticks_us(void);
@@ -111,15 +112,18 @@ static bool char_needs_shift(unsigned char c)
 
 // Live modifier/button levels observed from the key event stream, consumed
 // by the mouse poll below. Shift (0x80) is also forwarded to the guest as a
-// normal shift key; 0x95 is the launcher's R.Mouse binding output and has no
-// scancode -- it exists only as a mouse button.
+// normal shift key; 0x95 is the launcher's R.Mouse binding output and 0x9A
+// its mouse pad's L.Mouse pad -- neither has a scancode, they exist only as
+// mouse buttons.
 static int s_shift_down = 0;
 static int s_rmouse_down = 0;
+static int s_lmouse_down = 0;
 
 void dos_input_key(PS2KbdState *kbd, unsigned char key, int pressed)
 {
     if (key == 0x80) s_shift_down = pressed;
     if (key == 0x95) { s_rmouse_down = pressed; return; }
+    if (key == 0x9A) { s_lmouse_down = pressed; return; }
 
     int code = ascii_to_scan(key);
     if (!code) return;
@@ -185,9 +189,140 @@ static int s_btn_mask = 1;            // button chosen at the press edge
 static int s_latched = 0;             // latch-mode held-button mask (0 = up)
 static int s_last_buttons = 0;        // last button state sent to the guest
 
+// Touch as a touchpad, in the firmware's two touch mouse modes (MOUSE and
+// MOUSE PAD; host_touch_read() returns -1 everywhere else). A PS/2 mouse is
+// relative and the guest's driver owns the cursor, so touch moves the cursor
+// the way a laptop touchpad does instead of jumping it to the finger:
+//   one-finger drag              move
+//   tap                          left click
+//   tap, then touch again
+//   within TP_DRAG_GAP_US        left button held for that touch: a drag, or
+//                                a double-click when the touch is short
+//   two-finger tap               right click
+// A click holds its button TRK_PRESS_MIN_US, like the trackball's, so
+// software polling the button state between frames sees it.
+// In both modes the trackball is a mouse too: at the launcher's speed in
+// mouse mode, at MODE_TRK_SPEED when the launcher set it to arrow keys.
+#define TP_TAP_MAX_US   250000u   // longest touch that counts as a tap
+#define TP_TAP_SLOP     8         // screen pixels a tap may travel
+#define TP_DRAG_GAP_US  300000u   // a touch this soon after a tap drags
+#define MODE_TRK_SPEED  2
+
+static int      s_tp_speed = 2;         // PS/2 counts per screen pixel (-tspeed)
+static int      s_tp_prev_n = 0;        // pointer points at the previous poll
+static int      s_tp_lx = 0, s_tp_ly = 0;  // motion anchor
+static int      s_tp_travel = 0;        // pixels the tracked touch has moved
+static int      s_tp_max_n = 0;         // most points seen during it
+static uint32_t s_tp_start_us = 0;      // when it began
+static int      s_tp_drag = 0;          // it holds the left button
+static int      s_tp_tapped = 0;        // the previous touch was a tap...
+static uint32_t s_tp_tap_us = 0;        // ...that lifted at this time
+static int      s_tp_click = 0;         // buttons of a click being held
+static uint32_t s_tp_click_until = 0;   // when that click releases
+
+void dos_input_touch_config(int speed)
+{
+    s_tp_speed = (speed > 0) ? speed : 1;
+}
+
+static void tp_reset(void)
+{
+    s_tp_prev_n = 0;
+    s_tp_drag = 0;
+    s_tp_tapped = 0;
+    s_tp_click = 0;
+}
+
+static void tp_click(int mask, uint32_t now)
+{
+    s_tp_click |= mask;
+    s_tp_click_until = now + TRK_PRESS_MIN_US;
+}
+
+static void tp_begin(int x, int y, int n, uint32_t now)
+{
+    s_tp_lx = x;
+    s_tp_ly = y;
+    s_tp_travel = 0;
+    s_tp_max_n = n;
+    s_tp_start_us = now;
+    s_tp_drag = s_tp_tapped && (uint32_t)(now - s_tp_tap_us) <= TP_DRAG_GAP_US;
+    s_tp_tapped = 0;
+}
+
+// The tracked touch lifted: a drag ends, a short still touch clicks.
+static void tp_end(uint32_t now)
+{
+    int tap = (uint32_t)(now - s_tp_start_us) <= TP_TAP_MAX_US &&
+              s_tp_travel <= TP_TAP_SLOP;
+    if (s_tp_drag) {
+        s_tp_drag = 0;
+    } else if (tap && s_tp_max_n >= 2) {
+        tp_click(2, now);
+    } else if (tap) {
+        tp_click(1, now);
+        s_tp_tapped = 1;
+        s_tp_tap_us = now;
+    }
+}
+
+// One poll of the touch mouse: n points down at (x, y), `downs` touch-downs
+// since the previous poll. Adds the motion to *mx/*my in PS/2 counts and
+// returns the buttons touch holds.
+static int tp_poll(int n, int x, int y, int downs, uint32_t now, int *mx, int *my)
+{
+    if (s_tp_click && (int32_t)(now - s_tp_click_until) >= 0) s_tp_click = 0;
+
+    // The tracked touch ended if no point is down or a new touch-down came
+    // in; a touch-down beyond the one now showing began and ended between
+    // two polls, which makes it a tap with no motion to report.
+    int fresh = (n > 0 && (s_tp_prev_n == 0 || downs > 0)) ? 1 : 0;
+    if (s_tp_prev_n > 0 && (n == 0 || downs > 0)) tp_end(now);
+    if (downs > fresh) {
+        tp_click(1, now);
+        s_tp_tapped = 1;
+        s_tp_tap_us = now;
+    }
+    if (fresh) {
+        tp_begin(x, y, n, now);
+    } else if (n > 0) {
+        if (n > s_tp_max_n) s_tp_max_n = n;
+        if (n != s_tp_prev_n) {
+            // A finger came or went: the reported point may now be the
+            // other finger, so re-anchor instead of moving.
+            s_tp_lx = x;
+            s_tp_ly = y;
+        } else if (n == 1) {
+            int ddx = x - s_tp_lx, ddy = y - s_tp_ly;
+            s_tp_lx = x;
+            s_tp_ly = y;
+            s_tp_travel += (ddx < 0 ? -ddx : ddx) + (ddy < 0 ? -ddy : ddy);
+            *mx += ddx * s_tp_speed;
+            *my += ddy * s_tp_speed;
+        }
+    }
+    s_tp_prev_n = n;
+    return s_tp_click | ((s_tp_drag && n > 0) ? 1 : 0);
+}
+
 void dos_input_poll_mouse(PS2MouseState *mouse)
 {
-    if (!s_mouse_enabled) return;
+    int tx = 0, ty = 0, downs = 0;
+    int tn = host_touch_read(&tx, &ty, &downs);
+    int mouse_mode = (tn >= 0);
+    if (!s_mouse_enabled && !mouse_mode) {
+        // The trackball is arrow keys and touch is not the mouse. A mouse
+        // mode that just ended may have left buttons down in the guest:
+        // release them once.
+        tp_reset();
+        s_pressed = 0;
+        s_latched = 0;
+        if (s_last_buttons) {
+            s_last_buttons = 0;
+            ps2_mouse_event(mouse, 0, 0, 0, 0);
+        }
+        return;
+    }
     int dx = 0, dy = 0, click = 0;
     host_trackball_read(&dx, &dy, &click);
 
@@ -221,18 +356,23 @@ void dos_input_poll_mouse(PS2MouseState *mouse)
         }
     }
 
-    int buttons = (s_rmouse_down ? 2 : 0) | s_latched
-                | (s_pressed ? s_btn_mask : 0);
+    int speed = s_mouse_enabled ? s_mouse_speed : MODE_TRK_SPEED;
+    int mx = dx * speed;
+    int my = dy * speed;
+    int touch_buttons = 0;
+    if (mouse_mode) touch_buttons = tp_poll(tn, tx, ty, downs, now, &mx, &my);
+    else tp_reset();
+
+    int buttons = (s_rmouse_down ? 2 : 0) | (s_lmouse_down ? 1 : 0) | s_latched
+                | (s_pressed ? s_btn_mask : 0) | touch_buttons;
 
     // Emit on motion or on any button-state change -- a state change with no
     // motion still needs its packet.
-    if (!dx && !dy && buttons == s_last_buttons) return;
+    if (!mx && !my && buttons == s_last_buttons) return;
     s_last_buttons = buttons;
 
     // PS/2 packets carry a signed 9-bit delta; split anything larger into
     // several events rather than clipping the motion.
-    int mx = dx * s_mouse_speed;
-    int my = dy * s_mouse_speed;
     do {
         int cx = mx; if (cx > 127) cx = 127; if (cx < -127) cx = -127;
         int cy = my; if (cy > 127) cy = 127; if (cy < -127) cy = -127;

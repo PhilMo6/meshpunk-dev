@@ -70,6 +70,9 @@ int input_zones_held_all(uint8_t* outs, int max);
 // True when `out` is currently held by any point.
 bool input_zones_out_held(uint8_t out);
 
+// True when (x, y) lies on a zone of the armed layout, whatever its out code.
+bool input_zones_hit(int16_t x, int16_t y);
+
 // Mode-zone tap event (0xFE): true once per tap.
 bool input_zones_mode_toggle_take(void);
 

@@ -13,14 +13,26 @@ extern "C" {
 #include "../input/input_dev.h"      // input_dev_kbd_mic_held
 
 static char s_owner[32] = "";
+static bool s_ptt_armed = false;   // _mic_ptt_arm(true): the key is PTT without a session
 
 bool mic_lua_owner_active(void) { return s_owner[0] != 0; }
 
-void mic_lua_close_all(const char* reason) {
+bool mic_lua_ptt_active(void) { return s_ptt_armed || s_owner[0] != 0; }
+
+static void session_close(const char* reason) {
   if (!s_owner[0]) return;
   SLog.printf("[MIC] session '%s' closed: %s\n", s_owner, reason);
   mic_capture_stop();
   s_owner[0] = 0;
+}
+
+void mic_lua_close_all(const char* reason) {
+  session_close(reason);
+  if (s_ptt_armed) {
+    SLog.printf("[MIC] push-to-talk disarmed: %s\n", reason);
+    s_ptt_armed = false;
+    mic_capture_reserve(false);
+  }
 }
 
 static int l_mic_open(lua_State* L) {
@@ -93,7 +105,7 @@ static int l_mic_set_gain(lua_State* L) {
 
 static int l_mic_close(lua_State* L) {
   (void)L;
-  mic_lua_close_all("closed by the app");
+  session_close("closed by the app");
   return 0;
 }
 
@@ -103,7 +115,25 @@ static int l_mic_owner(lua_State* L) {
 }
 
 static int l_mic_ptt(lua_State* L) {
-  lua_pushboolean(L, s_owner[0] != 0 && input_dev_kbd_mic_held());
+  lua_pushboolean(L, mic_lua_ptt_active() && input_dev_kbd_mic_held());
+  return 1;
+}
+
+static int l_mic_ptt_arm(lua_State* L) {
+  bool on = lua_toboolean(L, 1);
+  if (on == s_ptt_armed) { lua_pushboolean(L, 1); return 1; }
+  if (mic_hw_kind() == MIC_DEV_NONE) {
+    lua_pushboolean(L, 0);
+    lua_pushstring(L, "no microphone");
+    return 2;
+  }
+  if (!mic_capture_reserve(on)) {
+    lua_pushboolean(L, 0);
+    lua_pushstring(L, "no internal RAM for the microphone task (see the log)");
+    return 2;
+  }
+  s_ptt_armed = on;
+  lua_pushboolean(L, 1);
   return 1;
 }
 
@@ -115,4 +145,5 @@ void mic_register_lua(lua_State* L) {
   lua_register(L, "_mic_close",    l_mic_close);
   lua_register(L, "_mic_owner",    l_mic_owner);
   lua_register(L, "_mic_ptt",      l_mic_ptt);
+  lua_register(L, "_mic_ptt_arm",  l_mic_ptt_arm);
 }
