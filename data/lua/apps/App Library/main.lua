@@ -1,8 +1,16 @@
 --[[
-  App Library — browse, install, update and remove apps from the meshpunk-apps
-  GitHub repo, straight onto the device over WiFi.
+  App Library — browse, install, update and remove apps from the app catalogs
+  (the meshpunk-apps and meshpunk-apps-dev GitHub repos), straight onto the
+  device over WiFi.
 
   How it works:
+    * Two catalogs, Stable and Dev (see Catalogs below): the running
+      firmware picks the default, the button beside Refresh switches, and
+      an install newer than the shown catalog's version is offered that
+      version on its page ("Install v<x> from <catalog>"); the Updates list
+      only ever offers newer versions. Each install's .version names the
+      catalog it came from (catalog=, written by lib/downloader from FW_API
+      16 on).
     * lib/downloader is the engine: catalog parse, staging discipline, atomic
       installs, .version bookkeeping. This app is the UI + the apps-specific bits:
       the catalog fetch and its on-card cache (see Startup below), install
@@ -241,11 +249,101 @@ local function version_newer(cat_v, inst_v)
     return false
 end
 
+-- An install gets an Update when the catalog version is newer, or the same
+-- version lacks this device's build (a card moved from another target).
+-- Never when the catalog's version is older: that is the other catalog's
+-- install, offered as "Install v<x> from <catalog>" on its page instead.
+local function update_offered(entry, inst)
+    if version_newer(entry.version, inst.version) then return true end
+    return build_missing(entry, inst) and not version_newer(inst.version, entry.version)
+end
+
+-- ── Catalogs ─────────────────────────────────────────────────────────────────
+-- Stable (the published apps) and Dev (apps in development, and versions that
+-- need a dev firmware's API level). The running firmware picks the default:
+-- Dev when the installed release tag (_ota_info().installed) is a dev tag or
+-- empty (a build flashed without a release data pack), else Stable, and
+-- Stable on firmware without _ota_info. The switch on the browse page stores
+-- the other in L:/app_library.cfg while it differs from the default, and
+-- S:/meshpunk/appstore.toml [source] url replaces both ("Custom").
+-- lib/downloader carries these rules from FW_API 16 on (catalog,
+-- catalog_default, set_catalog, cache_path); an older one reads the stable
+-- repo only, so this app keeps its own copy of them for it and points the
+-- downloader's base_url at the choice (store-updated app, firmware-shipped
+-- lib: the reason fw_required has its own copy here).
+local CATALOG_LABEL = { stable = "Stable", dev = "Dev", custom = "Custom" }
+
+local function own_catalogs()
+    local URLS = {
+        stable = "https://raw.githubusercontent.com/PhilMo6/meshpunk-apps/main",
+        dev    = "https://raw.githubusercontent.com/PhilMo6/meshpunk-apps-dev/main",
+    }
+    local CFG, SRC = "L:/app_library.cfg", "S:/meshpunk/appstore.toml"
+    local toml = require("lib/toml")
+    local src = nil
+    local function default()
+        if type(_ota_info) ~= "function" then return "stable" end
+        local tag = tostring(_ota_info().installed or "")
+        if tag == "" or tag:find("-dev", 1, true) then return "dev" end
+        return "stable"
+    end
+    local function resolve()
+        if src then return src end
+        local data = fileman.read(SRC)
+        if data then
+            local ok, cfg = pcall(toml.parse, data)
+            if ok and type(cfg) == "table" and type(cfg.source) == "table"
+                and type(cfg.source.url) == "string" and cfg.source.url ~= "" then
+                src = { id = "custom", url = (cfg.source.url:gsub("/+$", "")) }
+                return src
+            end
+        end
+        local saved = fileman.read(CFG)
+        local id = saved and saved:match("catalog=(%a+)")
+        if not (id and URLS[id]) then id = default() end
+        src = { id = id, url = URLS[id] }
+        return src
+    end
+    local c = {}
+    function c.current() return resolve().id end
+    c.default = default
+    function c.reload() src = nil end
+    function c.set(id)
+        src = nil
+        if id == default() then
+            return (not fileman.exists(CFG)) or fileman.remove(CFG)
+        end
+        return fileman.write(CFG, "catalog=" .. id .. "\n")
+    end
+    function c.cache()
+        local id = resolve().id
+        if id == "stable" then return dl.STAGING.sd .. "/catalog.toml" end
+        return dl.STAGING.sd .. "/catalog-" .. id .. ".toml"
+    end
+    -- The downloads (dl.run_install) take their URLs from dl.base_url().
+    dl.base_url = function() return resolve().url end
+    return c
+end
+
+local CAT
+if dl.set_catalog then
+    CAT = { current = dl.catalog, default = dl.catalog_default, set = dl.set_catalog,
+            cache = dl.cache_path, reload = dl.reload_source }
+else
+    CAT = own_catalogs()
+end
+
+-- " from Dev" for an install whose marker names its catalog, else "".
+local function origin_text(inst)
+    local label = inst and inst.catalog and CATALOG_LABEL[inst.catalog]
+    return label and (" from " .. label) or ""
+end
+
 -- ── App state ────────────────────────────────────────────────────────────────
 local store = {
     catalog   = nil,     -- parsed catalog.toml ({ meta=, apps={...}, protocols={...} })
     installed = {},      -- clean name -> {version, location, category, dir, display}
-    themes    = {},      -- theme id -> {id, version, loc, dir} for store themes
+    themes    = {},      -- theme id -> {id, version, loc, dir, catalog} for store themes
     offline   = false,   -- true when showing the cached catalog
 }
 
@@ -371,6 +469,7 @@ local function note_installed(installed, rec)
         category = v.category,
         locked   = v.locked,
         target   = v.target,   -- nil on markers from downloaders before target=
+        catalog  = v.catalog,  -- nil on markers from downloaders before catalog=
         dir      = rec.dir,
         display  = rec.name,
     }
@@ -420,7 +519,9 @@ local function note_theme(found, loc, name)
     if found[name] then return end
     local dir = THEME_BASES[loc] .. "/" .. name
     local v = dl.read_version(dir)
-    if v then found[name] = { id = name, dir = dir, loc = loc, version = v.version } end
+    if v then
+        found[name] = { id = name, dir = dir, loc = loc, version = v.version, catalog = v.catalog }
+    end
 end
 
 local function theme_dirs()
@@ -476,7 +577,7 @@ local function pending_updates()
     for _, e in ipairs(store.catalog.apps) do
         local inst = find_inst(e)
         if inst and not fw_required(e) and not requires_unmet(e)
-            and (version_newer(e.version, inst.version) or build_missing(e, inst)) then
+            and update_offered(e, inst) then
             out[#out + 1] = { entry = e, inst = inst }
         end
     end
@@ -517,7 +618,7 @@ local function proto_inst(pe)
     if not dir then return nil end
     local v = dl.read_version(dir)
     return { dir = dir, loc = loc, version = (v and v.version) or "?",
-             target = v and v.target or nil }
+             target = v and v.target or nil, catalog = v and v.catalog or nil }
 end
 
 local function catalog_themes()
@@ -547,17 +648,51 @@ end
 
 -- ── Dialogs ──────────────────────────────────────────────────────────────────
 
+-- The catalog button on the browse page: Stable <-> Dev, asked first; the
+-- chosen catalog loads at once. While appstore.toml names a source the
+-- button only explains it.
+local function switch_catalog()
+    local cur = CAT.current()
+    if cur == "custom" then
+        notice("This device reads the catalog that S:/meshpunk/appstore.toml names. "
+            .. "Remove that file to choose Stable or Dev here.")
+        return
+    end
+    local to = (cur == "dev") and "stable" or "dev"
+    local what = (to == "dev")
+        and "It lists apps in development and versions that need a dev firmware."
+        or  "It lists the published apps."
+    confirm("Switch to the " .. CATALOG_LABEL[to] .. " catalog?\n" .. what
+            .. "\nThis firmware uses " .. CATALOG_LABEL[CAT.default()] .. " by default.",
+            (to == "dev") and "Dev apps may be unfinished." or nil,
+            function()
+                if not CAT.set(to) then
+                    toast("Could not save the choice")
+                    return
+                end
+                start()
+            end)
+end
+
 local function show_info()
     -- Fixed-height box + inner scrollable body (Files preview-modal pattern) —
     -- the text is taller than the screen, SIZE_CONTENT would overflow it.
     modal({ w = W - 20, h = H - 20 }, function(box, close)
-        box:Label { text = "About app types", w = lvgl.PCT(100), h = 18 }
+        box:Label { text = "About the App Library", w = lvgl.PCT(100), h = 18 }
         local body = box:Object {
             w = lvgl.PCT(100), h = H - 90,
             border_width = 1, pad_all = 4, radius = 0,
         }
         body:Label {
-            text = "[Lua] apps run inside the firmware's Lua\n"
+            text = "Two catalogs: Stable lists the published\n"
+                .. "apps; Dev lists apps in development and\n"
+                .. "versions that need a dev firmware. The\n"
+                .. "button beside Refresh names the one in use\n"
+                .. "and switches; this firmware uses "
+                .. CATALOG_LABEL[CAT.default()] .. "\n"
+                .. "by default. An app newer than the catalog's\n"
+                .. "version offers that version on its page.\n\n"
+                .. "[Lua] apps run inside the firmware's Lua\n"
                 .. "interpreter. They can use the Meshpunk API\n"
                 .. "(files, WiFi, radio) but can't run native\n"
                 .. "code on the hardware.\n\n"
@@ -855,7 +990,7 @@ local function pending_proto_updates()
     local out = {}
     for _, pe in ipairs(catalog_protocols()) do
         local pinst = (not fw_required(pe) and not requires_unmet(pe)) and proto_inst(pe) or nil
-        if pinst and (version_newer(pe.version, pinst.version) or build_missing(pe, pinst)) then
+        if pinst and update_offered(pe, pinst) then
             out[#out + 1] = { entry = pe, inst = pinst }
         end
     end
@@ -1019,7 +1154,7 @@ local function offer_proto_apps(pe)
         local ae = find_app(id)
         if ae and not fw_required(ae) and not requires_unmet(ae) then
             local inst = find_inst(ae)
-            if not inst or version_newer(ae.version, inst.version) or build_missing(ae, inst) then
+            if not inst or update_offered(ae, inst) then
                 todo[#todo + 1] = ae
                 names[#names + 1] = ae.name
             end
@@ -1125,10 +1260,10 @@ local function proto_menu(pe)
         end
         if inst then
             box:Label {
-                text = "Installed: v" .. tostring(inst.version) .. " on "
+                text = "Installed: v" .. tostring(inst.version) .. origin_text(inst) .. " on "
                     .. ((inst.loc == "sd") and "SD" or "Internal")
                     .. ((active == pe.id) and "  (running now)" or ""),
-                w = lvgl.PCT(100), h = 16,
+                w = lvgl.PCT(100),
             }
         end
 
@@ -1159,6 +1294,20 @@ local function proto_menu(pe)
             end
         end
 
+        -- Update, BLE restore and an older catalog version all reinstall the
+        -- package in place, then the reboot prompt.
+        local function reinstall()
+            run_proto_install(pe, nil, function(err)
+                if err then
+                    toast(err == "cancelled" and "Cancelled" or err)
+                    refresh_view()
+                    return
+                end
+                refresh_view()
+                proto_updated_prompt()
+            end)
+        end
+
         local need = fw_required(pe)
         local why = requires_unmet(pe)
         if need then
@@ -1185,19 +1334,18 @@ local function proto_menu(pe)
                 end, { recommend = "internal",
                        note = "Internal loads even without the SD card; a card-hosted protocol needs the card at boot (radio off without it)." })
             end)
-        elseif version_newer(pe.version, inst.version) or build_missing(pe, inst) then
+        elseif update_offered(pe, inst) then
             item(version_newer(pe.version, inst.version)
                     and ("Update to v" .. tostring(pe.version))
-                    or "Update - adds this device's build", function()
-                run_proto_install(pe, nil, function(err)
-                    if err then
-                        toast(err == "cancelled" and "Cancelled" or err)
-                        refresh_view()
-                        return
-                    end
-                    refresh_view()
-                    proto_updated_prompt()
-                end)
+                    or "Update - adds this device's build", reinstall)
+        elseif version_newer(inst.version, pe.version) then
+            -- The install is newer than this catalog's version.
+            local from = CATALOG_LABEL[CAT.current()]
+            item("Install v" .. tostring(pe.version) .. " from " .. from, function()
+                confirm("Install v" .. tostring(pe.version) .. " of " .. pe.name
+                        .. " from the " .. from .. " catalog?",
+                        "It replaces v" .. tostring(inst.version) .. origin_text(inst) .. ".",
+                        reinstall)
             end)
         else
             -- Up to date — unless a BLE protocol it ships is absent (removed)
@@ -1208,17 +1356,7 @@ local function proto_menu(pe)
                 if bleproto_state(bp) ~= tostring(inst.version) then broken = true end
             end
             if broken then
-                item("Reinstall package (restores BLE protocol)", function()
-                    run_proto_install(pe, nil, function(err)
-                        if err then
-                            toast(err == "cancelled" and "Cancelled" or err)
-                            refresh_view()
-                            return
-                        end
-                        refresh_view()
-                        proto_updated_prompt()
-                    end)
-                end)
+                item("Reinstall package (restores BLE protocol)", reinstall)
             else
                 box:Label { text = "Up to date. " .. activation_hint(pe), w = lvgl.PCT(100) }
             end
@@ -1237,7 +1375,7 @@ end
 local function proto_row(content, pe)
     local inst = proto_inst(pe)
     local state
-    if inst and not version_newer(pe.version, inst.version) and not build_missing(pe, inst) then
+    if inst and not update_offered(pe, inst) then
         state = "Installed"
     elseif fw_required(pe) then
         state = "Needs FW"
@@ -1406,10 +1544,10 @@ local function theme_menu(te, inst)
         end
         if inst then
             box:Label {
-                text = "Installed: v" .. tostring(inst.version) .. " on "
+                text = "Installed: v" .. tostring(inst.version) .. origin_text(inst) .. " on "
                     .. ((inst.loc == "sd") and "SD" or "Internal")
                     .. ((theme.current() == id) and "  (active)" or ""),
-                w = lvgl.PCT(100), h = 16,
+                w = lvgl.PCT(100),
             }
         end
 
@@ -1436,7 +1574,9 @@ local function theme_menu(te, inst)
 
         local need = te and fw_required(te)
         local why = te and requires_unmet(te)
-        local actionable = te and (not inst or version_newer(te.version, inst.version))
+        -- The install is newer than this catalog's version.
+        local older = te and inst and version_newer(inst.version, te.version)
+        local actionable = te and (not inst or version_newer(te.version, inst.version) or older)
         if actionable and need then
             box:Label {
                 text = "Needs a firmware update first\n(needs API " .. need
@@ -1455,6 +1595,14 @@ local function theme_menu(te, inst)
         elseif te and inst and version_newer(te.version, inst.version) then
             item("Update to v" .. tostring(te.version), function()
                 run_theme_install(te, nil, finish("Updated"))
+            end)
+        elseif older then
+            local from = CATALOG_LABEL[CAT.current()]
+            item("Install v" .. tostring(te.version) .. " from " .. from, function()
+                confirm("Install v" .. tostring(te.version) .. " of " .. name
+                        .. " from the " .. from .. " catalog?",
+                        "It replaces v" .. tostring(inst.version) .. origin_text(inst) .. ".",
+                        function() run_theme_install(te, nil, finish("Installed")) end)
             end)
         end
         if inst then
@@ -1568,9 +1716,9 @@ local function app_menu(entry, inst)
         end
         if inst then
             box:Label {
-                text = "Installed: v" .. inst.version .. " on "
+                text = "Installed: v" .. inst.version .. origin_text(inst) .. " on "
                     .. ((fileman.split(inst.dir) == "S") and "SD" or "Internal"),
-                w = lvgl.PCT(100), h = 16,
+                w = lvgl.PCT(100),
             }
         end
 
@@ -1591,9 +1739,15 @@ local function app_menu(entry, inst)
         local need = entry and fw_required(entry)
         local why = entry and requires_unmet(entry)
         local need_proto = entry and proto_required(entry)
-        local adds_build = entry and inst and build_missing(entry, inst)
+        local adds_build = entry and inst and update_offered(entry, inst)
+            and not version_newer(entry.version, inst.version)
+        -- The install is newer than this catalog's version. Not for a locked
+        -- app (the App Library itself): an older one may lack the catalog
+        -- switch this device would need to come back.
+        local older = entry and inst and not inst.locked and not entry.locked
+            and version_newer(inst.version, entry.version)
         local actionable = entry
-            and (not inst or version_newer(entry.version, inst.version) or adds_build)
+            and (not inst or version_newer(entry.version, inst.version) or adds_build or older)
         if actionable and need then
             box:Label {
                 text = "Needs a firmware update first\n(app needs API " .. need
@@ -1646,6 +1800,14 @@ local function app_menu(entry, inst)
         elseif adds_build then
             item("Update - adds this device's build",
                  function() do_install(entry, inst) end)
+        elseif older then
+            local from = CATALOG_LABEL[CAT.current()]
+            item("Install v" .. tostring(entry.version) .. " from " .. from, function()
+                confirm("Install v" .. tostring(entry.version) .. " of " .. name
+                        .. " from the " .. from .. " catalog?",
+                        "It replaces v" .. tostring(inst.version) .. origin_text(inst) .. ".",
+                        function() do_install(entry, inst) end)
+            end)
         end
         if inst then
             -- Id-bearing apps key the launcher registry by id; older ones by name.
@@ -1750,7 +1912,7 @@ local function catalog_row(content, e)
     local entry = e
     local inst = find_inst(e)
     local state
-    if inst and not version_newer(e.version, inst.version) and not build_missing(e, inst) then
+    if inst and not update_offered(e, inst) then
         state = "Installed"  -- up to date, or ahead of the catalog
     elseif fw_required(e) then
         state = "Needs FW"   -- installable/updatable, but firmware is too old
@@ -2025,8 +2187,10 @@ show_browse = function()
         }
         nav.replace(content, { flags = nav.ROLLOVER + nav.SCROLL_FIRST })
 
+        local cat = CAT.current()
         content:Label {
-            text = "App Library" .. (store.offline and "  (offline)" or ""),
+            text = "App Library" .. ((cat ~= "stable") and (" - " .. CATALOG_LABEL[cat]) or "")
+                .. (store.offline and "  (offline)" or ""),
             w = lvgl.PCT(100), h = 18,
         }
 
@@ -2036,6 +2200,7 @@ show_browse = function()
             b:onClicked(fn)
         end
         tool("Refresh", 70, function() start() end)
+        tool(CATALOG_LABEL[cat], 64, switch_catalog)
         tool("Info", 50, show_info)
         tool("Quit", 50, function() apps.go_home() end)
 
@@ -2111,16 +2276,24 @@ local function run_steps(steps)
     end }
 end
 
--- Cache the raw catalog text on the card for offline browsing (the file
--- dl.load_cached_catalog reads), as one run_steps step: mkdir, then per
--- 2 KB chunk one open/append/close, then the old file is removed and the
--- .part renamed into place. get_body() is read on the first tick (nil or
--- empty = nothing to cache). Skipped without a card; silent on failure (a
--- stale .part is removed by the next run's clear phase).
+-- The cached copy of the catalog in use (offline browsing), parsed; nil
+-- when there is none.
+local function load_cached()
+    local data = fileman.read(CAT.cache())
+    if not data then return nil end
+    return dl.parse_catalog(data)
+end
+
+-- Cache the raw catalog text on the card for offline browsing (the catalog's
+-- own file, CAT.cache(), which load_cached reads), as one run_steps step:
+-- mkdir, then per 2 KB chunk one open/append/close, then the old file is
+-- removed and the .part renamed into place. get_body() is read on the first
+-- tick (nil or empty = nothing to cache). Skipped without a card; silent on
+-- failure (a stale .part is removed by the next run's clear phase).
 local CACHE_CHUNK = 2048
 
 local function cache_write_step(get_body)
-    local cache = dl.STAGING.sd .. "/catalog.toml"
+    local cache = CAT.cache()
     local part  = cache .. ".part"
     local body, phase, pos = nil, "mkdir", 1
     return function()
@@ -2190,7 +2363,7 @@ local function load_and_show(online)
             end
             body, err = nil, perr
         end
-        local cached = dl.load_cached_catalog()
+        local cached = load_cached()
         if cached then
             store.catalog, store.offline = cached, true
             return true
@@ -2240,9 +2413,9 @@ end
 -- ── Start ────────────────────────────────────────────────────────────────────
 
 dl.cleanup_staging()
--- The catalog source (S:/meshpunk/appstore.toml) is re-read at every launch;
--- a downloader from before reload_source() keeps its once-per-session read.
-if dl.reload_source then dl.reload_source() end
+-- The catalog source (the choice, S:/meshpunk/appstore.toml) is re-read at
+-- every launch.
+CAT.reload()
 start()
 
 return root

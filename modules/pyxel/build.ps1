@@ -1,6 +1,10 @@
 # Build the Pyxel game player (MicroPython + pyxel API) as a loadable ELF
-# module for the ESP32-S3, and install it with its Python library into the
-# firmware data tree (data/lua/apps/Games/Pyxel).
+# module for the ESP32-S3, and publish it with its Python library to the Dev
+# catalog repo (meshpunk-apps-dev/apps/Pyxel beside this repo; the elf also
+# to its module-src mirror). A pylib file new to pylib/ also needs its line
+# in the catalog entry's files. The firmware's own copy
+# (data/lua/apps/Games/Pyxel) is copied from there by hand when a build is
+# wanted in the firmware for testing.
 #
 # -Arch s3 (default) = the Xtensa artifact pyxel.app.elf, unchanged.
 # -Arch rv32 = pyxel.app.rv32.elf for the T-Display P4 (the gameboy module's
@@ -9,8 +13,8 @@
 # rv32 libgcc.a is not position-independent, so every builtin comes from
 # host_exports[] (src/elf_host.cpp). The loader leaves .iram.text where it
 # was loaded on RISC-V (lib/elf_loader/elf_loader.c), so the rv32 build
-# drops the Xtensa section flags and the l32r audit. Both install into the
-# same data directory; data_filter.py ships each file to its own arch.
+# drops the Xtensa section flags and the l32r audit. Both publish to the
+# same app folder (the catalog's files and files_rv32).
 param(
     [ValidateSet("s3", "rv32")]
     [string]$Arch = "s3"
@@ -37,7 +41,8 @@ if ($Arch -eq "rv32") {
 
 $MP = "micropython"
 $LODEPNG = "..\pico8\fake08-src\libs\lodepng"
-$DEST = "..\..\data\lua\apps\Games\Pyxel"
+$DEST = "..\..\..\meshpunk-apps-dev\apps\Pyxel"
+$SRC_MIRROR = "..\..\..\meshpunk-apps-dev\module-src\pyxel"
 
 $CFLAGS = $ARCH_CFLAGS + @(
     "-shared", "-fPIC", "-fno-common",
@@ -202,4 +207,10 @@ if (-not (Test-Path $DEST)) { New-Item -ItemType Directory $DEST | Out-Null }
 if (-not (Test-Path "$DEST\pylib")) { New-Item -ItemType Directory "$DEST\pylib" | Out-Null }
 Copy-Item $OUT "$DEST\$OUT" -Force
 Copy-Item "pylib\*" "$DEST\pylib\" -Recurse -Force
-Write-Host "Installed to $DEST"
+Write-Host "Published to $DEST"
+if (Test-Path $SRC_MIRROR) {
+    Copy-Item $OUT "$SRC_MIRROR\$OUT" -Force
+    Write-Host "Copied to $SRC_MIRROR\$OUT"
+} else {
+    Write-Host "Skipped $SRC_MIRROR (directory missing)"
+}

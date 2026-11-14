@@ -26,9 +26,12 @@
 #                          loop rearranged and on the zero-overhead loop)
 #                          against C sums, and tlib_kernels_c.cpp's float
 #                          kernel against its earlier form
-# s3 and rv32 are copied into the Voice to Text app's folder in data/: the
-# app loads stt.audioplug.elf, and the P4's loader opens the .rv32.elf beside
-# it (elf_arch_path); data_filter.py gives each board's image its own.
+# s3 and rv32 are published to the Dev catalog repo (meshpunk-apps-dev beside
+# this repo): the Voice to Text app's folder, apps/Voice_to_Text (the
+# catalog's files_xtensa and files_rv32: the app loads stt.audioplug.elf, and
+# the P4's loader opens the .rv32.elf beside it, elf_arch_path), and its
+# module-src mirror. Voice to Text is download-only: its model.bin comes from
+# the catalog, so the firmware data tree has no copy of the app.
 #   src/            the plugin (plugin.cpp), its config and the engine seam (port.h)
 #   src/tlib*       upstream conformer-stt-s3's tensor library, ops and kernels
 #                   (tlib_kernels_c.* the portable kernels)
@@ -206,9 +209,15 @@ if (-not $ops) {
 Write-Host "audioplug_ops export: OK"
 
 if ($Variant -eq "s3" -or $Variant -eq "rv32") {
-    $APPDIR = "..\..\data\lua\apps\Tools\Voice to Text"
-    Copy-Item $OUT (Join-Path $APPDIR $OUT) -Force
-    Write-Host "Copied to $APPDIR\$OUT"
+    foreach ($dir in @("..\..\..\meshpunk-apps-dev\apps\Voice_to_Text",
+                       "..\..\..\meshpunk-apps-dev\module-src\stt")) {
+        if (Test-Path $dir) {
+            Copy-Item $OUT (Join-Path $dir $OUT) -Force
+            Write-Host "Copied to $dir\$OUT"
+        } else {
+            Write-Host "Skipped $dir (directory missing)"
+        }
+    }
 }
 
 Write-Host ""

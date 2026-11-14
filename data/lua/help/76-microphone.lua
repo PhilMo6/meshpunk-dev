@@ -12,11 +12,11 @@ While a recording runs, sound is muted: notification melodies and music wait unt
 if dev.audioplug then
     body = body .. [[
 
-Tools > Voice to Text turns speech into text: hold ]] ..
+Voice to Text, from the App Library (Tools), turns speech into text: hold ]] ..
         (caps.mic_key and "the mic key" or "its Talk button") ..
         [[, speak, let go, and the text appears in its box a few seconds later. While it runs in the background,]] ..
         (caps.mic_key and [[ the mic key types speech into the text box selected in any app (or onto the clipboard when none is), and]] or "") ..
-        [[ Messenger's message box has Insert voice text in its hold menu. It needs its speech model on the SD card; the app's help page has the details.
+        [[ Messenger's message box has Insert voice text in its hold menu. The App Library installs it with its 13.8 MB speech model, on the SD card; the app's help page has the details.
 ]]
 end
 

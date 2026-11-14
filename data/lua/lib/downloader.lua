@@ -1,9 +1,10 @@
 --[[
   downloader — shared engine for on-device catalog downloads. The App Library
-  app (apps) and Settings/Theme (themes) are its two clients; anything that
-  wants to install content from the meshpunk-apps GitHub repo goes through
-  here so the catalog format, staging discipline and .version bookkeeping
-  can never diverge between them.
+  is its catalog client (apps, themes, drivers, LoRa protocols); Settings >
+  Firmware and Tools > Flasher use its wifi_wait. Anything that installs
+  content from the app catalogs (the meshpunk-apps and meshpunk-apps-dev
+  GitHub repos) goes through here so the catalog format, staging discipline
+  and .version bookkeeping can never diverge.
 
   The repo's catalog.toml carries four TOML table-arrays with identical
   entry shape: "apps", "themes", "drivers" (USB .drv.elf modules) and
@@ -34,8 +35,8 @@
       never be discovered), on the SAME drive as the destination so the final
       fileman.rename() is one atomic hop;
     * a .version file (version\nlocation\ncategory[\nlocked]\nid=<id>
-      \ntarget=<build target>) inside the installed dir marks it
-      store-managed and drives update detection;
+      \ntarget=<build target>\ncatalog=<catalog id>) inside the installed
+      dir marks it store-managed and drives update detection;
     * callers own any post-install cache refresh (apps.refresh() for apps;
       themes need none — lib/theme rescans on every list/apply).
 
@@ -51,18 +52,27 @@ local toml    = require("lib/toml")
 
 local M = {}
 
--- Repo the downloads come from. Override by writing S:/meshpunk/appstore.toml:
+-- The catalogs the downloads come from: "stable" (the published apps) and
+-- "dev" (apps in development, and versions that need a dev firmware's API
+-- level). catalog_default() picks one from the running firmware; the App
+-- Library's switch stores the other in CATALOG_CFG while it differs from
+-- that default. S:/meshpunk/appstore.toml replaces both ("custom"):
 --   [source]
 --   url = "https://raw.githubusercontent.com/you/your-apps-repo/main"
--- base_url() reads the file once and keeps the answer; reload_source() drops
--- it, which the App Library does at every launch so an edited or deleted
--- config takes effect without a reboot.
-M.DEFAULT_URL = "https://raw.githubusercontent.com/PhilMo6/meshpunk-apps/main"
+-- The source is resolved once and kept; reload_source() drops it, which the
+-- App Library does at every launch so an edited or deleted config takes
+-- effect without a reboot. The App Library carries its own copy of these
+-- rules for firmware whose downloader predates them (that app updates
+-- through the catalog, this lib only with the firmware).
+M.CATALOGS = {
+    stable = "https://raw.githubusercontent.com/PhilMo6/meshpunk-apps/main",
+    dev    = "https://raw.githubusercontent.com/PhilMo6/meshpunk-apps-dev/main",
+}
 local CONFIG_PATH = "S:/meshpunk/appstore.toml"
+local CATALOG_CFG = "L:/app_library.cfg"
 
--- Staging + catalog cache. Cleanup removes DIRS here; the cache is a file.
+-- Staging + catalog caches. Cleanup removes DIRS here; the caches are files.
 M.STAGING = { sd = "S:/meshpunk/.appstore", internal = "L:/lua/.appstore" }
-local CACHE_PATH = M.STAGING.sd .. "/catalog.toml"
 
 -- Below this many free bytes a drive cannot hold the two folders every
 -- install creates (staging dir, then the final dir): the mkdir fails before
@@ -77,22 +87,77 @@ function M.low_space_msg(loc)
         .. ". Free up space and try again."
 end
 
-local base_url = nil
+-- The catalog this firmware reads unless its user picks the other: "dev"
+-- when the installed release tag (_ota_info().installed, the git describe
+-- string a release build's data pack writes) is a dev tag, or empty (a build
+-- flashed without a release data pack); "stable" for any other tag and on
+-- firmware without _ota_info (before FW_API 13).
+function M.catalog_default()
+    if type(_ota_info) ~= "function" then return "stable" end
+    local tag = tostring(_ota_info().installed or "")
+    if tag == "" or tag:find("-dev", 1, true) then return "dev" end
+    return "stable"
+end
+
+-- The URL S:/meshpunk/appstore.toml names, or nil.
+local function custom_url()
+    local data = fileman.read(CONFIG_PATH)
+    if not data then return nil end
+    local ok, cfg = pcall(toml.parse, data)
+    if ok and type(cfg) == "table" and type(cfg.source) == "table"
+        and type(cfg.source.url) == "string" and cfg.source.url ~= "" then
+        return (cfg.source.url:gsub("/+$", ""))
+    end
+    return nil
+end
+
+-- The stored choice, or nil (no file, or not a catalog id).
+local function stored_catalog()
+    local data = fileman.read(CATALOG_CFG)
+    local id = data and data:match("catalog=(%a+)")
+    return (id and M.CATALOGS[id]) and id or nil
+end
+
+local source = nil   -- { id = "stable" | "dev" | "custom", url } once resolved
+local function resolve()
+    if source then return source end
+    local url = custom_url()
+    if url then
+        source = { id = "custom", url = url }
+    else
+        local id = stored_catalog() or M.catalog_default()
+        source = { id = id, url = M.CATALOGS[id] }
+    end
+    return source
+end
+
 function M.reload_source()
-    base_url = nil
+    source = nil
 end
 function M.base_url()
-    if base_url then return base_url end
-    base_url = M.DEFAULT_URL
-    local data = fileman.read(CONFIG_PATH)
-    if data then
-        local ok, cfg = pcall(toml.parse, data)
-        if ok and type(cfg) == "table" and type(cfg.source) == "table"
-            and type(cfg.source.url) == "string" and cfg.source.url ~= "" then
-            base_url = cfg.source.url:gsub("/+$", "")
-        end
+    return resolve().url
+end
+-- "stable" | "dev" | "custom" (appstore.toml names the source).
+function M.catalog()
+    return resolve().id
+end
+
+-- Choose "stable" or "dev": stored while it differs from catalog_default(),
+-- the file removed when it matches. True when the choice is on disk.
+function M.set_catalog(id)
+    assert(M.CATALOGS[id], "not a catalog: " .. tostring(id))
+    source = nil
+    if id == M.catalog_default() then
+        return (not fileman.exists(CATALOG_CFG)) or fileman.remove(CATALOG_CFG)
     end
-    return base_url
+    return fileman.write(CATALOG_CFG, "catalog=" .. id .. "\n")
+end
+
+-- The cached copy of the catalog in use (one file per catalog).
+function M.cache_path()
+    local id = M.catalog()
+    if id == "stable" then return M.STAGING.sd .. "/catalog.toml" end
+    return M.STAGING.sd .. "/catalog-" .. id .. ".toml"
 end
 
 -- ── Catalog parsing ──────────────────────────────────────────────────────────
@@ -210,13 +275,13 @@ function M.fetch_catalog()
     if not cat then return nil, err end
     -- Cache the raw body for offline browsing (SD only; skip silently without one).
     if fileman.mkdir(M.STAGING.sd) then
-        fileman.write(CACHE_PATH, res.body)
+        fileman.write(M.cache_path(), res.body)
     end
     return cat
 end
 
 function M.load_cached_catalog()
-    local data = fileman.read(CACHE_PATH)
+    local data = fileman.read(M.cache_path())
     if not data then return nil end
     return M.parse_catalog(data)
 end
@@ -428,7 +493,9 @@ end
 -- repeat across categories. Absent on old markers -> callers key by folder
 -- name. Old readers ignore it (their line-4 check is the exact "locked").
 -- A "target=<build target>" line (same rule) names the ELF build the install
--- carries; absent on markers written before it.
+-- carries; absent on markers written before it. A "catalog=<id>" line (same
+-- rule) names the catalog the install came from ("stable" | "dev" |
+-- "custom"); absent on markers written before it.
 function M.read_version(dir)
     local data = fileman.read(dir .. "/.version")
     if not data then return nil end
@@ -444,10 +511,11 @@ function M.read_version(dir)
             break
         end
     end
-    local id, target = nil, nil
+    local id, target, catalog = nil, nil, nil
     for _, ln in ipairs(lines) do
         if ln:sub(1, 3) == "id=" and #ln > 3 then id = ln:sub(4) end
         if ln:sub(1, 7) == "target=" and #ln > 7 then target = ln:sub(8) end
+        if ln:sub(1, 8) == "catalog=" and #ln > 8 then catalog = ln:sub(9) end
     end
     return {
         version  = (lines[1] ~= "" and lines[1]) or "?",
@@ -456,6 +524,7 @@ function M.read_version(dir)
         locked   = lines[4] == "locked",
         id       = id,
         target   = target,
+        catalog  = catalog,
     }
 end
 
@@ -658,13 +727,15 @@ function M.run_install(root, opts)
                     -- Line 4 "locked" is carried from the catalog so an update
                     -- can't silently make a locked app removable; target=
                     -- names the build the files are for (the App Library's
-                    -- "adds this device's build" check).
+                    -- "adds this device's build" check); catalog= the
+                    -- catalog the files came from.
                     if not fileman.write(staging .. "/.version",
                         tostring(entry.version or "?") .. "\n" .. loc .. "\n"
                         .. tostring(entry.category or "")
                         .. (entry.locked and "\nlocked" or "")
                         .. "\nid=" .. tostring(entry.id)
-                        .. "\ntarget=" .. M.target()) then
+                        .. "\ntarget=" .. M.target()
+                        .. "\ncatalog=" .. M.catalog()) then
                         t:delete()
                         close("Cannot write .version")
                         return
