@@ -232,9 +232,12 @@ Bookmarks, history and your engine choice live in `L:/browser/` and survive rest
 
 ## App Library
 
-The App Library (top-level app) installs apps and themes onto your device over WiFi, and updates ones already installed — no firmware reflash required. It reads its catalog from the companion repo:
+The App Library (top-level app) installs apps and themes onto your device over WiFi, and updates ones already installed — no firmware reflash required. It reads one of two catalogs:
 
-**[github.com/PhilMo6/meshpunk-apps](https://github.com/PhilMo6/meshpunk-apps)**
+- **Stable** — the published apps: **[github.com/PhilMo6/meshpunk-apps](https://github.com/PhilMo6/meshpunk-apps)**
+- **Dev** — apps in development, and versions that need a dev firmware: **[github.com/PhilMo6/meshpunk-apps-dev](https://github.com/PhilMo6/meshpunk-apps-dev)**
+
+A dev firmware (this repo's builds) reads Dev by default, a release reads Stable; the button beside Refresh switches, and the title reads "App Library - Dev" while Dev is in use. An app installed from the other catalog in a newer version shows as installed, and its page offers this catalog's version ("Install v1.2.0 from Stable").
 
 Apps are grouped by category; when an installed app or theme is behind the catalog an **Updates** list appears at the top. Themes have their own pinned category next to LoRa Protocols, with Apply right in the detail menu (Settings > Theme stays the quick picker for switching). Every app and theme that ships with the firmware is tracked here too, so even preinstalled ones can be updated OTA. Contributions (your own apps and themes) are welcome via pull request — see that repo's README.
 

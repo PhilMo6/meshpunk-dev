@@ -1,14 +1,16 @@
 # Build Doom as a loadable ELF module for ESP32-S3 T-Deck
 # Uses the Xtensa toolchain from PlatformIO
 #
-# -Arch s3 (default) = the Xtensa artifact doom.app.elf, unchanged, published
-# to meshpunk-apps as before.
+# -Arch s3 (default) = the Xtensa artifact doom.app.elf, unchanged.
 # -Arch rv32 = doom.app.rv32.elf for the T-Display P4 (the gameboy module's
 # pattern): the riscv32-esp toolchain, the P4 firmware's ISA and float ABI
 # (rv32imafc, ilp32f), -mno-relax, objects in obj-rv32/, and no -lgcc: the
 # rv32 libgcc.a is not position-independent, so every builtin comes from
 # host_exports[] (src/elf_host.cpp) and the UND audit below hard-fails on
-# anything else. Not published: it stays in this directory.
+# anything else.
+# Both are published to the Dev catalog repo, meshpunk-apps-dev beside this
+# repo: apps/Doom (the catalog's files and files_rv32) and its module-src
+# mirror. The stable catalog gets them through its promote script.
 param(
     [ValidateSet("s3", "rv32")]
     [string]$Arch = "s3"
@@ -175,18 +177,15 @@ if ($LASTEXITCODE -eq 0) {
         exit 1
     }
 
-    # Publish: Doom is a store app — the elf lives in meshpunk-apps/apps/Doom
-    # and its module-src mirror (the firmware data tree has no Doom dir). The
-    # rv32 artifact is not published.
-    if ($Arch -eq "s3") {
-        foreach ($dest in @("..\..\..\meshpunk-apps\apps\Doom\doom.app.elf",
-                            "..\..\..\meshpunk-apps\module-src\doom\doom.app.elf")) {
-            if (Test-Path (Split-Path $dest)) {
-                Copy-Item $OUT $dest -Force
-                Write-Host "Copied to $dest"
-            } else {
-                Write-Host "Skipped $dest (directory missing)"
-            }
+    # Publish: Doom is a store app; the elf lives in meshpunk-apps-dev/apps/Doom
+    # and its module-src mirror (the firmware data tree has no Doom dir).
+    foreach ($dest in @("..\..\..\meshpunk-apps-dev\apps\Doom\$OUT",
+                        "..\..\..\meshpunk-apps-dev\module-src\doom\$OUT")) {
+        if (Test-Path (Split-Path $dest)) {
+            Copy-Item $OUT $dest -Force
+            Write-Host "Copied to $dest"
+        } else {
+            Write-Host "Skipped $dest (directory missing)"
         }
     }
 } else {

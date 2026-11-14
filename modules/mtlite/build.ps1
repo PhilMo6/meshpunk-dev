@@ -120,6 +120,7 @@ if ($ops) {
 
 # MTLite ships CATALOG-ONLY (release decision 2026-09-04): nothing is staged
 # into the firmware data/ tree. Publishing a new build means copying $OUT to
-# meshpunk-apps/protocols/mtlite/ AND syncing module-src/mtlite/ (cmp both).
+# meshpunk-apps-dev/protocols/mtlite/ AND syncing its module-src/mtlite/ (cmp
+# both); the stable catalog gets it through that repo's promote script.
 Write-Host "Device pickup: copy $OUT to L:/meshpunk/lora_protos/mtlite/ (Tools > Files"
 Write-Host "or a store update), then pick mtlite in Settings > Lora and reboot."

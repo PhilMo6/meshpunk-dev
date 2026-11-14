@@ -1,7 +1,8 @@
 # Build fake-08 (PICO-8) as a loadable ELF module for ESP32-S3 T-Deck
 # Uses the Xtensa toolchain from PlatformIO
 # The ELF stays in this folder: PICO-8 ships through the App Library
-# (meshpunk-apps/apps/PICO-8), not the firmware data tree.
+# (meshpunk-apps-dev/apps/PICO-8, then the stable catalog through that repo's
+# promote script), not the firmware data tree.
 #
 # -Arch s3 (default) = the Xtensa artifact pico8.app.elf, unchanged.
 # -Arch rv32 = pico8.app.rv32.elf for the T-Display P4 (the gameboy module's

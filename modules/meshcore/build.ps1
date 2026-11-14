@@ -242,8 +242,9 @@ if ($ops2) {
 # is the store's update tracking — Copy-Item never touches it). Removing the
 # staged elf via Tools > Files boots the no-radio floor with a notice.
 # A catalog release ALSO needs the elfs copied to
-# meshpunk-apps/protocols/meshcore/ and the sources to
-# meshpunk-apps/module-src/meshcore/ (version bumped in catalog.toml).
+# meshpunk-apps-dev/protocols/meshcore/ and the sources to
+# meshpunk-apps-dev/module-src/meshcore/ (version bumped in its catalog.toml;
+# the stable catalog gets it through that repo's promote script).
 $D1 = "..\..\data\meshpunk\lora_protos\meshcore"
 $D2 = "..\..\data\meshpunk\ble_protos\meshcore_companion"
 New-Item -ItemType Directory -Force $D1 | Out-Null
