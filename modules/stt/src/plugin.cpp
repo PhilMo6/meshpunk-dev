@@ -640,16 +640,15 @@ namespace
         g_state = state;
     }
 
+    // The session's ring holds its audio from its first frame on (a held
+    // T-Deck microphone's session starts with the frames captured just
+    // before it): all of it goes to the listen.
     void CmdStart(void)
     {
         if (!g_api->mic_session_open())
         {
             Publish("E:no microphone session is open");
             return;
-        }
-        while (g_api->mic_read(g_scratch, sizeof(g_scratch) / sizeof(g_scratch[0])))
-        {
-            // audio from before the key went down
         }
         BeginSession(State::Listening);
         g_mic_dropped0 = g_api->mic_dropped();

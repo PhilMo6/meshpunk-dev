@@ -45,6 +45,10 @@ uint8_t    mic_hw_slot_bits(void) { return 32; }
 uint8_t    mic_hw_inputs(void)    { return 1; }
 // The right slot word's top 16 bits: see the header.
 void       mic_hw_input_pos(uint8_t n, uint8_t* slot, uint8_t* shift) { (void)n; *slot = 1; *shift = 16; }
+bool       mic_hw_prepare(void)   { return true; }   // the first session sets the ADC up (see the header)
+// The ADC's clock is the speaker's port, which goes back to the player after
+// a session: nothing to hold between sessions.
+bool       mic_hw_hold(bool on)   { (void)on; return true; }
 
 bool mic_hw_start(uint32_t rate_hz, int* port) {
   Audio* a = sound_audio();

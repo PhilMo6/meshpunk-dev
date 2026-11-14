@@ -60,6 +60,10 @@ end
 
 local MIC_INPUTS = select(2, _mic_input())   -- > 1: the Record view has a Mic button
 
+-- The microphone hardware stays up while the app is open or a recording
+-- runs (_mic_hold), so a recording starts on settled hardware.
+_mic_hold(OWNER, true)
+
 -- ── Settings ──────────────────────────────────────────────────────────────────
 
 local cfg = { gain = 4, dir = DEFAULT_DIR }
@@ -193,6 +197,8 @@ local function finish(reason)
     if reason and not s.ended then s.ended = reason end
     st.last    = wavrec.stop(s)
     st.session = nil
+    -- A recording that ends in the background ends the hold too.
+    if apps.current ~= "Recorder" then _mic_hold(OWNER, false) end
 end
 
 -- The space left is the free space at the start minus what has been written:
@@ -399,10 +405,14 @@ local function leave()
     end
 end
 
--- Every other close path (the home chord): the same, minus the status relay.
+-- Every other close path (the home chord; leave()'s go_home runs it too): the
+-- same, minus the status relay. Without a recording the hold ends here.
 apps.set_on_close(function()
     stop_playback()
-    if not st.session then apps.close_background(KEY) end
+    if not st.session then
+        apps.close_background(KEY)
+        _mic_hold(OWNER, false)
+    end
     return true
 end)
 

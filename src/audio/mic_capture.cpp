@@ -39,10 +39,7 @@ static volatile int16_t  s_peak     = 0;
 static volatile uint32_t s_dropped  = 0;
 static int               s_port     = 0;
 
-// Every input's level over the session, printed at stop. The first
-// MIC_STATS_SKIP frames are left out: the T-Deck's recordings open with a
-// transient near full scale.
-#define MIC_STATS_SKIP 1600                  // frames: 100 ms at 16 kHz
+// Every input's level over the whole session, printed at stop.
 static uint32_t          s_sess_n = 0;                   // frames counted
 static uint64_t          s_sess_sq[MIC_MAX_INPUTS];      // sums of squares
 static int32_t           s_sess_peak[MIC_MAX_INPUTS];    // |sample| peaks
@@ -60,7 +57,6 @@ static void read_session(void) {
   const size_t   frame_bytes = wide ? 8 : 4;
   const uint8_t  ni          = s_n_inputs;
   const uint8_t  sel         = (uint8_t)(s_input - 1);
-  uint32_t       skip        = MIC_STATS_SKIP;   // frames still left out of the level statistics
   while (!s_stop_req) {
     size_t got = 0;
     esp_err_t err = i2s_read((i2s_port_t)s_port, chunk, MIC_CHUNK_FRAMES * frame_bytes, &got, pdMS_TO_TICKS(200));
@@ -75,16 +71,12 @@ static void read_session(void) {
         v[k] = wide ? (int16_t)(chunk[i * 2 + s_pos_slot[k]] >> s_pos_shift[k])
                     : ((const int16_t*)chunk)[i * 2 + s_pos_slot[k]];
       }
-      if (skip) {
-        skip--;
-      } else {
-        for (uint8_t k = 0; k < ni; k++) {
-          int32_t ak = v[k] < 0 ? -(int32_t)v[k] : v[k];
-          if (ak > s_sess_peak[k]) s_sess_peak[k] = ak;
-          s_sess_sq[k] += (uint32_t)(ak * ak);       // <= 2^30
-        }
-        s_sess_n++;
+      for (uint8_t k = 0; k < ni; k++) {
+        int32_t ak = v[k] < 0 ? -(int32_t)v[k] : v[k];
+        if (ak > s_sess_peak[k]) s_sess_peak[k] = ak;
+        s_sess_sq[k] += (uint32_t)(ak * ak);         // <= 2^30
       }
+      s_sess_n++;
       int16_t s = v[sel];
       int32_t a = s < 0 ? -(int32_t)s : s;
       if (a > peak) peak = a;
@@ -146,6 +138,36 @@ bool mic_capture_reserve(bool on) {
   s_reserved = false;
   if (!s_running) reader_end();
   return true;
+}
+
+void mic_capture_boot(void) {
+  if (mic_hw_kind() == MIC_DEV_NONE) return;
+  if (!mic_hw_prepare()) SLog.println("[MIC] FAIL: microphone set-up at boot");
+}
+
+// s_held: an app holds the hardware; s_asleep: standby has it down.
+static bool s_held   = false;
+static bool s_asleep = false;
+
+bool mic_capture_hold(bool on) {
+  if (mic_hw_kind() == MIC_DEV_NONE) return !on;
+  if (on == s_held) return true;
+  if (on && !s_asleep && !mic_hw_hold(true)) return false;
+  s_held = on;
+  if (!on && !s_asleep) mic_hw_hold(false);
+  SLog.printf("[MIC] hardware %s between sessions\n", on ? "held" : "released");
+  return true;
+}
+
+void mic_capture_standby(bool asleep) {
+  if (asleep == s_asleep) return;
+  s_asleep = asleep;
+  if (!s_held) return;
+  if (asleep) {
+    mic_hw_hold(false);
+  } else if (!mic_hw_hold(true)) {
+    SLog.println("[MIC] FAIL: the held hardware did not come back after standby");
+  }
 }
 
 bool mic_capture_start(void) {
@@ -212,7 +234,7 @@ void mic_capture_stop(void) {
     len += (size_t)snprintf(lv + len, sizeof(lv) - len, "%sinput %u RMS %ld peak %ld",
                             k ? ", " : "", (unsigned)(k + 1), rms, (long)s_sess_peak[k]);
   }
-  SLog.printf("[MIC] capture off: %lu samples captured, %lu dropped; after the first 100 ms (%lu frames): %s\n",
+  SLog.printf("[MIC] capture off: %lu samples captured, %lu dropped; over %lu frames: %s\n",
               (unsigned long)s_head, (unsigned long)s_dropped, (unsigned long)n, lv);
 }
 

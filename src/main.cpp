@@ -7007,6 +7007,7 @@ void luaTearDown() {
   // reads that session and its memory is the module's to reclaim.
   audio_plugin_unload_all("lua teardown");
   mic_lua_close_all("lua teardown");
+  mic_lua_release_holds("lua teardown");
   lua_net_close_all("lua teardown");
   lua_close(dead);                            // GCs luavgl widgets -> lv_obj_del
   // Free the non-Lua global caches that survive lua_close and otherwise leave a
@@ -7443,6 +7444,8 @@ void setup() {
               audio ? "I2S" : "no-I2S (buzzer/none backend)",
               sound_get_volume(), sound_get_muted() ? 1 : 0);
   log_boot_mem("after audio");
+  // The microphone's ADC set up ahead of the first session (mic_dev.h).
+  mic_capture_boot();
 
   // Initialize LORA Radio
   SLog.println(F("===== RADIO INIT ====="));
@@ -7828,6 +7831,7 @@ static void standby_run() {
   // plugin's worker stops before the mic session it reads closes.
   audio_plugin_unload_all("standby");
   mic_lua_close_all("standby");
+  mic_capture_standby(true);    // a held microphone's hardware is down for the sleep
   lua_net_close_all("standby");
   bool wifi_was_on = (WiFi.getMode() != WIFI_OFF);
   if (wifi_was_on) WiFi.mode(WIFI_OFF);
@@ -8034,6 +8038,7 @@ static void standby_run() {
   gps_dev_wake();               // T-Deck: RXD activity wake; Heltec: no-op
   gps_notify_wake();            // fresh GPS sync cycle
   sound_resume();               // I2S back before the deferred alert replays
+  mic_capture_standby(false);   // and a held microphone's hardware
   notify_standby_defer(false);
   if (notify_standby_take_alert()) notify_message_alert();
   SLog.printf("[POWER] standby end (%s) after %lus; wakes: gpio %lu, timer %lu, other %lu; sleeps skipped %lu\n",

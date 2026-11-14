@@ -13,11 +13,10 @@
 
   start() creates the file and opens the microphone session under `owner`
   (playback is muted until the session closes); stop() finishes the file
-  and closes the session if it is still ours. The first 100 ms after the
-  session opens are dropped: every ADC's start transient sits there. Every
-  5 s of audio the header's sizes are rewritten and the file is flushed, so
-  a recording cut off by a Lua teardown, a reset or a power loss still opens,
-  up to that point.
+  and closes the session if it is still ours. The file holds the session
+  from its first sample. Every 5 s of audio the header's sizes are
+  rewritten and the file is flushed, so a recording cut off by a Lua
+  teardown, a reset or a power loss still opens, up to that point.
 
   A recording ends on its own (tick returns false, s.ended set) when the
   session is closed by someone else (standby closes it), when a write comes
@@ -32,7 +31,6 @@ local M = {}
 M.RATE        = 16000
 M.BYTES_PER_S = 32000                 -- 16 kHz x 2 bytes
 
-local SKIP_BYTES  = 3200              -- 100 ms
 local PATCH_EVERY = 5 * 32000         -- header rewrite + flush per 5 s of audio
 local MAX_BYTES   = 2000000000
 
@@ -88,7 +86,7 @@ function M.start(o)
     end
     if o.gain then _mic_set_gain(o.gain) end
     return { f = f, path = o.path, owner = o.owner,
-             bytes = 0, skip = SKIP_BYTES, patched = 0, ended = nil }
+             bytes = 0, patched = 0, ended = nil }
 end
 
 -- Move the ring into the file. True while recording, false once ended.
@@ -101,26 +99,15 @@ function M.tick(s)
     for _ = 1, 16 do                          -- up to 128 KB (4 s) per call
         local chunk = _mic_read(8192)
         if not chunk then break end
-        if s.skip > 0 then
-            if #chunk <= s.skip then
-                s.skip = s.skip - #chunk
-                chunk = nil
-            else
-                chunk = chunk:sub(s.skip + 1)
-                s.skip = 0
-            end
+        local n = s.f:write(chunk) or 0
+        s.bytes = s.bytes + n
+        if n ~= #chunk then
+            s.ended = "a write failed (the storage is full or was removed)"
+            return false
         end
-        if chunk then
-            local n = s.f:write(chunk) or 0
-            s.bytes = s.bytes + n
-            if n ~= #chunk then
-                s.ended = "a write failed (the storage is full or was removed)"
-                return false
-            end
-            if s.bytes >= MAX_BYTES then
-                s.ended = "the recording reached its size limit (about 17 h)"
-                return false
-            end
+        if s.bytes >= MAX_BYTES then
+            s.ended = "the recording reached its size limit (about 17 h)"
+            return false
         end
     end
     if s.bytes - s.patched >= PATCH_EVERY then patch(s) end
