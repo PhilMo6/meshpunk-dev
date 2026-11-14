@@ -29,6 +29,19 @@ typedef enum {
 
 MicDevKind mic_hw_kind(void);
 
+// Set the ADC up ahead of the first session, once at boot (mic_capture_boot):
+// the T-Deck's ES7210; a no-op on boards whose ADC is set up with the audio
+// (ES8311) or by the first session (ES7243E). False (logged) on failure.
+bool mic_hw_prepare(void);
+
+// Keep the ADC running between sessions (on) or let it stop (off; a running
+// session keeps it until mic_hw_stop). T-Deck: the I2S port and the ES7210
+// stay up, so a session starts on settled hardware, with the frames the
+// port queued before the start (mic_tdeck.cpp). T-Display P4 (the
+// ES8311's ADC runs from es8311_init) and Wio L2 (the ES7243E is clocked by
+// the speaker's port): nothing to hold, true. False (logged) on failure.
+bool mic_hw_hold(bool on);
+
 // Bring the ADC up at `rate_hz` and leave its I2S port receiving; `*port`
 // receives the port number to read. Frames are stereo (two slots per frame);
 // mic_hw_input_pos() names where each input's sample sits. False (logged)
@@ -62,6 +75,10 @@ int  mic_hw_set_gain_step(uint8_t step);
 #define MIC_RATE_HZ      16000
 #define MIC_RING_SAMPLES 32768          // 2 s at 16 kHz, 64 KB of PSRAM
 
+void     mic_capture_boot(void);        // mic_hw_prepare(), once in setup() after the I2C bus is up
+bool     mic_capture_hold(bool on);     // mic_hw_hold() between sessions (mic_lua.cpp: while any app holds)
+void     mic_capture_standby(bool asleep);   // standby: a hold's hardware goes down for the sleep
+                                             // (true) and comes back after the wake (false)
 bool     mic_capture_start(void);       // suspends playback, starts the hardware + the reader task
 void     mic_capture_stop(void);        // stops both, resumes playback
 bool     mic_capture_reserve(bool on);  // on: the reader task now, parked between sessions;

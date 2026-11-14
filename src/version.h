@@ -512,7 +512,12 @@
 //                  are: 2 on the T-Deck, 1 on the other boards with a
 //                  microphone, 0 without one) and `_mic_set_input(n) -> n |
 //                  nil` (from the next session on, until reboot, for every
-//                  app; an app shows a choice only when count > 1). Playback is
+//                  app; an app shows a choice only when count > 1), and
+//                  `_mic_hold(owner, on) -> ok, err` (an app that records
+//                  holds the microphone while it is open: the hardware keeps
+//                  running between sessions while any owner holds it;
+//                  standby takes it down and the wake brings it back; Lua
+//                  teardown releases every hold). Playback is
 //                  muted while a session is open; standby and Lua teardown
 //                  close it and disarm push-to-talk (`_mic_close()` closes
 //                  only the session); auto-standby waits while one runs.

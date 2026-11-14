@@ -31,6 +31,8 @@ MicDevKind mic_hw_kind(void)      { return MIC_DEV_ES8311; }
 uint8_t    mic_hw_slot_bits(void) { return 16; }
 uint8_t    mic_hw_inputs(void)    { return 1; }
 void       mic_hw_input_pos(uint8_t n, uint8_t* slot, uint8_t* shift) { (void)n; *slot = 0; *shift = 0; }
+bool       mic_hw_prepare(void)   { return true; }   // es8311_init() runs the ADC (see the header)
+bool       mic_hw_hold(bool on)   { (void)on; return true; }   // the same: nothing to hold
 
 bool mic_hw_start(uint32_t rate_hz, int* port) {
   Audio* a = sound_audio();

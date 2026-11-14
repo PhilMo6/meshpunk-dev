@@ -10,6 +10,15 @@
 //                                       other boards with a microphone, 0 (n 0) without one
 //   _mic_set_input(n) -> n|nil          from the next session on, until reboot, for every
 //                                       app; nil out of range
+//   _mic_hold(owner, on) -> ok, err     an app that records holds the microphone while it
+//                                       is open: the hardware keeps running between
+//                                       sessions while any owner holds it, so a session
+//                                       starts on settled hardware (T-Deck: no start-up
+//                                       click, and the session begins with the audio
+//                                       queued just before it); off releases that
+//                                       owner's hold. Standby
+//                                       takes the hardware down and the wake brings it
+//                                       back; Lua teardown releases every hold
 //   _mic_close()
 //   _mic_owner() -> name|nil
 //   _mic_ptt() -> held                  the mic key (T-Deck) / Record key (P4 keyboard) is down
@@ -37,6 +46,9 @@ void mic_register_lua(lua_State* L);
 // End the session and disarm push-to-talk from the C side (Lua teardown,
 // standby); no-op without either.
 void mic_lua_close_all(const char* reason);
+
+// Drop every _mic_hold (Lua teardown: no app is left to release its own).
+void mic_lua_release_holds(const char* reason);
 
 // A session is open (audio/audio_plugin.cpp: a plugin's mic reads).
 bool mic_lua_owner_active(void);

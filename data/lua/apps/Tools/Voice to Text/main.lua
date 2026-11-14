@@ -18,7 +18,8 @@
 
   On a board with more than one microphone input (the T-Deck) the Mic
   button picks the input, for every app until reboot, from the next
-  recording on.
+  recording on. While the engine is loaded the app holds the microphone
+  (_mic_hold), so a recording starts on hardware that is already running.
 ]]
 
 local app_dir   = assert(..., "Voice to Text: the launcher passed no app folder")
@@ -112,12 +113,16 @@ local function engine_open()
         if st.d then dictation.close(st.d); st.d = nil end
         st.d, st.open_err = dictation.open { plugin = PLUGIN, model = cfg.model, owner = NAME }
     end
-    if st.d then st.d.mic_sink = box_sink end
+    if st.d then
+        st.d.mic_sink = box_sink
+        _mic_hold(NAME, true)      -- recordings start on settled hardware while the engine runs
+    end
 end
 
 local function engine_close()
     if st.d then dictation.close(st.d) end
     st.d = nil
+    _mic_hold(NAME, false)
 end
 
 local function status_text()

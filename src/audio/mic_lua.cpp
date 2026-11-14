@@ -15,6 +15,15 @@ extern "C" {
 static char s_owner[32] = "";
 static bool s_ptt_armed = false;   // _mic_ptt_arm(true): the key is PTT without a session
 
+// _mic_hold holders (app names); the hardware is held while any slot is used.
+#define MIC_HOLD_SLOTS 4
+static char s_holders[MIC_HOLD_SLOTS][32];
+
+static bool holders_any(void) {
+  for (int i = 0; i < MIC_HOLD_SLOTS; i++) if (s_holders[i][0]) return true;
+  return false;
+}
+
 bool mic_lua_owner_active(void) { return s_owner[0] != 0; }
 
 bool mic_lua_ptt_active(void) { return s_ptt_armed || s_owner[0] != 0; }
@@ -33,6 +42,13 @@ void mic_lua_close_all(const char* reason) {
     s_ptt_armed = false;
     mic_capture_reserve(false);
   }
+}
+
+void mic_lua_release_holds(const char* reason) {
+  if (!holders_any()) return;
+  for (int i = 0; i < MIC_HOLD_SLOTS; i++) s_holders[i][0] = 0;
+  SLog.printf("[MIC] holds released: %s\n", reason);
+  mic_capture_hold(false);
 }
 
 static int l_mic_open(lua_State* L) {
@@ -120,6 +136,43 @@ static int l_mic_set_input(lua_State* L) {
   return 1;
 }
 
+// _mic_hold(owner, on): one slot per owner name; the hardware follows "any
+// slot used". A hold whose hardware does not start is not kept.
+static int l_mic_hold(lua_State* L) {
+  const char* name = luaL_checkstring(L, 1);
+  bool on = lua_toboolean(L, 2);
+  if (on && mic_hw_kind() == MIC_DEV_NONE) {
+    lua_pushboolean(L, 0);
+    lua_pushstring(L, "no microphone");
+    return 2;
+  }
+  int slot = -1, free_slot = -1;
+  for (int i = 0; i < MIC_HOLD_SLOTS; i++) {
+    if (s_holders[i][0] && strncmp(s_holders[i], name, sizeof(s_holders[i]) - 1) == 0) slot = i;
+    else if (!s_holders[i][0] && free_slot < 0) free_slot = i;
+  }
+  if (on && slot < 0) {
+    if (free_slot < 0) {
+      lua_pushboolean(L, 0);
+      lua_pushfstring(L, "%d apps hold the microphone already", MIC_HOLD_SLOTS);
+      return 2;
+    }
+    strncpy(s_holders[free_slot], name, sizeof(s_holders[free_slot]) - 1);
+    s_holders[free_slot][sizeof(s_holders[free_slot]) - 1] = 0;
+    slot = free_slot;
+  } else if (!on && slot >= 0) {
+    s_holders[slot][0] = 0;
+  }
+  if (!mic_capture_hold(holders_any())) {
+    if (on) s_holders[slot][0] = 0;
+    lua_pushboolean(L, 0);
+    lua_pushstring(L, "the microphone hardware did not start (see the log)");
+    return 2;
+  }
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
 static int l_mic_close(lua_State* L) {
   (void)L;
   session_close("closed by the app");
@@ -161,6 +214,7 @@ void mic_register_lua(lua_State* L) {
   lua_register(L, "_mic_set_gain", l_mic_set_gain);
   lua_register(L, "_mic_input",    l_mic_input);
   lua_register(L, "_mic_set_input", l_mic_set_input);
+  lua_register(L, "_mic_hold",     l_mic_hold);
   lua_register(L, "_mic_close",    l_mic_close);
   lua_register(L, "_mic_owner",    l_mic_owner);
   lua_register(L, "_mic_ptt",      l_mic_ptt);
