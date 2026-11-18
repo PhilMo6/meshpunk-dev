@@ -569,13 +569,31 @@
 //                  err` (<= 256 bytes), `_audio_plug_read() -> result | nil`,
 //                  `_audio_plug_status() -> line | nil`. Lua teardown and
 //                  standby unload the plugin. `_device_caps().audioplug` =
-//                  the ABI version. Plugins import only audio_plugin.cpp's
-//                  export table (libc string/memory, formatting, libm), not
-//                  host_exports.
+//                  the ABI version; the host loads a plugin only when the
+//                  plugin's own ABI version equals it. Plugins import only
+//                  audio_plugin.cpp's export table (libc string/memory,
+//                  formatting, libm), not host_exports.
 //                  ALSO this level: `_snapshot_take(obj, format)` takes an
 //                  optional format name, "argb8888" (the default) or
 //                  "rgb565" (2 bytes a pixel, no alpha); any other name is
 //                  an error.
+//                  ALSO this level, LoRa protocol modules (lora_proto_abi.h,
+//                  ABI 3 as before): where the radio's IRQ line is a GPIO,
+//                  `radio_poll_irq` reads the chip's IRQ register only while
+//                  that line is high and returns 0 while it is low. The line
+//                  carries TX_DONE, RX_DONE and HEADER_VALID, so CRC_ERR,
+//                  HEADER_ERR and TIMEOUT show only beside one of those. On
+//                  the T-Display P4, whose line is not a GPIO, every call
+//                  reads the register.
+//                  ALSO this level, ELF app modules: the launcher allocates
+//                  a module's image before it reads the module's file, from
+//                  the ELF header and program header table in the file's
+//                  first 1,024 bytes; a file whose table does not lie within
+//                  them does not launch.
+//                  ALSO this level: the map tile worker takes its two
+//                  scratch buffers (384 KB of PSRAM) at its first fetch and
+//                  frees them when it ends; `_tile_fetch_close()` ends it.
+//                  A fetch that finds no block for them reports stage "oom".
 #define MESHPUNK_FW_API 16
 
 // BLE companion protocol identity (reported in the DEVICE_INFO frame — see
