@@ -34,7 +34,8 @@ extern "C" {
 #include "vendor/meshtastic.h"
 
 // SX126x IRQ register bits (RadioLib RADIOLIB_SX126X_IRQ_*; the HAL's
-// poll_irq returns the chip's IRQ status register verbatim).
+// poll_irq returns the chip's IRQ status register, or 0 while none of
+// TX_DONE / RX_DONE / HEADER_VALID is latched — see lora_proto_abi.h).
 #define IRQ_TX_DONE 0x0001u
 #define IRQ_RX_DONE 0x0002u
 

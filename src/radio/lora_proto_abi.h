@@ -67,7 +67,11 @@ typedef struct MeshHostApi {
                              int8_t tx_dbm_radiated, bool crc,
                              uint8_t sync_word, uint16_t preamble_len);
     bool     (*radio_start_receive)(void);
-    uint32_t (*radio_poll_irq)(void);                       // SX126x IRQ flag snapshot
+    // SX126x IRQ flag snapshot. Where the radio IRQ line is a GPIO the host
+    // reads the register only while that line is high and returns 0
+    // otherwise; the line carries TX_DONE, RX_DONE and HEADER_VALID, so
+    // CRC_ERR, HEADER_ERR and TIMEOUT show only beside one of those.
+    uint32_t (*radio_poll_irq)(void);
     int      (*radio_read_packet)(uint8_t* buf, int max_len); // after RX_DONE; re-arms RX
     bool     (*radio_start_send)(const uint8_t* buf, int len);
     void     (*radio_send_finished)(void);                  // after TX_DONE; re-enters RX

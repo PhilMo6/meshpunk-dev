@@ -492,7 +492,9 @@ static void step_download(void) {
     size_t want = (size_t)avail;
     if (want > kBufSize) want = kBufSize;
     if (want > s.total - s.done) want = s.total - s.done;
-    int rd = s.stream->readBytes(s_buf, want);
+    // read(buf, n), not readBytes: Stream::readBytes takes one byte per call,
+    // and on the HTTPS stream every call runs two mbedtls_ssl_read()s.
+    int rd = s.stream->read(s_buf, want);
     if (rd <= 0) return;
     if (s.out.is_sd) sd_spi_take();
     size_t wr = s.out.file.write(s_buf, rd);

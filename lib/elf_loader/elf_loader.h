@@ -37,6 +37,18 @@ elf_module_t* elf_load_ex(const void* data, size_t size,
                           elf_alloc_fn seg_alloc, elf_free_fn seg_free,
                           void* seg_ctx);
 
+// The size in bytes of the block elf_load() allocates for a module's
+// segments, computed from the first `size` bytes of its ELF file (`data`,
+// 4-byte aligned). 0 when those bytes do not hold an ELF header together
+// with the whole program header table it points to, or the table has no
+// PT_LOAD entry.
+uint32_t elf_image_size(const void* data, size_t size);
+
+// Allocate a block the way elf_load() allocates the one for a module's
+// segments. A segment allocator given to elf_load_ex() can hand such a block
+// over; elf_unload() frees it when `seg_free` was NULL.
+void* elf_image_alloc(size_t size);
+
 // Call the loaded module's entry point (its main()).
 // `argc`/`argv` are forwarded as-is.
 // Returns the module's return value.

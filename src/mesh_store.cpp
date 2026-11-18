@@ -90,6 +90,9 @@ namespace mstore {
 // ── State ────────────────────────────────────────────────────────────────────
 #define MSTORE_UNREAD_CH_SLOTS (MSTORE_MAX_CHANNELS + 4)
 #define MSTORE_UNREAD_DM_SLOTS 16
+// One retention-sweep path slot: messages_dir() + '/' + a file name of up to
+// 255 characters (the FAT long-name limit) + NUL.
+#define MSTORE_SWEEP_PATH_MAX 304
 
 struct MStoreState {
     fs::FS*  storage = nullptr;
@@ -102,19 +105,22 @@ struct MStoreState {
     int      max_messages = 400;
     uint16_t retain_days = 30;
     volatile bool prune_due = false;
-    // Incremental retention sweep cursor (prune_step, Core 0 only).
+    // Incremental retention sweep cursor (prune_step, Core 0 only). The
+    // paths of the sweep in progress sit in fixed slots inside this state:
+    // storing one allocates nothing on the heap.
     bool     sweep_active = false;
     int      sweep_idx = 0, sweep_count = 0;
     uint32_t sweep_cutoff = 0;
-    String   sweep_files[64];
+    char     sweep_files[64][MSTORE_SWEEP_PATH_MAX] = {};
     // Unread counters, name-keyed; a slot is reusable once its count is 0.
     struct Unread { char name[32]; uint16_t count; };
     Unread   unread_ch[MSTORE_UNREAD_CH_SLOTS] = {};
     Unread   unread_dm[MSTORE_UNREAD_DM_SLOTS] = {};
 };
 
-// Allocated in PSRAM on first touch (setup's set_storage), keeping the Strings
+// Allocated in PSRAM on first touch (setup's set_storage), keeping the state
 // and counters off the internal pool like the PunkMesh members they replace.
+// (A String member's characters are a separate heap allocation.)
 static MStoreState& SS() {
     static MStoreState* p = nullptr;
     if (!p) {
@@ -677,9 +683,10 @@ static void prune_msg_file_by_age(fs::FS* storage, const String& path, uint32_t 
 // Collect channel/DM text-log paths into `out` (up to `max`); returns the count.
 // Caller holds the SD lock. Used by the incremental retention sweep (pruneStep),
 // which then rewrites each file under its OWN lock so the bus is freed between
-// files (never held for the whole multi-file sweep).
+// files (never held for the whole multi-file sweep). A path that does not fit
+// a slot is logged and left out of the sweep.
 static int collect_message_logs(fs::FS* storage, const String& prefix,
-                                String* out, int max) {
+                                char (*out)[MSTORE_SWEEP_PATH_MAX], int max) {
     int nf = 0;
     String dir = messages_dir(prefix);
     File root = storage->open(dir.c_str());
@@ -690,8 +697,16 @@ static int collect_message_logs(fs::FS* storage, const String& prefix,
             String name = e.name();
             int slash = name.lastIndexOf('/');
             String base = (slash >= 0) ? name.substring(slash + 1) : name;
-            if (base.endsWith(".log") && (base.startsWith("ch_") || base.startsWith("dm_")))
-                out[nf++] = dir + "/" + base;
+            if (base.endsWith(".log") && (base.startsWith("ch_") || base.startsWith("dm_"))) {
+                int n = snprintf(out[nf], MSTORE_SWEEP_PATH_MAX, "%s/%s",
+                                 dir.c_str(), base.c_str());
+                if (n > 0 && n < MSTORE_SWEEP_PATH_MAX) {
+                    nf++;
+                } else {
+                    SLog.printf("[STORAGE] retention sweep: path too long, not swept: %s/%s\n",
+                                dir.c_str(), base.c_str());
+                }
+            }
         }
         e = root.openNextFile();
     }
@@ -1167,11 +1182,11 @@ void prune_step(uint32_t now_ts) {
         // Same lock order as above: MESH_LOCK first, flash guard second.
         UsbFlashGuardIf _g(!is_sd);   // LittleFS backend: rewrite writes flash
         if (is_sd) sd_spi_take();
-        prune_msg_file_by_age(SS().storage, SS().sweep_files[SS().sweep_idx], SS().sweep_cutoff);
+        prune_msg_file_by_age(SS().storage, String(SS().sweep_files[SS().sweep_idx]),
+                              SS().sweep_cutoff);
         if (is_sd) sd_spi_release();
     }
     MESH_UNLOCK();
-    SS().sweep_files[SS().sweep_idx] = String();   // free the path now
     SS().sweep_idx++;
     if (SS().sweep_idx >= SS().sweep_count) SS().sweep_active = false;
 }

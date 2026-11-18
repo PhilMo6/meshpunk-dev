@@ -73,14 +73,15 @@ int  mic_hw_set_gain_step(uint8_t step);
 // ── Capture engine (mic_capture.cpp) ───────────────────────────────────────
 
 #define MIC_RATE_HZ      16000
-#define MIC_RING_SAMPLES 32768          // 2 s at 16 kHz, 64 KB of PSRAM
+#define MIC_RING_SAMPLES 32768          // 2 s at 16 kHz, 64 KB of PSRAM held from start to stop
 
 void     mic_capture_boot(void);        // mic_hw_prepare(), once in setup() after the I2C bus is up
 bool     mic_capture_hold(bool on);     // mic_hw_hold() between sessions (mic_lua.cpp: while any app holds)
 void     mic_capture_standby(bool asleep);   // standby: a hold's hardware goes down for the sleep
                                              // (true) and comes back after the wake (false)
-bool     mic_capture_start(void);       // suspends playback, starts the hardware + the reader task
-void     mic_capture_stop(void);        // stops both, resumes playback
+bool     mic_capture_start(void);       // allocates the ring, suspends playback, starts the hardware +
+                                        // the reader task. False (logged) when one of them fails
+void     mic_capture_stop(void);        // stops both, resumes playback, frees the ring
 bool     mic_capture_reserve(bool on);  // on: the reader task now, parked between sessions;
                                         // off: it ends (after the session, if one runs).
                                         // False (logged) when its stack does not fit

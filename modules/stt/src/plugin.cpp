@@ -39,6 +39,12 @@
 // between chunks; a stop ends the capture when it is taken, and the audio up
 // to that moment is in the clip. At the same points the worker sleeps 1 ms
 // every 100 ms (Poll).
+//
+// Memory: the tile and the resident tensors' blocks are the plugin's from
+// load to unload (audioplug_ops.needs). The tensor heap and the audio FIFO
+// are taken from the firmware when a listen or a file starts and returned
+// when it ends (TakeWork, ReleaseWork); the engine object lives as long,
+// because its front end keeps tensors in the heap.
 
 #include <cstdarg>
 #include <cstdint>
@@ -70,8 +76,8 @@ namespace
     uint8_t *g_internal = nullptr;
     uint8_t *g_resident = nullptr;
     uint8_t *g_resident_b = nullptr;   // the second resident block (kResidentBBytes), or nullptr
-    uint8_t *g_work = nullptr;
-    int16_t *g_fifo = nullptr;         // in the work block, after the heap
+    uint8_t *g_work = nullptr;         // the tensor heap's block: nullptr outside a listen or a file
+    int16_t *g_fifo = nullptr;         // the audio FIFO's block: nullptr outside a listen or a file
 
     // Audio FIFO (samples): the mic pump and the file reader write, the front
     // end reads. Worker task only.
@@ -219,6 +225,55 @@ namespace
             g_engine->carry_kept = kNoToken;
             g_engine->carry_next = kNoToken;
         }
+    }
+
+    // ── Working memory ───────────────────────────────────────────────────────
+
+    // The end of a listen or a file: the engine's tensors go back to the
+    // heap, then the heap's and the FIFO's blocks to the firmware. An
+    // allocation after this fails in tlib::heap (a heap of 0 bytes).
+    void ReleaseWork(void)
+    {
+        if (g_engine != nullptr)
+        {
+            g_engine->~Engine();
+            g_engine = nullptr;
+        }
+        tlib::heap::Initialize(nullptr, 0);
+        if (g_fifo != nullptr)
+        {
+            g_api->psram_free(g_fifo);
+            g_fifo = nullptr;
+        }
+        if (g_work != nullptr)
+        {
+            g_api->psram_free(g_work);
+            g_work = nullptr;
+        }
+    }
+
+    // The start of a listen or a file: the heap's and the FIFO's blocks from
+    // the firmware, then the engine (its front end allocates in the heap).
+    // false, with an E: result, when the firmware has no block that large.
+    bool TakeWork(void)
+    {
+        const uint32_t fifo_bytes = kAudioFifoSamples * sizeof(int16_t);
+        g_work = static_cast<uint8_t *>(g_api->psram_alloc(kWorkHeapBytes));
+        if (g_work != nullptr)
+        {
+            g_fifo = static_cast<int16_t *>(g_api->psram_alloc(fifo_bytes));
+        }
+        if (g_work == nullptr || g_fifo == nullptr)
+        {
+            const uint32_t need = (g_work == nullptr) ? kWorkHeapBytes : fifo_bytes;
+            PublishF("E:not enough memory: it needs %u KB of PSRAM in one block, the largest free block is %u KB",
+                     static_cast<unsigned>(need / 1024), static_cast<unsigned>(g_api->psram_largest() / 1024));
+            ReleaseWork();
+            return false;
+        }
+        tlib::heap::Initialize(g_work, kWorkHeapBytes);
+        g_engine = new (g_engine_mem) Engine();
+        return true;
     }
 
     // One chunk from the FIFO (zero-padded when it holds less) through the
@@ -547,6 +602,7 @@ namespace
         const uint32_t lost_ms = g_fifo_lost * 1000U / kSamplingRate;
         const bool was_listen = g_state == State::Listening;
         ClearAudio();
+        ReleaseWork();
         g_capturing = false;
         g_stop_pending = false;
         g_cancel = false;
@@ -642,12 +698,18 @@ namespace
 
     // The session's ring holds its audio from its first frame on (a held
     // T-Deck microphone's session starts with the frames captured just
-    // before it): all of it goes to the listen.
+    // before it): all of it goes to the listen. A listen that gets no
+    // working memory ends here (E:, then D).
     void CmdStart(void)
     {
         if (!g_api->mic_session_open())
         {
             Publish("E:no microphone session is open");
+            return;
+        }
+        if (!TakeWork())
+        {
+            Publish("D");
             return;
         }
         BeginSession(State::Listening);
@@ -755,6 +817,12 @@ namespace
             data_len = size - data_at;   // a recording cut off before its header update
         }
 
+        if (!TakeWork())
+        {
+            g_api->file_close(h);
+            Publish("D");
+            return;
+        }
         BeginSession(State::File);
         const uint32_t t0 = g_api->ticks_ms();
 #ifdef STT_PROFILE
@@ -859,16 +927,12 @@ namespace
         g_internal = static_cast<uint8_t *>(blocks[0]);
         g_resident = static_cast<uint8_t *>(blocks[1]);
         g_resident_b = static_cast<uint8_t *>(blocks[2]);
-        g_work = static_cast<uint8_t *>(blocks[3]);
-        g_fifo = reinterpret_cast<int16_t *>(g_work + kWorkHeapBytes);
-        tlib::heap::Initialize(g_work, kWorkHeapBytes);
         g_state = State::NoModel;
         return true;
     }
 
     void stt_worker(const AudioPlugHostApi *api)
     {
-        g_engine = new (g_engine_mem) Engine();
         while (!api->should_stop())
         {
             if (g_state == State::Listening)
@@ -890,9 +954,7 @@ namespace
             }
         }
         g_capturing = false;
-        ClearAudio();
-        g_engine->~Engine();
-        g_engine = nullptr;
+        ReleaseWork();
     }
 
     void stt_status(char *out, uint32_t n)
@@ -1034,7 +1096,7 @@ extern "C" __attribute__((visibility("default"))) const AudioPlugDesc audioplug_
     { { { kInternalBytes,                                       AUDIOPLUG_MEM_INTERNAL },
         { kResidentBytes,                                       AUDIOPLUG_MEM_PSRAM },
         { kResidentBBytes,                                      kResidentBBytes ? AUDIOPLUG_MEM_PSRAM : AUDIOPLUG_MEM_NONE },
-        { kWorkHeapBytes + kAudioFifoSamples * sizeof(int16_t), AUDIOPLUG_MEM_PSRAM } },
+        { 0,                                                    AUDIOPLUG_MEM_NONE } },
       8 * 1024 },
     stt_init,
     stt_worker,

@@ -260,3 +260,89 @@ void zone_overlay_push_outside(int fx, int fy, int fw, int fh, bool erase,
         push_part(c, ix1, iy0, c->w - ix1,  iy1 - iy0,  erase, push); // right
     }
 }
+
+// ── Timed labels ────────────────────────────────────────────────────────────
+// Chip-sized text, white with a white border, on a box filled with
+// ZO_SHADOW: byte-swap-invariant like every chip color and never the
+// transparent sentinel, so the whole box is drawn and reads over any picture.
+
+#define ZO_LABELS_MAX 8
+
+typedef struct {
+    int16_t   x, y, w, h;   // screen rect
+    uint16_t* buf;          // RGB565 pixels (PSRAM); NULL = not rendered
+} ZoneLabel;
+
+static ZoneLabel         s_labels[ZO_LABELS_MAX];
+static int               s_label_count = 0;
+static volatile int      s_label_shown = -1;   // index, or -1
+static volatile uint32_t s_label_until = 0;    // millis() it stops showing
+
+void zone_overlay_labels_clear(void) {
+    s_label_shown = -1;
+    for (int i = 0; i < s_label_count; i++) {
+        free(s_labels[i].buf);
+        s_labels[i].buf = nullptr;
+    }
+    s_label_count = 0;
+}
+
+void zone_overlay_labels_build(const char* const* texts, int count,
+                               int screen_w, int screen_h) {
+    zone_overlay_labels_clear();
+    if (!texts) return;
+    if (count > ZO_LABELS_MAX) count = ZO_LABELS_MAX;
+    memset(s_labels, 0, sizeof(s_labels));
+    // Slot i always holds text i, so callers index labels by their own
+    // numbering; a slot whose text is empty or whose allocation failed
+    // stays NULL and stamps nothing.
+    for (int i = 0; i < count; i++) {
+        const char* s = texts[i];
+        int len = s ? (int)strlen(s) : 0;
+        if (len == 0) continue;
+        int w = len * CHIP_ADV - CHIP_SCALE + 2 * CHIP_PAD;
+        int h = CHIP_TEXT_H + 2 * CHIP_PAD;
+        uint16_t* buf = (uint16_t*)ps_malloc((size_t)w * h * sizeof(uint16_t));
+        if (!buf) continue;
+        for (int p = 0; p < w * h; p++) buf[p] = ZO_SHADOW;
+        for (int x = 0; x < w; x++) { buf[x] = ZO_WHITE; buf[(h - 1) * w + x] = ZO_WHITE; }
+        for (int y = 0; y < h; y++) { buf[y * w] = ZO_WHITE; buf[y * w + w - 1] = ZO_WHITE; }
+        zone_overlay_draw_text(buf, w, CHIP_PAD, CHIP_PAD, CHIP_SCALE, s, ZO_WHITE);
+        ZoneLabel* lb = &s_labels[i];
+        lb->w   = (int16_t)w;
+        lb->h   = (int16_t)h;
+        lb->x   = (int16_t)((screen_w - w) / 2);
+        lb->y   = (int16_t)((screen_h - h) / 2);
+        lb->buf = buf;
+    }
+    s_label_count = count;
+}
+
+// The deadline is written before the index, so a stamper that sees the new
+// index also sees its deadline.
+void zone_overlay_label_show(int index, uint32_t duration_ms) {
+    s_label_until = millis() + duration_ms;
+    __sync_synchronize();
+    s_label_shown = index;
+}
+
+void zone_overlay_label_stamp(uint16_t* frame, int fx, int fy, int fw, int fh) {
+    int i = s_label_shown;
+    if (!frame || i < 0 || i >= s_label_count) return;
+    __sync_synchronize();
+    if ((int32_t)(millis() - s_label_until) >= 0) return;
+    const ZoneLabel* lb = &s_labels[i];
+    if (!lb->buf) return;
+    // Label rectangle in frame coordinates, clipped to the frame.
+    int x0 = lb->x - fx, y0 = lb->y - fy;
+    int sx = 0, sy = 0;
+    int w = lb->w, h = lb->h;
+    if (x0 < 0) { sx = -x0; w += x0; x0 = 0; }
+    if (y0 < 0) { sy = -y0; h += y0; y0 = 0; }
+    if (x0 + w > fw) w = fw - x0;
+    if (y0 + h > fh) h = fh - y0;
+    if (w <= 0 || h <= 0) return;
+    for (int row = 0; row < h; row++)
+        memcpy(&frame[(y0 + row) * fw + x0], &lb->buf[(sy + row) * lb->w + sx],
+               (size_t)w * sizeof(uint16_t));
+}

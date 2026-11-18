@@ -318,7 +318,10 @@ static int luavgl_font_create(lua_State *L)
     name = end + 1; /* next */
   }
 
-  free(str);
+  /* MESHPUNK: str is from lv_strdup(), LVGL's allocator, so lv_free() takes
+   * it back. Upstream calls free(): libc's heap, which is not where LVGL's
+   * small blocks live (src/lv_mem_psram.c). */
+  lv_free(str);
   if (font) {
     lua_pushlightuserdata(L, (void *)font);
     return 1;

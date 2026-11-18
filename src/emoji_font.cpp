@@ -336,6 +336,15 @@ int32_t blob_find(uint32_t cp)
     return -1;
 }
 
+// A cached glyph's two blocks, its pixels and its descriptor, come from LVGL's
+// allocator (lv_mem_psram.c): a 16 px glyph's 1024 bytes of pixels and the
+// descriptor are sizes its small-block pool serves.
+void glyph_free(lv_image_dsc_t * dsc)
+{
+    lv_free(const_cast<void *>(static_cast<const void *>(dsc->data)));
+    lv_free(dsc);
+}
+
 // Load one emoji's pixel data from the blob into PSRAM.
 lv_image_dsc_t * load_emoji_from_blob(uint32_t cp)
 {
@@ -347,13 +356,11 @@ lv_image_dsc_t * load_emoji_from_blob(uint32_t cp)
     uint32_t offset = s_blob.data_off + static_cast<uint32_t>(idx) * s_blob.entry_size;
 
     // Allocate before taking the SPI lock — never hold the bus over a malloc.
-    auto * pixels = static_cast<uint8_t *>(
-        heap_caps_malloc(s_blob.entry_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    auto * out = static_cast<lv_image_dsc_t *>(
-        heap_caps_malloc(sizeof(lv_image_dsc_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    auto * pixels = static_cast<uint8_t *>(lv_malloc(s_blob.entry_size));
+    auto * out = static_cast<lv_image_dsc_t *>(lv_malloc(sizeof(lv_image_dsc_t)));
     if (!pixels || !out) {
-        if (pixels) heap_caps_free(pixels);
-        if (out)    heap_caps_free(out);
+        if (pixels) lv_free(pixels);
+        if (out)    lv_free(out);
         return nullptr;
     }
 
@@ -366,8 +373,8 @@ lv_image_dsc_t * load_emoji_from_blob(uint32_t cp)
                   br == s_blob.entry_size;
     }
     if (!read_ok) {
-        heap_caps_free(pixels);
-        heap_caps_free(out);
+        lv_free(pixels);
+        lv_free(out);
         return nullptr;
     }
 
@@ -441,8 +448,7 @@ const void * emoji_path_cb(const lv_font_t * font,
     if (!cache_insert(unicode, fresh)) {
         // Unreachable with the cap guard above, but never orphan a glyph:
         // `fresh` was never handed to LVGL, so freeing it here is safe.
-        heap_caps_free(const_cast<void *>(static_cast<const void *>(fresh->data)));
-        heap_caps_free(fresh);
+        glyph_free(fresh);
         schedule_cache_clear();
         return &s_blank_dsc;
     }
@@ -551,8 +557,7 @@ extern "C" bool emoji_preload(uint32_t codepoint)
         return false;
     }
     if (!cache_insert(codepoint, fresh)) {
-        heap_caps_free(const_cast<void *>(static_cast<const void *>(fresh->data)));
-        heap_caps_free(fresh);
+        glyph_free(fresh);
         schedule_cache_clear();
         return false;
     }
@@ -703,8 +708,7 @@ extern "C" void emoji_font_cache_clear()
     for (auto & e : s_cache) {
         // Free heap-backed glyphs only; s_blank_dsc and its pixel are static.
         if (e.dsc && e.dsc != &s_blank_dsc) {
-            heap_caps_free(const_cast<void *>(static_cast<const void *>(e.dsc->data)));
-            heap_caps_free(e.dsc);
+            glyph_free(e.dsc);
         }
         e.codepoint = EMOJI_CACHE_EMPTY;
         e.dsc = nullptr;

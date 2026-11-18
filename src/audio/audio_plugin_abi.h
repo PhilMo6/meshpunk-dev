@@ -7,13 +7,15 @@
 // The firmware grants the memory blocks its `needs` declares all at once
 // before init() (a refusal names the block that failed), runs worker() on
 // a firmware task on core 1 below the mesh task, and frees the blocks after
-// worker() has returned and deinit() has run. Every other service comes
-// through the AudioPlugHostApi vtable; the module imports only the symbols
-// in audio_plugin.cpp's export table (libc string/memory, formatting, libm).
+// worker() has returned and deinit() has run. Memory the worker holds only
+// part of the time comes from psram_alloc and goes back with psram_free.
+// Every other service comes through the AudioPlugHostApi vtable; the module
+// imports only the symbols in audio_plugin.cpp's export table (libc
+// string/memory, formatting, libm).
 //
 // Threads: init() and status() run on the Lua task (core 0); worker() runs
-// on the plugin task (core 1) and is the only caller of the mic_* and file_*
-// calls. command/publish are the app channel (Lua <-> worker).
+// on the plugin task (core 1) and is the only caller of the mic_*, file_*
+// and psram_* calls. command/publish are the app channel (Lua <-> worker).
 
 #pragma once
 
@@ -21,7 +23,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#define AUDIO_PLUGIN_ABI_VERSION 1
+#define AUDIO_PLUGIN_ABI_VERSION 2
 
 // Memory block kinds a plugin can ask for.
 #define AUDIOPLUG_MEM_NONE     0
@@ -29,6 +31,7 @@
 #define AUDIOPLUG_MEM_PSRAM    2
 
 #define AUDIOPLUG_MAX_BLOCKS   4
+#define AUDIOPLUG_MAX_WORK     4     // psram_alloc blocks held at once
 #define AUDIOPLUG_CMD_MAX      256   // bytes per app -> plugin command
 #define AUDIOPLUG_RESULT_MAX   1024  // bytes per plugin -> app result
 #define AUDIOPLUG_STATUS_MAX   96    // bytes of the status line, NUL included
@@ -84,6 +87,14 @@ typedef struct AudioPlugHostApi {
     bool     (*file_seek)(int h, uint32_t offset);
     int32_t  (*file_read)(int h, void* buf, uint32_t len);
     void     (*file_close)(int h);
+
+    // Working memory. psram_alloc returns a 16-byte aligned PSRAM block, or
+    // NULL when no free block is that large or AUDIOPLUG_MAX_WORK blocks are
+    // held; psram_largest is the largest size it could return now. The
+    // firmware frees the blocks still held at unload.
+    void*    (*psram_alloc)(uint32_t bytes);
+    void     (*psram_free)(void* block);
+    uint32_t (*psram_largest)(void);
 } AudioPlugHostApi;
 
 typedef struct {

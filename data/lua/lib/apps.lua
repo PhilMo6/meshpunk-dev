@@ -58,10 +58,18 @@ local M = {}
 local INTERNAL_APPS = "/lua/apps"
 local SD_APPS = "/meshpunk/apps"
 
+-- A set of registered timers. Its values are weak: luavgl keeps a timer alive
+-- in the Lua registry until t:delete(), and frees a deleted timer when Lua
+-- collects it, so a timer the app has deleted leaves the set, and is freed,
+-- at Lua's next collection.
+local function new_timer_set()
+    return setmetatable({}, { __mode = "v" })
+end
+
 -- ── State ──────────────────────────────────────────────────────────────────
 M.current = nil       -- name of the running app, nil = launcher
 M._screen = nil       -- root object of the current screen owner (app or launcher page)
-M._timers = {}        -- timers registered since the last set_root
+M._timers = new_timer_set()   -- timers registered since the last set_root
 M._busy = false       -- re-entrancy guard for launch / go_home
 M._sound_mark = nil   -- _sound_mark() watermark: sound ids owned by the current app
 M._background = {}    -- key -> background contract record (see register_background)
@@ -255,7 +263,7 @@ end
 -- timer list, so each app starts with a clean set.
 function M.set_root(obj)
     M._screen = obj
-    M._timers = {}
+    M._timers = new_timer_set()
     M._on_close = nil
 end
 
@@ -283,8 +291,10 @@ function M.new_root(opts)
 end
 
 -- Register an already-created timer for teardown. Returns it for convenience.
+-- The set has holes where deleted timers were collected; #set is then a
+-- border, an index whose successor is empty, so the new entry replaces none.
 function M.track_timer(t)
-    if t then table.insert(M._timers, t) end
+    if t then M._timers[#M._timers + 1] = t end
     return t
 end
 
@@ -484,9 +494,10 @@ function M.delete_view(obj)
     end })
 end
 
--- Delete a captured set of timers then the root, pcall-guarded.
+-- Delete a captured set of timers then the root, pcall-guarded. pairs: the
+-- set has holes (new_timer_set).
 local function destroy(scr, timers)
-    for _, t in ipairs(timers or {}) do pcall(function() t:delete() end) end
+    for _, t in pairs(timers or {}) do pcall(function() t:delete() end) end
     if scr then pcall(function() scr:delete() end) end
 end
 
@@ -504,7 +515,7 @@ function M.go_home()
     M.clear_current()
     _nav_clear()
     local scr, timers = M._screen, M._timers
-    M._screen, M._timers = nil, {}
+    M._screen, M._timers = nil, new_timer_set()
     lvgl.Timer({ period = 1, cb = function(t)
         t:delete()
         destroy(scr, timers)
@@ -571,7 +582,7 @@ function M.go_background(key)
     M.clear_current()
     _nav_clear()
     local scr, timers = M._screen, M._timers
-    M._screen, M._timers = nil, {}
+    M._screen, M._timers = nil, new_timer_set()
     lvgl.Timer({ period = 1, cb = function(t)
         t:delete()
         destroy(scr, timers)
@@ -622,7 +633,7 @@ function M.launch(name_or_record)
 
     -- Capture what we're replacing; the target's set_root will repoint M._screen.
     local prev_screen, prev_timers = M._screen, M._timers
-    M._screen, M._timers = nil, {}
+    M._screen, M._timers = nil, new_timer_set()
 
     -- Sound watermark: every sound id created from here on (the target's chunk
     -- runs in the steps below) belongs to the app being launched. On success

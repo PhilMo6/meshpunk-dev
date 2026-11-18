@@ -54,6 +54,10 @@ local PAL             = theme.palette()
 local COL_ACCENT      = PAL.accent_text   -- unread counters / links
 local COL_HILITE      = PAL.highlight     -- unread conversation names
 local COL_FOCUS       = "#ffffff"   -- focus border (images), not a text color
+local COL_SCR         = PAL.scr     -- the theme's screen color: the plate a chat bubble is baked on
+-- A baked chat bubble is a 16-bit image: 2 bytes a pixel, no alpha.
+local BUBBLE_FORMAT   = "rgb565"
+local BUBBLE_BPP      = 2
 local NAME_COLORS = {
     "#7fb3ff", "#ffb37f", "#a0e57f", "#e57fb3",
     "#7fe5e5", "#e5e57f", "#c79fff", "#ff9f9f",
@@ -1193,14 +1197,15 @@ local function build_chat(target)
         end
     end)
 
-    -- Build the live bubble (Object + header + body labels) in `parent`. Pure
-    -- content — no interaction flags/handlers; bake_msg wires those onto the
-    -- final object. The delivery status is baked into the header here; a later
-    -- status change re-bakes the whole bubble (see run_rebake / onAck).
+    -- Build the live bubble (Object + header + body labels) in `parent`, at
+    -- its full width. Pure content — no interaction flags/handlers; bake_msg
+    -- wires those onto the final object. The delivery status is baked into the
+    -- header here; a later status change re-bakes the whole bubble (see
+    -- run_rebake / onAck).
     local function build_bubble(parent, msg)
         local is_me = (msg.from == me)
         local bubble = parent:Object {
-            w = lvgl.PCT(92), h = lvgl.SIZE_CONTENT,
+            w = lvgl.PCT(100), h = lvgl.SIZE_CONTENT,
             bg_color = is_me and COL_ME_BG or COL_THEM_BG,
             bg_opa = 255, radius = 6,
             border_width = 1,
@@ -1229,23 +1234,50 @@ local function build_chat(target)
         return bubble
     end
 
-    -- Bake a message: build the live bubble in msg_list (a real flex child, so it
-    -- lays out with the correct PCT width), snapshot it to an ARGB image, delete
-    -- the bubble, and add the focusable image in its place. Build→snapshot→delete
-    -- is one synchronous timer tick, so the transient bubble never draws. NO
-    -- fallback — a nil snapshot (e.g. OOM) prints and returns nil so the failure
-    -- is loud, never papered over with a live bubble.
-    local function bake_msg(msg)
-        local bubble = build_bubble(msg_list, msg)
-        local ok_s, buf = pcall(_snapshot_take, bubble)   -- lays out the bubble
-        -- Read the laid-out bubble size NOW (snapshot updated its layout) — a
-        -- guaranteed source, unlike decoding the draw_buf header afterwards.
-        local bw, bh
-        local okc, bc = pcall(function() return bubble:get_coords() end)
-        if okc and bc and bc.x2 then bw = bc.x2 - bc.x1 + 1; bh = bc.y2 - bc.y1 + 1 end
-        bubble:delete()
+    -- A bubble the device had no memory to draw is said on screen, one note
+    -- per 5 s at most.
+    local bake_note_up = false
+    local function bake_failed_note()
+        if bake_note_up then return end
+        bake_note_up = true
+        pcall(utils.createNotification, root, "Out of memory:\na message is not shown", 4000)
+        apps.add_timer { period = 5000, cb = function(t) t:delete(); bake_note_up = false end }
+    end
+
+    -- Bake a message: build the live bubble on a plate in msg_list (a real flex
+    -- child, so it lays out with the correct PCT width), snapshot the plate to
+    -- a BUBBLE_FORMAT image, delete it, and add the focusable image in its
+    -- place. The image has no alpha: the plate, in the theme's screen color, is
+    -- what shows outside the bubble's rounded corners. Build→snapshot→delete is
+    -- one synchronous timer tick, so the transient bubble never draws. The
+    -- image's bytes are known from the laid-out plate before the snapshot
+    -- allocates them: make_room(bytes), when given, runs first, and a false
+    -- from it ends the bake (nil). NO fallback — a snapshot that fails (e.g.
+    -- OOM) prints, puts a note on screen and returns nil so the failure is
+    -- loud, never papered over with a live bubble. Returns the image and its
+    -- bytes.
+    local function bake_msg(msg, make_room)
+        local plate = msg_list:Object {
+            w = lvgl.PCT(92), h = lvgl.SIZE_CONTENT,
+            bg_color = COL_SCR, bg_opa = 255, radius = 0,
+            border_width = 0, pad_all = 0,
+        }
+        plate:clear_flag(lvgl.FLAG.SCROLLABLE)
+        build_bubble(plate, msg)
+        plate:update_layout()
+        local bc = plate:get_coords()
+        local bw, bh = bc.x2 - bc.x1 + 1, bc.y2 - bc.y1 + 1
+        local bytes = bw * bh * BUBBLE_BPP
+        if make_room and not make_room(bytes) then
+            plate:delete()
+            return nil
+        end
+        local ok_s, buf = pcall(_snapshot_take, plate, BUBBLE_FORMAT)
+        plate:delete()
         if not ok_s or not buf then
-            print("[Messenger] snapshot failed (OOM?) for a chat bubble")
+            print("[Messenger] snapshot failed for a chat bubble: "
+                .. (ok_s and "no buffer (out of memory?)" or tostring(buf)))
+            bake_failed_note()
             return nil
         end
         -- Create empty, set the draw_buf src via the method (toimgsrc accepts the
@@ -1282,25 +1314,29 @@ local function build_chat(target)
         end)
         img:onevent(lvgl.EVENT.LONG_PRESSED, open_msg_menu)
 
-        return img
+        return img, bytes
     end
 
     -- ── Windowed disk-paged history ─────────────────────────────────────────
     -- Bubbles are a bounded sliding window over the log FILE (not an in-RAM
     -- history). Scrolling up pages the next batch of older records in and prunes
-    -- (fully frees) an equal batch off the bottom; scrolling down does the
-    -- reverse. top_off/bot_off are the byte offsets of the window's first/last
+    -- (fully frees) bubbles off the bottom for their room; scrolling down does
+    -- the reverse. top_off/bot_off are the byte offsets of the window's first/last
     -- record; file_size is the known EOF. Backing reads: the universal
     -- _store_chat_page_channel / _store_chat_page_dm (name-keyed, mstore).
     -- Keeps the LVGL object count flat so a huge thread can't lag the UI.
-    local bubbles = {}                 -- { {obj, msg, off0, off1}, ... } oldest→newest
+    local bubbles = {}                 -- { {obj, msg, off0, off1, bytes}, ... } oldest→newest
+    local win_bytes = 0                -- the bytes of the window's bubble images
     local top_off, bot_off, file_size = 0, 0, 0
     local empty_lbl = nil              -- the "no messages" placeholder, if shown
     local page_scheduled, live_scheduled, own_echo = false, false, nil
-    -- PAGE = records loaded per cycle (and initially); WIN_MAX = hard bubble cap
-    -- (pruning starts past it); EDGE = px-from-edge that triggers a page. Kept
-    -- small to hold the LVGL object count (and so redraw cost) down.
+    -- PAGE = records fetched per cycle (and initially); EDGE = px-from-edge that
+    -- triggers a page. The window has two limits: WIN_MAX bubbles (the LVGL
+    -- object count, and so redraw cost) and WIN_BYTES of bubble images, which is
+    -- WIN_SCREENS times the message area at the images' BUBBLE_BPP bytes a pixel.
     local PAGE, WIN_MAX, EDGE = 10, 30, 40
+    local WIN_SCREENS = 6
+    local WIN_BYTES = WIN_SCREENS * W * MSG_H * BUBBLE_BPP
     local function following() return bot_off >= file_size end
     local function clear_empty()
         if empty_lbl then pcall(function() empty_lbl:delete() end); empty_lbl = nil end
@@ -1336,24 +1372,32 @@ local function build_chat(target)
         end
     end
 
-    local function add_bottom_off(rec, o0, o1)
+    -- Bake rec onto the bottom (or the top) of the window; make_room as in
+    -- bake_msg. Returns the image, or nil when nothing was added (make_room
+    -- said no, or the bake failed: printed, no fallback).
+    local function add_bottom_off(rec, o0, o1, make_room)
         clear_empty()
-        local img = bake_msg(rec)
-        if not img then return nil end       -- bake failed (printed); skip, no fallback
-        local entry = { obj = img, msg = rec, off0 = o0, off1 = o1 }
+        local img, bytes = bake_msg(rec, make_room)
+        if not img then return nil end
+        local entry = { obj = img, msg = rec, off0 = o0, off1 = o1, bytes = bytes }
         bubbles[#bubbles + 1] = entry
+        win_bytes = win_bytes + bytes
         remember_status(entry)
         return img
     end
-    local function add_bottom(rec) return add_bottom_off(rec, rec.off0, rec.off1) end
-    local function add_top(rec)
+    local function add_bottom(rec, make_room)
+        return add_bottom_off(rec, rec.off0, rec.off1, make_room)
+    end
+    local function add_top(rec, make_room)
         clear_empty()
-        local img = bake_msg(rec)
-        if not img then return end           -- bake failed (printed); skip, no fallback
+        local img, bytes = bake_msg(rec, make_room)
+        if not img then return nil end
         img:move_to_index(0)
-        local entry = { obj = img, msg = rec, off0 = rec.off0, off1 = rec.off1 }
+        local entry = { obj = img, msg = rec, off0 = rec.off0, off1 = rec.off1, bytes = bytes }
         table.insert(bubbles, 1, entry)
+        win_bytes = win_bytes + bytes
         remember_status(entry)
+        return img
     end
 
     local function drop(entry)
@@ -1361,22 +1405,40 @@ local function build_chat(target)
         status_entries[entry.msg] = nil      -- stop tracking a pruned bubble's status
         rebake_dirty[entry.msg] = nil
         repeat_track[entry.msg] = nil        -- stop polling a pruned channel send
+        win_bytes = win_bytes - entry.bytes
         pcall(function() entry.obj:delete() end)   -- DELETE handler frees the baked buffer
     end
-    -- Prune the given end down to a target count. The `_to` forms let paging
-    -- prune BEFORE it bakes (free-before-alloc): drop the far end to make room,
-    -- so each new baked buffer is allocated into the PSRAM just freed instead of
-    -- pushing the high-water mark up and fragmenting.
-    local function prune_bottom_to(n)
-        while #bubbles > n do drop(table.remove(bubbles)) end
-        if #bubbles > 0 then bot_off = bubbles[#bubbles].off1 end
+    -- fits: the window stays inside both limits with one more bubble of `bytes`.
+    -- room_from_bottom / room_from_top drop bubbles off that end until it does
+    -- (free-before-alloc: the new image is allocated into the PSRAM just freed
+    -- instead of pushing the high-water mark up and fragmenting). The entry
+    -- `stop` and the ones past it stay; false = no room without them.
+    local function fits(bytes)
+        return #bubbles < WIN_MAX and win_bytes + bytes <= WIN_BYTES
     end
-    local function prune_top_to(n)
-        while #bubbles > n do drop(table.remove(bubbles, 1)) end
-        if #bubbles > 0 then top_off = bubbles[1].off0 end
+    local function room_from_bottom(bytes, stop)
+        while not fits(bytes) do
+            local e = bubbles[#bubbles]
+            if not e or e == stop then return false end
+            drop(table.remove(bubbles))
+        end
+        return true
     end
-    local function prune_bottom() prune_bottom_to(WIN_MAX) end
-    local function prune_top() prune_top_to(WIN_MAX) end
+    local function room_from_top(bytes, stop)
+        while not fits(bytes) do
+            local e = bubbles[1]
+            if not e or e == stop then return false end
+            drop(table.remove(bubbles, 1))
+        end
+        return true
+    end
+    -- The window's edges are its first and last bubble's.
+    local function set_edges()
+        if #bubbles > 0 then
+            top_off = bubbles[1].off0
+            bot_off = bubbles[#bubbles].off1
+        end
+    end
 
     -- Hold a surviving bubble at its exact on-screen Y after the list mutated so
     -- the viewport never jumps. update_layout flushes the (otherwise deferred)
@@ -1402,50 +1464,106 @@ local function build_chat(target)
             pcall(function() e.obj:delete() end)   -- DELETE handler frees the baked buffer
         end
         bubbles = {}
+        win_bytes = 0
     end
     -- (Re)load the newest page at the tail; `scroll` snaps the view to the bottom.
+    -- Baked newest first, each onto the top: a page that does not fit the window
+    -- keeps its newest records (the newest one always goes in).
     local function load_tail(scroll)
         local r = fetch(0, 0)
         file_size = r.size or 0
-        for i = 1, #r.list do add_bottom(r.list[i]) end
+        for i = #r.list, 1, -1 do
+            local img = add_top(r.list[i], function(bytes)
+                return #bubbles == 0 or fits(bytes)
+            end)
+            if not img then break end
+        end
         if #bubbles > 0 then
-            top_off = bubbles[1].off0
-            bot_off = bubbles[#bubbles].off1
+            set_edges()
             if scroll then pcall(function() bubbles[#bubbles].obj:scroll_to_view(false) end) end
         else
             top_off, bot_off = 0, 0
         end
     end
 
+    -- The bubble a page keeps, with every bubble between it and the end the
+    -- page adds to. keep_below: the first one, top to bottom, whose bottom edge
+    -- is more than EDGE px below the list (the last bubble when none is).
+    -- keep_above: the last one, bottom to top, whose top edge is more than EDGE
+    -- px above the list (the first bubble when none is). With it kept the list
+    -- stays more than EDGE px from that end, so the page does not set off a
+    -- page the other way.
+    local function keep_below()
+        local okl, lc = pcall(function() return msg_list:get_coords() end)
+        if okl and lc and lc.y2 then
+            for _, e in ipairs(bubbles) do
+                local ok, c = pcall(function() return e.obj:get_coords() end)
+                if ok and c and c.y2 and c.y2 > lc.y2 + EDGE then return e end
+            end
+        end
+        return bubbles[#bubbles]
+    end
+    local function keep_above()
+        local okl, lc = pcall(function() return msg_list:get_coords() end)
+        if okl and lc and lc.y1 then
+            for i = #bubbles, 1, -1 do
+                local ok, c = pcall(function() return bubbles[i].obj:get_coords() end)
+                if ok and c and c.y1 and c.y1 < lc.y1 - EDGE then return bubbles[i] end
+            end
+        end
+        return bubbles[1]
+    end
+
     local function page_older()
         if top_off <= 0 or #bubbles == 0 then return end
         local a = bubbles[1].obj
         local yb, st0 = anchor_y(a), msg_list:get_scroll_top()
+        -- Room comes off the bottom, below the bubble keep_below names. `a`
+        -- (current top) is above it, so it stays a valid anchor.
+        local stop = keep_below()
         local r = fetch(1, top_off)
         file_size = r.size or file_size
         if #r.list == 0 then top_off = 0; return end   -- nothing older on disk
-        -- Free-before-alloc: drop the bottom to leave exactly room for the new
-        -- records, THEN bake them onto the top. `a` (current top) survives the
-        -- bottom prune, so it stays a valid anchor.
-        prune_bottom_to(math.max(0, WIN_MAX - #r.list))
-        for i = #r.list, 1, -1 do add_top(r.list[i]) end
-        top_off = bubbles[1].off0
+        -- Newest first, each onto the top. The page ends at the first record
+        -- with no room (its first record always goes in) or a failed bake;
+        -- the next page starts from the records left out.
+        local added = 0
+        for i = #r.list, 1, -1 do
+            local img = add_top(r.list[i], function(bytes)
+                return room_from_bottom(bytes, stop) or added == 0
+            end)
+            if not img then break end
+            added = added + 1
+        end
+        set_edges()
+        reanchor(a, yb, st0)
+    end
+
+    -- The records below the window, baked onto its bottom. Room comes off the
+    -- top, above the bubble keep_above names; `a` (current bottom) is below
+    -- it. The page ends as page_older's does.
+    local function extend_bottom()
+        local a = bubbles[#bubbles].obj
+        local yb, st0 = anchor_y(a), msg_list:get_scroll_top()
+        local stop = keep_above()
+        local r = fetch(2, bot_off)
+        file_size = r.size or file_size
+        if #r.list == 0 then return end
+        local added = 0
+        for i = 1, #r.list do
+            local img = add_bottom(r.list[i], function(bytes)
+                return room_from_top(bytes, stop) or added == 0
+            end)
+            if not img then break end
+            added = added + 1
+        end
+        set_edges()
         reanchor(a, yb, st0)
     end
 
     local function page_newer()
         if following() or #bubbles == 0 then return end
-        local a = bubbles[#bubbles].obj
-        local yb, st0 = anchor_y(a), msg_list:get_scroll_top()
-        local r = fetch(2, bot_off)
-        file_size = r.size or file_size
-        if #r.list == 0 then return end
-        -- Free-before-alloc: drop the top to leave room, THEN bake the new
-        -- records onto the bottom. `a` (current bottom) survives the top prune.
-        prune_top_to(math.max(0, WIN_MAX - #r.list))
-        for i = 1, #r.list do add_bottom(r.list[i]) end
-        bot_off = bubbles[#bubbles].off1
-        reanchor(a, yb, st0)
+        extend_bottom()
     end
 
     -- ALL window mutation runs from a one-shot timer, never inside an LVGL event
@@ -1524,12 +1642,15 @@ local function build_chat(target)
             if following() then
                 -- At the tail: append the echo itself so its live delivery status
                 -- keeps updating (remember_status registers it; onAck re-bakes
-                -- it); advance edges.
+                -- it); advance edges. Its room comes off the top.
                 local r = fetch(2, bot_off)
                 file_size = r.size or file_size
-                add_bottom_off(echo, bot_off, math.max(file_size, bot_off))
+                add_bottom_off(echo, bot_off, math.max(file_size, bot_off), function(bytes)
+                    room_from_top(bytes, nil)
+                    return true
+                end)
+                set_edges()
                 bot_off = file_size
-                prune_top()
             else
                 -- Scrolled up: rebuild at the tail so it stays a contiguous run
                 -- (the sent message shows without live status).
@@ -1545,16 +1666,7 @@ local function build_chat(target)
             -- untouched and mark that there's more below so a scroll-down pages it in.
             if #bubbles == 0 then return end
             if following() and msg_list:get_scroll_bottom() <= EDGE then
-                local a = bubbles[#bubbles].obj
-                local yb, st0 = anchor_y(a), msg_list:get_scroll_top()
-                local r = fetch(2, bot_off)
-                file_size = r.size or file_size
-                if #r.list > 0 then
-                    for i = 1, #r.list do add_bottom(r.list[i]) end
-                    prune_top()
-                    bot_off = bubbles[#bubbles].off1
-                    reanchor(a, yb, st0)
-                end
+                extend_bottom()
             elseif bot_off >= file_size then
                 file_size = bot_off + 1            -- there's more below now; unblock page_newer
             end
@@ -1622,10 +1734,11 @@ local function build_chat(target)
         for k = 1, #bubbles do if bubbles[k] == entry then pos = k; break end end
         if not pos then return end               -- pruned out of the window already
         local old = entry.obj
-        local new = bake_msg(m)                  -- appended at the list tail
+        local new, bytes = bake_msg(m)           -- appended at the list tail
         if not new then return end               -- bake failed (printed); keep the old bubble
         pcall(function() new:move_to_index(pos - 1) end)   -- drop it into the old slot
-        entry.obj = new
+        win_bytes = win_bytes - entry.bytes + bytes
+        entry.obj, entry.bytes = new, bytes
         pcall(function() old:delete() end)       -- delete cb frees the old buffer
     end
     run_rebake = function()

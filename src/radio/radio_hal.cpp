@@ -24,6 +24,9 @@ static RadioChip* s_chip = nullptr;
 // main.cpp's SX1262 object (RADIO_CLASS radio): the chip on the SX1262
 // boards and on the T-Display P4's SX1262 SKU.
 static SX1262*    s_sx1262 = nullptr;
+// The chip's IRQ GPIO (radio_chip.h irqGpio()), -1 where there is none; set
+// by a successful radio_hal_begin().
+static int        s_irq_gpio = -1;
 
 // Last-programmed state the recovery/score paths need back: operating
 // frequency (image recalibration after an AGC reset), spreading factor
@@ -106,6 +109,14 @@ bool radio_hal_begin() {
     // the board every boot.
     SLog.println("[RADIO] chip not driven after the failed begin(): radio off");
     s_chip = nullptr;
+  } else {
+    s_irq_gpio = s_chip->irqGpio();
+    if (s_irq_gpio >= 0) {
+      SLog.printf("[RADIO] IRQ register read only while its line (GPIO%d) is high\n",
+                  s_irq_gpio);
+    } else {
+      SLog.println("[RADIO] IRQ register read on every poll (no IRQ GPIO)");
+    }
   }
   return state == RADIOLIB_ERR_NONE;
 }
@@ -205,6 +216,9 @@ bool radio_hal_in_recv() { return s_in_recv; }
 
 uint32_t radio_hal_poll_irq() {
   if (!s_chip) return 0;
+  // The IRQ line low: none of the flags the callers test is latched
+  // (radio_chip.h irqGpio()), and the bus is not touched.
+  if (s_irq_gpio >= 0 && digitalRead(s_irq_gpio) == LOW) return 0;
   SPI_LOCK();
   uint32_t flags = s_chip->irqFlags();
   SPI_UNLOCK();

@@ -23,8 +23,9 @@
 
 #include <Mesh.h>
 
-// SX126x IRQ register bits (the host's poll_irq returns the chip register
-// verbatim; values match RadioLib's RADIOLIB_SX126X_IRQ_*).
+// SX126x IRQ register bits (the host's poll_irq returns the chip register,
+// or 0 while none of TX_DONE / RX_DONE / HEADER_VALID is latched — see
+// lora_proto_abi.h; values match RadioLib's RADIOLIB_SX126X_IRQ_*).
 #define MC_IRQ_TX_DONE   0x0001u
 #define MC_IRQ_RX_DONE   0x0002u
 #define MC_IRQ_PREAMBLE  0x0004u

@@ -60,8 +60,25 @@ public:
   int16_t setOutputPower(int8_t chip_dbm) override     { return r->setOutputPower(chip_dbm); }
   int16_t setRxBoost(bool on) override                 { return r->setRxBoostedGainMode(on, true); }
 
-  int16_t  startReceive() override                     { return r->startReceive(); }
+  // RadioLib's receive IRQ set (RX_DONE, TIMEOUT, CRC_ERR, HEADER_VALID,
+  // HEADER_ERR), with HEADER_VALID routed onto DIO1 beside RX_DONE where
+  // DIO1 is a GPIO: the HAL reads the IRQ register only while that line is
+  // high (irqGpio(), radio_chip.h), and the CSMA check tests HEADER_VALID.
+  // Transmit keeps RadioLib's mapping: TX_DONE on DIO1.
+  int16_t startReceive() override {
+    RadioLibIrqFlags_t dio1 = RADIOLIB_IRQ_RX_DEFAULT_MASK;
+    if (irqGpio() >= 0) dio1 |= (1UL << RADIOLIB_IRQ_HEADER_VALID);
+    return r->startReceive(RADIOLIB_SX126X_RX_TIMEOUT_INF, RADIOLIB_IRQ_RX_DEFAULT_FLAGS, dio1, 0);
+  }
   uint32_t irqFlags() override                         { return r->getIrqFlags(); }
+  // DIO1, as main.cpp's Module was given it (PIN_LORA_DIO1); RADIOLIB_NC
+  // on the T-Display P4's SX1262 SKU, whose DIO1 is an expander input.
+  // getMod() is below RadioLib's public API (RADIOLIB_GODMODE, lib/RadioLib
+  // src/BuildOpt.h).
+  int irqGpio() const override {
+    uint32_t pin = r->getMod()->getIrq();
+    return pin == RADIOLIB_NC ? -1 : (int)pin;
+  }
   size_t   packetLength() override                     { return r->getPacketLength(); }
   int16_t  readData(uint8_t* buf, size_t len) override { return r->readData(buf, len); }
   int16_t  startTransmit(const uint8_t* buf, size_t len) override { return r->startTransmit(buf, len); }

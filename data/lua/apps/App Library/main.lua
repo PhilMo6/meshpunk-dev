@@ -435,6 +435,18 @@ local function notice(text)
     end)
 end
 
+-- An install, update or remove that did not complete: the reason stays on
+-- screen until Close and goes to the console as an [APPLIB] line. A cancel
+-- is only a toast.
+local function failed(what, err)
+    if err == "cancelled" then
+        toast("Cancelled")
+        return
+    end
+    print("[APPLIB] " .. what .. ": " .. tostring(err))
+    notice(what .. "\n\n" .. tostring(err))
+end
+
 -- ── Installed scan ───────────────────────────────────────────────────────────
 -- Tracked apps are those with a .version file. Every firmware app now ships
 -- one, and store installs write one, so this maps the catalog to what's on
@@ -808,7 +820,8 @@ end
 -- An app entry may carry drivers = { "<id>", ... } (ids from the catalog's
 -- [[drivers]] list). They install AFTER the app, to the same location, one
 -- run_install modal each. Already-installed ids are skipped (updates stay
--- explicit in Tools/USB); a failed dep toasts but never rolls back the app;
+-- explicit in Tools/USB); a failed dep shows its reason (failed) but never
+-- rolls back the app;
 -- removal never touches drivers (they're shared between apps).
 -- Drivers are the ONE dependency kind that installs on its own: they are
 -- invisible plumbing for the app. LoRa protocols are deliberately NOT — see
@@ -847,7 +860,7 @@ local function install_driver_deps(entry, loc, done)
             entry = de, kind = "drivers", loc = loc,
             final_dir = DRV_BASES[loc] .. "/" .. de.id,
             on_done = function(err)
-                if err then toast("Driver " .. de.id .. ": " .. tostring(err)) end
+                if err then failed("Driver " .. de.id, err) end
                 next_dep()
             end,
         })
@@ -909,10 +922,10 @@ local function relocate_bleprotos(pe)
             -- card-hosted package (the companion always lives on L:).
             local ok, err = fileman.move(dir .. "/" .. e.name, pdir .. "/" .. e.name)
             if not ok then
-                toast("BLE proto move failed: " .. tostring(err))
+                failed("BLE " .. pid, "Move failed: " .. tostring(err))
             elseif not fileman.write(pdir .. "/.version",
                     tostring(pe.version or "?") .. "\ninternal\n\nid=" .. pid) then
-                toast("BLE proto marker write failed: " .. pid)
+                failed("BLE " .. pid, "Marker write failed")
             end
         end
     end
@@ -1033,10 +1046,8 @@ local function install_done(entry, verb, after)
         pcall(apps.refresh)   -- launcher registry picks up the change
         scan_installed()
         refresh_view()
-        if err == "cancelled" then
-            toast("Cancelled")
-        elseif err then
-            toast(err)
+        if err then
+            failed(entry.name, err)
         else
             toast(verb .. " " .. entry.name)
             if after then after() end
@@ -1046,8 +1057,8 @@ end
 
 -- The install/update itself, location already decided. `inst` = installed
 -- record for an update (nil = fresh install at `loc`). finish(err) runs
--- after the app AND its driver deps (a driver failure toasts, never fails
--- the app).
+-- after the app AND its driver deps (a driver failure shows its reason,
+-- never fails the app).
 local function install_app_at(entry, inst, loc, finish)
     if inst then
         -- Update in the location the app already lives in. The DIRECTORY is
@@ -1110,8 +1121,9 @@ local function do_install(entry, inst, after)
 end
 
 -- Sequential batch (the protocol-first apps offer): every app in `list`
--- installs or updates at `loc`, one progress modal after another; each
--- result toasts, the registry refreshes ONCE at the end (the rescan blocks
+-- installs or updates at `loc`, one progress modal after another; a success
+-- toasts and a failure stays up (failed), the registry refreshes ONCE at
+-- the end (the rescan blocks
 -- for seconds — not once per app). done() runs after the last one.
 local function install_app_batch(list, loc, done)
     local i = 0
@@ -1129,8 +1141,7 @@ local function install_app_batch(list, loc, done)
         local at = loc
         if inst then at = (fileman.split(inst.dir) == "S") and "sd" or "internal" end
         install_app_at(ae, inst, at, function(err)
-            if err == "cancelled" then toast("Cancelled " .. ae.name)
-            elseif err then toast(ae.name .. ": " .. tostring(err))
+            if err then failed(ae.name, err)
             else toast((inst and "Updated " or "Installed ") .. ae.name) end
             next_app()
         end)
@@ -1206,7 +1217,7 @@ local function do_remove_proto(pe)
                 parent_base = PROTO_BASES[loc],
                 on_done = function(err)
                     refresh_view()
-                    if err then toast(err) else toast("Removed " .. pe.name .. " protocol") end
+                    if err then failed(pe.name, err) else toast("Removed " .. pe.name .. " protocol") end
                 end,
             })
         end)
@@ -1234,7 +1245,7 @@ local function do_remove_bleproto(bp)
                 parent_base = BLEPROTO_BASE,
                 on_done = function(err)
                     refresh_view()
-                    if err then toast(err) else toast("Removed BLE " .. bp.pid) end
+                    if err then failed("BLE " .. bp.pid, err) else toast("Removed BLE " .. bp.pid) end
                 end,
             })
         end)
@@ -1299,8 +1310,8 @@ local function proto_menu(pe)
         local function reinstall()
             run_proto_install(pe, nil, function(err)
                 if err then
-                    toast(err == "cancelled" and "Cancelled" or err)
                     refresh_view()
+                    failed(pe.name, err)
                     return
                 end
                 refresh_view()
@@ -1324,8 +1335,8 @@ local function proto_menu(pe)
                 pick_location(function(loc)
                     run_proto_install(pe, loc, function(err)
                         if err then
-                            toast(err == "cancelled" and "Cancelled" or err)
                             refresh_view()
+                            failed(pe.name, err)
                             return
                         end
                         refresh_view()
@@ -1415,7 +1426,7 @@ local function proto_update_row(content, su)
     nav.tap(row, function()
         run_proto_install(pe, nil, function(err)
             if err then
-                if err ~= "cancelled" then toast("Protocol: " .. tostring(err)) end
+                failed(pe.name, err)
                 return
             end
             proto_updated_prompt()
@@ -1442,7 +1453,7 @@ local function driver_update_row(content, du)
             final_dir = inst.dir, old_dir = inst.dir,
             on_done = function(err)
                 if err then
-                    if err ~= "cancelled" then toast("Driver: " .. tostring(err)) end
+                    failed(de.name or de.id, err)
                     return
                 end
                 toast("Updated driver " .. (de.name or de.id))
@@ -1468,7 +1479,7 @@ local function bleproto_issue_row(content, bi)
     nav.tap(row, function()
         run_proto_install(pe, nil, function(err)
             if err then
-                if err ~= "cancelled" then toast("Protocol: " .. tostring(err)) end
+                failed(pe.name, err)
                 return
             end
             proto_updated_prompt()
@@ -1512,7 +1523,7 @@ local function do_remove_theme(name, inst)
             on_done = function(err)
                 scan_themes()
                 refresh_view()
-                if err then toast(err) else toast("Removed " .. name) end
+                if err then failed(name, err) else toast("Removed " .. name) end
             end,
         })
     end)
@@ -1565,7 +1576,7 @@ local function theme_menu(te, inst)
             return function(err)
                 refresh_view()
                 if err then
-                    toast(err == "cancelled" and "Cancelled" or err)
+                    failed(name, err)
                 else
                     toast(verb .. " " .. name)
                 end
@@ -1666,7 +1677,7 @@ local function theme_update_row(content, tu)
     nav.tap(row, function()
         run_theme_install(te, nil, function(err)
             if err then
-                if err ~= "cancelled" then toast("Theme: " .. tostring(err)) end
+                failed(te.name, err)
                 return
             end
             refresh_view()
@@ -1686,7 +1697,7 @@ local function do_remove(name, dir)
                 pcall(apps.refresh)
                 scan_installed()
                 refresh_view()
-                if err then toast(err) else toast("Removed " .. name) end
+                if err then failed(name, err) else toast("Removed " .. name) end
             end,
         })
     end)
@@ -1779,8 +1790,8 @@ local function app_menu(entry, inst)
                     pick_location(function(loc)
                         run_proto_install(pe, loc, function(err)
                             if err then
-                                toast(err == "cancelled" and "Cancelled" or err)
                                 refresh_view()
+                                failed(pe.name, err)
                                 return
                             end
                             toast("Installed " .. pe.name .. " protocol")

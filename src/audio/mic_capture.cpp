@@ -8,6 +8,11 @@
 // only shared state. A full ring drops the newest samples and counts them;
 // the count is printed at stop, with every input's RMS and peak.
 //
+// The ring is a session's: mic_capture_start() allocates it,
+// mic_capture_stop() frees it once the reader task has left the session. A
+// read (any task) copies from the ring while it holds s_ring_lock, and the
+// free takes the same lock.
+//
 // The reader task normally lives for one session. mic_capture_reserve(true)
 // creates it ahead of the sessions and keeps it parked between them, so a
 // session start needs no new memory (its stack must be internal RAM, the
@@ -25,7 +30,8 @@
 
 #define MIC_CHUNK_FRAMES 256    // stereo frames per i2s_read: 1 KB at 16-bit slots, 2 KB at 32-bit
 
-static int16_t*          s_ring     = NULL;
+static int16_t*          s_ring     = NULL;  // a session's ring; NULL between sessions
+static SemaphoreHandle_t s_ring_lock = NULL; // held to copy from s_ring and to set it
 static uint8_t           s_slot_bits = 16;   // mic_hw_slot_bits() of the running port
 static uint8_t           s_input     = 1;    // mic_capture_set_input(): the input sessions take
 static uint8_t           s_n_inputs  = 0;    // mic_hw_inputs() of the running session
@@ -170,16 +176,45 @@ void mic_capture_standby(bool asleep) {
   }
 }
 
+// The session's ring. A ring the last session could not free (its reader
+// task had not stopped) is taken as it is.
+static bool ring_alloc(void) {
+  if (!s_ring_lock) {
+    s_ring_lock = xSemaphoreCreateMutex();
+    if (!s_ring_lock) { SLog.println("[MIC] FAIL: ring lock (no internal RAM for a mutex)"); return false; }
+  }
+  if (s_ring) return true;
+  const size_t bytes = MIC_RING_SAMPLES * sizeof(int16_t);
+  int16_t* ring = (int16_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+  if (!ring) {
+    SLog.printf("[MIC] FAIL: ring allocation (%u B of PSRAM in one block; the largest free block is %u B)\n",
+                (unsigned)bytes, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    return false;
+  }
+  xSemaphoreTake(s_ring_lock, portMAX_DELAY);
+  s_ring = ring;
+  xSemaphoreGive(s_ring_lock);
+  return true;
+}
+
+// Waits for a read in progress (s_ring_lock). Frees nothing while the reader
+// task is in a session (s_go): it writes the ring.
+static void ring_free(void) {
+  if (!s_ring_lock || s_go) return;
+  xSemaphoreTake(s_ring_lock, portMAX_DELAY);
+  int16_t* ring = s_ring;
+  s_ring = NULL;
+  xSemaphoreGive(s_ring_lock);
+  if (ring) heap_caps_free(ring);
+}
+
 bool mic_capture_start(void) {
   if (s_running) return true;
   if (mic_hw_kind() == MIC_DEV_NONE) {
     SLog.println("[MIC] no microphone on this board");
     return false;
   }
-  if (!s_ring) {
-    s_ring = (int16_t*)heap_caps_malloc(MIC_RING_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-    if (!s_ring) { SLog.println("[MIC] FAIL: ring allocation (PSRAM)"); return false; }
-  }
+  if (!ring_alloc()) return false;
   s_head = 0; s_tail = 0; s_peak = 0; s_dropped = 0; s_stop_req = false;
   s_sess_n = 0;
   for (uint8_t k = 0; k < MIC_MAX_INPUTS; k++) { s_sess_sq[k] = 0; s_sess_peak[k] = 0; }
@@ -187,18 +222,21 @@ bool mic_capture_start(void) {
   if (s_n_inputs < 1 || s_n_inputs > MIC_MAX_INPUTS || s_input > s_n_inputs) {
     SLog.printf("[MIC] FAIL: input %u of %u (the engine takes 1..%u inputs)\n",
                 (unsigned)s_input, (unsigned)s_n_inputs, (unsigned)MIC_MAX_INPUTS);
+    ring_free();
     return false;
   }
   for (uint8_t k = 0; k < s_n_inputs; k++) mic_hw_input_pos((uint8_t)(k + 1), &s_pos_slot[k], &s_pos_shift[k]);
   sound_suspend();                                 // playback muted for the session, every board
   if (!mic_hw_start(MIC_RATE_HZ, &s_port)) {
     sound_resume();
+    ring_free();
     return false;
   }
   s_slot_bits = mic_hw_slot_bits();
   if (!s_task && !reader_create()) {
     mic_hw_stop();
     sound_resume();
+    ring_free();
     return false;
   }
   s_running = true;
@@ -225,6 +263,8 @@ void mic_capture_stop(void) {
   s_running = false;
   mic_hw_stop();
   sound_resume();
+  if (s_go) SLog.println("[MIC] ring kept: the reader task has not left the session");
+  ring_free();
   uint32_t n = s_sess_n;
   char     lv[200];
   size_t   len = 0;
@@ -241,12 +281,18 @@ void mic_capture_stop(void) {
 bool mic_capture_running(void) { return s_running; }
 
 size_t mic_capture_read(int16_t* out, size_t max_samples) {
-  uint32_t head  = s_head;
-  uint32_t tail  = s_tail;
-  size_t   avail = (size_t)(head - tail);
-  size_t   n     = avail < max_samples ? avail : max_samples;
-  for (size_t i = 0; i < n; i++) out[i] = s_ring[(tail + i) % MIC_RING_SAMPLES];
-  s_tail = tail + (uint32_t)n;
+  if (!s_ring_lock) return 0;
+  size_t n = 0;
+  xSemaphoreTake(s_ring_lock, portMAX_DELAY);
+  if (s_ring) {
+    uint32_t head  = s_head;
+    uint32_t tail  = s_tail;
+    size_t   avail = (size_t)(head - tail);
+    n = avail < max_samples ? avail : max_samples;
+    for (size_t i = 0; i < n; i++) out[i] = s_ring[(tail + i) % MIC_RING_SAMPLES];
+    s_tail = tail + (uint32_t)n;
+  }
+  xSemaphoreGive(s_ring_lock);
   return n;
 }
 

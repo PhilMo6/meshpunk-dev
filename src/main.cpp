@@ -6,6 +6,8 @@
 #include "storage/sd_dev.h"
 #include <Ticker.h> // Include ticker for LVGL timing
 #include <WiFi.h>
+#include <esp_wifi.h>      // driver calls: scan start/stop, modem sleep mode
+#include <errno.h>         // a failed download write reports its errno
 #include <Wire.h>
 #include <esp_heap_caps.h> // DMA-capable buffer allocation for LVGL
 #include <esp_sleep.h>     // standby light sleep (standby_run)
@@ -14,6 +16,7 @@
 #include <mbedtls/platform.h> // runtime override of mbedTLS allocator (TLS -> PSRAM)
 #include "multi_heap.h" // ESP-IDF arena allocator for the Lua PSRAM arena
 #include <lvgl.h>
+#include "lv_mem_psram.h"  // LVGL's small-block pool
 #include "theme/lv_theme_meshpunk.h"
 #include "emoji_font.h"
 #include "theme_font.h"
@@ -557,9 +560,11 @@ static bool wifi_creds_forget(const char *ssid) {
 // STA is mid-connect esp_wifi_scan_start() fails, which is why the Wireless
 // app showed "No networks found" whenever a network was saved. So:
 // auto-reconnect is OFF (setup() calls WiFi.setAutoReconnect(false)) and all
-// connect policy lives here as bounded rounds: one async scan, then one
-// begin() per known network heard in the scan, strongest first. If nothing
-// connects the radio is parked (WIFI_OFF) until the next trigger — boot,
+// connect policy lives here as bounded rounds: one async scan (and a second
+// one in the case wifi_auto_on_scan_done describes), then a begin() per
+// known network heard, strongest first, and one more for a network whose
+// join the driver reports as failed. If nothing connects the radio is
+// parked (WIFI_OFF) until the next trigger — boot,
 // WiFi toggled on, a scan/join in the Wireless app, or an app calling
 // _wifi_auto_connect (the downloader does before fetching). After an
 // unexpected AP loss one grace round runs ~10s later; if that fails the
@@ -571,17 +576,211 @@ enum WifiAutoState : uint8_t { WA_IDLE, WA_SCANNING, WA_CONNECTING };
 static WifiAutoState wa_state = WA_IDLE;
 static uint32_t wa_deadline = 0;         // current phase timeout (millis)
 static int      wa_cand[WIFI_MAX_NETS];  // saved-cred indices, strongest first
+static uint8_t  wa_cand_chan[WIFI_MAX_NETS];  // the channel the scan heard each candidate on
+static int32_t  wa_cand_rssi[WIFI_MAX_NETS];  // its RSSI in that scan
 static int      wa_cand_count = 0;
 static int      wa_cand_next = 0;
+static bool     wa_second_pass = false;   // the round's second scan pass is the one in progress
 static uint8_t  wa_scan_retries = 0;
 static bool     wa_user_scan = false;     // Wireless app is waiting on this scan
 static bool     wa_was_connected = false; // successful connect since last failure
 static uint32_t wa_reconnect_at = 0;      // pending grace round after AP loss
+static uint32_t wa_scan_t0 = 0;           // millis() at the latest scan start
+static uint32_t wa_join_t0 = 0;           // millis() at the round's latest begin()
+// Join outcome from the driver events. Arduino's WiFi.begin() leaves the
+// station status of the previous attempt in place (only driver events change
+// it), so a round's join is judged by the events after its own begin(): a
+// STA_DISCONNECTED for the network being joined, with any reason except
+// ASSOC_LEAVE (our own disconnect), bumps wa_join_fails. The event task
+// writes wa_join_fails / wa_join_fail_reason; wifi_auto_tick() reads them.
+static volatile uint32_t wa_join_fails = 0;
+static volatile uint8_t  wa_join_fail_reason = 0;
+static uint32_t wa_join_fails_at_begin = 0;   // wa_join_fails at the round's latest begin()
+static char     wa_join_ssid[33] = "";         // the network the round is joining
+static uint8_t  wa_join_attempt = 0;           // 1 or 2: which join of that network is in progress
+static bool     wa_join_again = false;         // the second join of it begins at the next tick
+// Scan outcome from the driver events. Scans are started in
+// wifi_scan_begin(). Arduino's WiFi class copies the driver's records at the
+// scan-done event (_scanDone(), WiFiScan.cpp), at a failed scan's event as
+// at a finished one; Arduino core 3 does so only for a scan its own
+// scanNetworks() started. WiFi.scanComplete(), SSID(i), RSSI(i), channel(i)
+// and scanDelete() read and free that copy. A scan is followed by its own
+// done event: the event task stores the event count (upper 24 bits) and the
+// latest event's status (lower 8 bits: 0 = done, 1 = failed) in
+// wa_scan_event with one write. wa_scan_mark is that count as it was before
+// the scan was started; wa_scan_started says the start was accepted.
+static volatile uint32_t wa_scan_event = 0;
+static uint32_t wa_scan_mark = 0;
+static bool     wa_scan_started = false;
 
-static void wifi_radio_park() {
+enum WifiScanState : uint8_t {
+  WS_NONE,      // nothing to wait for: no scan started, or the start was refused
+  WS_RUNNING,   // started, its done event has not arrived
+  WS_DONE,      // the driver finished it; WiFi.scanComplete() is its network count
+  WS_FAILED     // the driver ended it with status 1
+};
+static WifiScanState wifi_scan_state() {
+  if (!wa_scan_started) return WS_NONE;
+  uint32_t ev = wa_scan_event;
+  if ((ev >> 8) == wa_scan_mark) return WS_RUNNING;
+  return (ev & 0xFF) == 0 ? WS_DONE : WS_FAILED;
+}
+
+// [WIFI] lines carry the uptime (seconds.ms), so a capture lines the connect
+// round up against setup() and the driver events. The line is formatted into
+// one buffer and printed with println (no second printf pass): the WiFi
+// event task logs through this too.
+static void wifi_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void wifi_log(const char *fmt, ...) {
+  char line[208];
+  uint32_t ms = millis();
+  int k = snprintf(line, sizeof(line), "[WIFI %lu.%03lu] ",
+                   (unsigned long)(ms / 1000), (unsigned long)(ms % 1000));
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(line + k, sizeof(line) - k, fmt, ap);
+  va_end(ap);
+  SLog.println(line);
+}
+
+static const char *wifi_status_name(wl_status_t st) {
+  switch (st) {
+    case WL_IDLE_STATUS:     return "idle";
+    case WL_NO_SSID_AVAIL:   return "no SSID";
+    case WL_SCAN_COMPLETED:  return "scan completed";
+    case WL_CONNECTED:       return "connected";
+    case WL_CONNECT_FAILED:  return "connect failed";
+    case WL_CONNECTION_LOST: return "connection lost";
+    case WL_DISCONNECTED:    return "disconnected";
+    case WL_NO_SHIELD:       return "no radio";
+    default:                 return "other";
+  }
+}
+
+// How long a scan listens on each channel, in ms. What follows is the S3
+// boards' driver (ESP-IDF 4.4). Under its default country policy (auto),
+// which is in force here, a station that is not connected scans 14
+// channels: 1 to 11 actively, 12 to 14 passively. For an active channel the
+// driver takes a min and a max time: it leaves the channel after min when
+// nothing was heard there by then, and after max otherwise. For a passive
+// channel it takes one time (360 ms when the config gives 0). While
+// Bluetooth coexistence is active it takes its time per channel from the
+// coexistence scheme instead. Its join search (esp_wifi_connect) sets no
+// times of its own for a station; it runs on the times of the latest scan
+// config.
+static const uint32_t WIFI_SCAN_LISTEN_MS = 300;
+
+// Start an async scan; the radio must already be in station mode. Every
+// call arms a fresh 12 s deadline for the WA_SCANNING phase. While a scan
+// started here still waits for its done event no second one is started, and
+// that scan's done event is the one waited for.
+// Arduino core 2 (the S3 boards): the scan is started with the driver's
+// esp_wifi_scan_start(), with the active min, the active max and the
+// passive time all WIFI_SCAN_LISTEN_MS; that core's scanNetworks() fixes the
+// active min at 100 ms. Arduino's copy of the scan before is freed first, as
+// its scanNetworks() does.
+// Arduino core 3 (the T-Display P4): the scan is started with
+// WiFi.scanNetworks(), with the active min and max WIFI_SCAN_LISTEN_MS; that
+// core copies the records only of a scan its own scanNetworks() started.
+// The log line records what the start depended on: the WiFi mode (0 = radio
+// off, 1 = station), the station status and the internal heap the driver
+// allocates its receive buffers from. Returns true when a scan is running.
+static bool wifi_scan_begin(const char *who) {
+  bool was_running = wifi_scan_state() == WS_RUNNING;
+  char how[40] = "one was already running";
+  if (!was_running) {
+    wa_scan_mark = wa_scan_event >> 8;   // taken before the start: the next done event is this scan's
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+    WiFi.setScanActiveMinTime(WIFI_SCAN_LISTEN_MS);
+    wa_scan_started =
+        WiFi.scanNetworks(true, false, false, WIFI_SCAN_LISTEN_MS) == WIFI_SCAN_RUNNING;
+    snprintf(how, sizeof(how), "%s", wa_scan_started ? "started" : "refused");
+#else
+    WiFi.scanDelete();
+    wifi_scan_config_t cfg = {};
+    cfg.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+    cfg.scan_time.active.min = WIFI_SCAN_LISTEN_MS;
+    cfg.scan_time.active.max = WIFI_SCAN_LISTEN_MS;
+    cfg.scan_time.passive = WIFI_SCAN_LISTEN_MS;
+    esp_err_t err = esp_wifi_scan_start(&cfg, false);
+    wa_scan_started = (err == ESP_OK);
+    if (wa_scan_started) snprintf(how, sizeof(how), "started");
+    else                 snprintf(how, sizeof(how), "refused (error 0x%x)", (unsigned)err);
+#endif
+    wa_scan_t0 = millis();
+  }
+  wa_deadline = millis() + 12000;
+  wifi_log("scan start (%s): %s; mode %d, %s, internal heap %u free / %u largest",
+           who, how,
+           (int)WiFi.getMode(), wifi_status_name(WiFi.status()),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  return wa_scan_started;
+}
+
+// The network count of the scan wifi_scan_state() reports as WS_DONE:
+// Arduino's copy of the driver's records, made at that done event. A
+// negative value means Arduino holds no finished scan (its done flag is
+// clear); the next done event is then the one followed.
+static int wifi_scan_take() {
+  int n = WiFi.scanComplete();
+  if (n < 0) wa_scan_mark = wa_scan_event >> 8;
+  return n;
+}
+
+// What a finished scan heard: the count, the five strongest networks, and
+// every saved network outside those five.
+static void wifi_scan_log(int n) {
+  wifi_log("scan done: %d network(s), %lu ms after its start", n,
+           (unsigned long)(millis() - wa_scan_t0));
+  int top[5];
+  int ntop = 0;
+  for (int i = 0; i < n; i++) {
+    int32_t r = WiFi.RSSI(i);
+    if (ntop == 5 && r <= WiFi.RSSI(top[4])) continue;   // weaker than all five
+    int pos = (ntop < 5) ? ntop++ : 4;                  // full: replace the weakest
+    while (pos > 0 && WiFi.RSSI(top[pos - 1]) < r) {    // keep top[] strongest first
+      top[pos] = top[pos - 1];
+      pos--;
+    }
+    top[pos] = i;
+  }
+  for (int k = 0; k < ntop; k++) {
+    int i = top[k];
+    bool saved = wifi_creds_find(WiFi.SSID(i).c_str()) >= 0;
+    wifi_log("  %s %ld dBm ch %ld %s%s", WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i),
+             (long)WiFi.channel(i), WiFi.BSSIDstr(i).c_str(), saved ? " (saved)" : "");
+  }
+  for (int i = 0; i < n; i++) {
+    bool in_top = false;
+    for (int k = 0; k < ntop; k++) in_top = in_top || (top[k] == i);
+    if (in_top || wifi_creds_find(WiFi.SSID(i).c_str()) < 0) continue;
+    wifi_log("  %s %ld dBm ch %ld %s (saved)", WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i),
+             (long)WiFi.channel(i), WiFi.BSSIDstr(i).c_str());
+  }
+  // Every result counted by channel ("ch:count"), strongest RSSI per channel.
+  int per_ch[15] = {0};
+  int best_ch[15];
+  for (int c = 0; c < 15; c++) best_ch[c] = -127;
+  for (int i = 0; i < n; i++) {
+    long ch = WiFi.channel(i);
+    if (ch < 1 || ch > 14) continue;
+    per_ch[ch]++;
+    if (WiFi.RSSI(i) > best_ch[ch]) best_ch[ch] = WiFi.RSSI(i);
+  }
+  char chans[160];
+  int len = 0;
+  chans[0] = '\0';
+  for (int c = 1; c <= 14 && len < (int)sizeof(chans) - 16; c++) {
+    if (per_ch[c]) len += snprintf(chans + len, sizeof(chans) - len, " %d:%d(%d)", c, per_ch[c], best_ch[c]);
+  }
+  wifi_log("  per channel:%s", len ? chans : " none");
+}
+
+static void wifi_radio_park(const char *why) {
   UsbFlashGuard _g;
   WiFi.disconnect(true);   // true = radio off too
-  SLog.println("[WIFI] no known network reachable — radio parked");
+  wifi_log("radio parked: %s", why);
 }
 
 // Start a connect round (scan phase). Returns false when there is nothing to
@@ -590,62 +789,121 @@ static bool wifi_auto_kick() {
   if (!wifi_enabled_pref || wifi_saved_count == 0) return false;
   if (WiFi.status() == WL_CONNECTED) return true;
   if (wa_state != WA_IDLE) return true;   // round already in the works
+  wifi_log("connect round: scanning for known networks");
   {
     UsbFlashGuard _g;          // mode/begin can write PHY cal to NVS
-    WiFi.mode(WIFI_STA);       // radio may be parked
+    if (!WiFi.mode(WIFI_STA))  // radio may be parked
+      wifi_log("radio did not switch to station mode");
     WiFi.disconnect();         // abort any in-flight begin() so the scan can start
-    WiFi.scanNetworks(true);   // async; tick retries if it couldn't start yet
+    wifi_scan_begin("connect round");   // async; tick retries if it couldn't start yet
   }
   wa_state = WA_SCANNING;
-  wa_deadline = millis() + 12000;
   wa_scan_retries = 0;
-  SLog.println("[WIFI] connect round: scanning for known networks");
+  wa_second_pass = false;
   return true;
 }
 
-static void wifi_auto_fail_round() {
-  wa_state = WA_IDLE;
-  wa_was_connected = false;
-  wa_reconnect_at = 0;
-  wifi_radio_park();
+// True while this chip's Bluetooth controller is started. On the Bluedroid
+// boards ble_transport_stack_up() starts it at boot when a BLE protocol is
+// selected. The T-Display P4's controller is on its C6 radio chip and comes
+// up with the BLE transport; this reads false there.
+static bool bt_controller_started() {
+#if defined(CONFIG_BLUEDROID_ENABLED)
+  return btStarted();
+#else
+  return false;
+#endif
 }
 
-// Scan finished with n results still in the driver: pick known networks,
-// strongest first, and start connecting. Does NOT scanDelete — the caller
-// owns the results (lua_wifi_scan_results also reads them for the UI).
+// End a connect round that did not connect. A station that is connected at
+// this point keeps its connection and the radio stays on; otherwise the
+// radio is parked.
+static void wifi_auto_fail_round(const char *why) {
+  wa_state = WA_IDLE;
+  if (WiFi.status() == WL_CONNECTED) {
+    wifi_log("round ended: %s; the station is connected, radio left on", why);
+    return;
+  }
+  wa_was_connected = false;
+  wa_reconnect_at = 0;
+  wifi_radio_park(why);
+}
+
+// Begin a join of saved network idx as one step of a connect round. attempt
+// is 1 for a candidate's first join and 2 for the one more it gets when the
+// driver reports the first as failed. channel is the one the round's scan
+// heard it on; it goes into the station config, and the driver's join
+// search starts its channel list there.
+static void wifi_round_begin(int idx, uint8_t channel, uint8_t attempt) {
+  wa_join_attempt = attempt;
+  wa_join_again = false;
+  strncpy(wa_join_ssid, wifi_saved_ssid[idx].c_str(), sizeof(wa_join_ssid) - 1);
+  wa_join_ssid[sizeof(wa_join_ssid) - 1] = '\0';
+  wa_join_fails_at_begin = wa_join_fails;
+  { UsbFlashGuard _g; WiFi.begin(wifi_saved_ssid[idx].c_str(), wifi_saved_pass[idx].c_str(), channel); }
+  wa_join_t0 = millis();
+  wa_deadline = wa_join_t0 + 10000;
+}
+
+// The round's scanning is over: join its strongest candidate, or end the
+// round when no saved network was heard.
+static void wifi_round_join_first() {
+  wa_second_pass = false;
+  if (wa_cand_count == 0) {
+    wifi_auto_fail_round("the scan heard no saved network");
+    return;
+  }
+  int pos = wa_cand_next++;
+  int idx = wa_cand[pos];
+  wifi_log("connecting to %s (channel %d; %d known network(s) in range)",
+           wifi_saved_ssid[idx].c_str(), (int)wa_cand_chan[pos], wa_cand_count);
+  wifi_round_begin(idx, wa_cand_chan[pos], 1);
+  wa_state = WA_CONNECTING;
+}
+
+// A scan of the connect round finished with n results in Arduino's copy.
+// The saved networks among them go into the candidate list, strongest
+// first; one the round's first pass listed keeps that entry. Arduino's copy
+// is freed here (a caller that needs the results reads them first). While
+// the Bluetooth controller is started (the driver's coexistence scheme sets
+// a scan's time per channel then) and a saved network is still unheard
+// after the first pass, the round scans a second time. Otherwise, and after
+// the second pass, the strongest candidate is joined.
 static void wifi_auto_on_scan_done(int n) {
-  wa_cand_count = 0;
+  if (!wa_second_pass) wa_cand_count = 0;
   wa_cand_next = 0;
-  bool seen[WIFI_MAX_NETS] = {false};
-  int32_t rssi[WIFI_MAX_NETS];
   for (int i = 0; i < n; i++) {
     int idx = wifi_creds_find(WiFi.SSID(i).c_str());
-    if (idx < 0 || seen[idx]) continue;
-    seen[idx] = true;
+    if (idx < 0) continue;
+    bool listed = false;
+    for (int k = 0; k < wa_cand_count; k++) listed = listed || (wa_cand[k] == idx);
+    if (listed) continue;
     int32_t r = WiFi.RSSI(i);
     int pos = wa_cand_count++;
-    while (pos > 0 && rssi[pos - 1] < r) {   // insertion sort, RSSI desc
+    while (pos > 0 && wa_cand_rssi[pos - 1] < r) {   // insertion sort, RSSI desc
       wa_cand[pos] = wa_cand[pos - 1];
-      rssi[pos] = rssi[pos - 1];
+      wa_cand_chan[pos] = wa_cand_chan[pos - 1];
+      wa_cand_rssi[pos] = wa_cand_rssi[pos - 1];
       pos--;
     }
     wa_cand[pos] = idx;
-    rssi[pos] = r;
+    wa_cand_chan[pos] = (uint8_t)WiFi.channel(i);
+    wa_cand_rssi[pos] = r;
   }
+  WiFi.scanDelete();
   if (WiFi.status() == WL_CONNECTED) {   // user scan while connected — done
     wa_state = WA_IDLE;
+    wa_second_pass = false;
     return;
   }
-  if (wa_cand_count == 0) {
-    wifi_auto_fail_round();
+  if (!wa_second_pass && bt_controller_started() && wa_cand_count < wifi_saved_count) {
+    wa_second_pass = true;
+    wifi_log("second scan pass: %d of %d saved network(s) heard in the first",
+             wa_cand_count, wifi_saved_count);
+    wifi_scan_begin("second pass");
     return;
   }
-  int idx = wa_cand[wa_cand_next++];
-  SLog.printf("[WIFI] connecting to %s (%d known network(s) in range)\n",
-              wifi_saved_ssid[idx].c_str(), wa_cand_count);
-  { UsbFlashGuard _g; WiFi.begin(wifi_saved_ssid[idx].c_str(), wifi_saved_pass[idx].c_str()); }
-  wa_state = WA_CONNECTING;
-  wa_deadline = millis() + 10000;
+  wifi_round_join_first();
 }
 
 static void wifi_auto_tick() {
@@ -663,7 +921,7 @@ static void wifi_auto_tick() {
     static uint32_t next_rssi_ms = 0;
     if (WiFi.status() == WL_CONNECTED && (int32_t)(now - next_rssi_ms) >= 0) {
       next_rssi_ms = now + 10000;
-      SLog.printf("[WIFI] rssi %d dBm, channel %d\n", (int)WiFi.RSSI(), (int)WiFi.channel());
+      wifi_log("rssi %d dBm, channel %d", (int)WiFi.RSSI(), (int)WiFi.channel());
     }
   }
 #endif
@@ -677,7 +935,7 @@ static void wifi_auto_tick() {
       // AP dropped on us: one grace round after a short settle, then park.
       if (wa_reconnect_at == 0) {
         wa_reconnect_at = now + 10000;
-        SLog.println("[WIFI] connection lost — grace round in 10s");
+        wifi_log("connection lost — grace round in 10s");
       } else if ((int32_t)(now - wa_reconnect_at) >= 0) {
         wa_reconnect_at = 0;
         wa_was_connected = false;   // the grace round is one-shot
@@ -687,48 +945,102 @@ static void wifi_auto_tick() {
     break;
   }
   case WA_SCANNING: {
-    int n = WiFi.scanComplete();
+    WifiScanState ss = wifi_scan_state();
     bool expired = (int32_t)(now - wa_deadline) >= 0;
-    if (n >= 0) {
+    if (ss == WS_DONE) {
       // A user scan's results are consumed by lua_wifi_scan_results (which
       // feeds them back here); only take over if the app never collects.
       if (!wa_user_scan || expired) {
-        wa_user_scan = false;
-        wifi_auto_on_scan_done(n);
-        WiFi.scanDelete();
+        int n = wifi_scan_take();
+        if (n >= 0) {
+          wa_user_scan = false;
+          wa_scan_started = false;
+          wifi_scan_log(n);
+          wifi_auto_on_scan_done(n);
+        }
       }
-    } else if (n == WIFI_SCAN_FAILED) {
-      // Couldn't start (STA still tearing down a connect attempt) — retry.
+    } else if (ss == WS_NONE || ss == WS_FAILED) {
+      // WS_NONE: the driver refused the start (STA still tearing down a
+      // connect attempt). WS_FAILED: the driver ended the scan with status 1;
+      // the records Arduino took over from it are deleted. Both are retried.
+      if (ss == WS_FAILED) WiFi.scanDelete();
       if (wa_scan_retries++ < 8) {
-        WiFi.scanNetworks(true);
+        if (ss == WS_FAILED) {
+          wifi_log("the driver ended the scan as failed %lu ms after its start; retry %u of 8",
+                   (unsigned long)(now - wa_scan_t0), (unsigned)wa_scan_retries);
+        } else {
+          wifi_log("scan start refused; retry %u of 8", (unsigned)wa_scan_retries);
+        }
+        wifi_scan_begin("retry");
       } else {
         wa_user_scan = false;
-        wifi_auto_fail_round();
+        wa_scan_started = false;
+        if (wa_second_pass) {   // the round goes on with what its first pass heard
+          wifi_log("the second scan pass did not complete in the round's 9 starts");
+          wifi_round_join_first();
+        } else {
+          wifi_auto_fail_round("no scan completed in 9 starts");
+        }
       }
-    } else if (expired) {   // stuck in WIFI_SCAN_RUNNING
+    } else if (expired) {   // WS_RUNNING for 12 s: no done event from the driver
+      esp_wifi_scan_stop();
       WiFi.scanDelete();
       wa_user_scan = false;
-      wifi_auto_fail_round();
+      wa_scan_started = false;
+      if (wa_second_pass) {   // the round goes on with what its first pass heard
+        wifi_log("the second scan pass did not finish within 12 s");
+        wifi_round_join_first();
+      } else {
+        wifi_auto_fail_round("the scan did not finish within 12 s");
+      }
     }
     break;
   }
   case WA_CONNECTING: {
+    if (wa_join_again) {   // the second join of the candidate, a tick after its disconnect()
+      int pos = wa_cand_next - 1;
+      wifi_round_begin(wa_cand[pos], wa_cand_chan[pos], 2);
+      break;
+    }
     wl_status_t st = WiFi.status();
+    bool failed = wa_join_fails != wa_join_fails_at_begin;   // a failure event since this begin()
     if (st == WL_CONNECTED) {
       wa_state = WA_IDLE;
       wa_was_connected = true;
       wa_reconnect_at = 0;
-      SLog.printf("[WIFI] connected to %s (%s)\n",
-                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
-    } else if (st == WL_CONNECT_FAILED || st == WL_NO_SSID_AVAIL ||
-               (int32_t)(now - wa_deadline) >= 0) {
-      if (wa_cand_next < wa_cand_count) {
-        int idx = wa_cand[wa_cand_next++];
-        SLog.printf("[WIFI] trying next candidate: %s\n", wifi_saved_ssid[idx].c_str());
-        { UsbFlashGuard _g; WiFi.begin(wifi_saved_ssid[idx].c_str(), wifi_saved_pass[idx].c_str()); }
-        wa_deadline = now + 10000;
+      wifi_log("connected to %s (%s) after %lu ms, rssi %d dBm, channel %d",
+               WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
+               (unsigned long)(now - wa_join_t0), (int)WiFi.RSSI(), (int)WiFi.channel());
+    } else if (failed || (int32_t)(now - wa_deadline) >= 0) {
+      if (failed) {
+        uint8_t reason = wa_join_fail_reason;
+        wifi_log("%s: join failed after %lu ms, reason %u (%s)", wa_join_ssid,
+                 (unsigned long)(now - wa_join_t0), (unsigned)reason,
+                 WiFi.disconnectReasonName((wifi_err_reason_t)reason));
       } else {
-        wifi_auto_fail_round();
+        wifi_log("%s: not connected within 10 s, status %s", wa_join_ssid,
+                 wifi_status_name(st));
+      }
+      if (failed && wa_join_attempt == 1) {
+        // A join the driver reports as failed gets one more of the same
+        // network. Arduino's event handler restarts the first failed join of
+        // a boot itself (first_connect: WiFiGeneric.cpp in core 2, STA.cpp
+        // in core 3); disconnect() ends that attempt. The second join begins
+        // at the next tick, 250 ms later, after the driver's event for the
+        // ended one.
+        wifi_log("%s: joining again (second attempt)", wa_join_ssid);
+        WiFi.disconnect();
+        wa_join_again = true;
+      } else if (wa_cand_next < wa_cand_count) {
+        int pos = wa_cand_next++;
+        int idx = wa_cand[pos];
+        wifi_log("trying next candidate: %s (channel %d)", wifi_saved_ssid[idx].c_str(),
+                 (int)wa_cand_chan[pos]);
+        wifi_round_begin(idx, wa_cand_chan[pos], 1);
+      } else {
+        char why[48];
+        snprintf(why, sizeof(why), "no known network connected (%d tried)", wa_cand_count);
+        wifi_auto_fail_round(why);
       }
     }
     break;
@@ -1824,6 +2136,16 @@ void setupLvgl() {
     assert(buf1 && buf2);
   }
 
+  // LVGL's small-block pool (lv_mem_psram.c), before LVGL's first allocation.
+  if (lv_mem_small_pool_create()) {
+    SLog.printf("[lv_small] pool %uKB for requests of up to %u bytes\n",
+                (unsigned)(LV_MEM_SMALL_POOL_BYTES / 1024), (unsigned)LV_MEM_SMALL_MAX);
+  } else {
+    SLog.printf("[lv_small] FAIL: no PSRAM block of %uKB for the pool (largest free %uKB); LVGL allocates from the PSRAM heap\n",
+                (unsigned)(LV_MEM_SMALL_POOL_BYTES / 1024),
+                (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024));
+  }
+
   lv_init();
 
   // Create a default group for focusable objects
@@ -1887,8 +2209,7 @@ static int lua_wifi_connect(lua_State *L) {
   const char *network = luaL_checkstring(L, 1);
   const char *pass = luaL_checkstring(L, 2);
 
-  SLog.print("Connecting to WiFi: ");
-  SLog.println(network);
+  wifi_log("app join: %s", network);
 
   wa_state = WA_IDLE;   // manual join overrides any auto round
   wa_reconnect_at = 0;
@@ -1969,6 +2290,7 @@ static int lua_wifi_status(lua_State *L) {
 
 // WiFi disconnect function for Lua
 static int lua_wifi_disconnect(lua_State *L) {
+  wifi_log("disconnect requested by an app");
   wa_state = WA_IDLE;
   wa_was_connected = false;   // intentional disconnect — no grace round
   wa_reconnect_at = 0;
@@ -2170,66 +2492,146 @@ static bool wifi_dl_client_open(const char *url) {
   return s_dl_http->begin(url);
 }
 
+// A download that failed: success=false and the error in the result table
+// on top of the stack, and the same error on the console with the URL.
+static int wifi_dl_fail(lua_State *L, const char *url, const char *path, const char *err) {
+  SLog.printf("[HTTP] GET %s -> %s: %s\n", url, path, err);
+  lua_pushboolean(L, 0);
+  lua_setfield(L, -2, "success");
+  lua_pushstring(L, err);
+  lua_setfield(L, -2, "error");
+  return 1;
+}
+
+// WiFi modem sleep off for the lifetime of the object; the previous mode is
+// put back by the destructor. Does nothing when the mode can't be read (WiFi
+// not running) or sleep is already off.
+struct WifiSleepOff {
+  wifi_ps_type_t saved = WIFI_PS_NONE;
+  bool active = false;
+  WifiSleepOff() {
+    if (esp_wifi_get_ps(&saved) == ESP_OK && saved != WIFI_PS_NONE)
+      active = (esp_wifi_set_ps(WIFI_PS_NONE) == ESP_OK);
+  }
+  ~WifiSleepOff() { if (active) esp_wifi_set_ps(saved); }
+};
+
+// Copies the host part of an http(s) URL into host. False when there is none
+// or it doesn't fit.
+static bool url_host(const char *url, char *host, size_t n) {
+  const char *p = strstr(url, "://");
+  p = p ? p + 3 : url;
+  size_t len = strcspn(p, "/:?#");
+  if (len == 0 || len >= n) return false;
+  memcpy(host, p, len);
+  host[len] = '\0';
+  return true;
+}
+
+// Where one download's time went; printed as a second [HTTP] line.
+struct DlTiming {
+  uint32_t req_ms = 0;     // begin() + GET(): DNS/TCP/TLS on a new socket, the request, the headers
+  bool     reused = false; // the request went out on the socket kept from the last one
+  uint32_t dns_ms = 0;     // new socket only: the host lookup, timed on its own before GET()
+  bool     dns_ok = true;
+  uint32_t df_ms = 0;      // free-space check of the target drive
+  long     free_kb = -1;   // its answer; -1 = not checked (no Content-Length)
+  uint32_t open_ms = 0;    // opening the target file (SD: includes taking the bus lock)
+  uint64_t net_us = 0;     // body: available() + read(), and the 1 ms waits for data
+  uint64_t lock_us = 0;    // body: waiting for the SPI bus before each SD write
+  uint64_t wr_us = 0;      // body: File::write
+  uint32_t max_wr_us = 0;  // the longest single write
+  uint32_t writes = 0;
+};
+
+static void wifi_dl_timing_log(const DlTiming &t, uint32_t total_ms) {
+  char rssi[12] = "-";
+  if (WiFi.status() == WL_CONNECTED) snprintf(rssi, sizeof(rssi), "%d", (int)WiFi.RSSI());
+  char dns[20] = "-";
+  if (!t.reused) snprintf(dns, sizeof(dns), "%lu%s", (unsigned long)t.dns_ms, t.dns_ok ? "" : " failed");
+  wifi_ps_type_t ps;
+  const char *ps_name = "-";
+  if (esp_wifi_get_ps(&ps) == ESP_OK)
+    ps_name = (ps == WIFI_PS_NONE) ? "off" : (ps == WIFI_PS_MIN_MODEM) ? "min modem" : "max modem";
+  SLog.printf("[HTTP]   %lu ms: request %lu (%s socket, dns %s), df %lu, open %lu, net %lu, "
+              "sd %lu + bus wait %lu in %lu writes (longest %lu); free %ld KB, rssi %s, sleep %s\n",
+              (unsigned long)total_ms, (unsigned long)t.req_ms, t.reused ? "kept" : "new", dns,
+              (unsigned long)t.df_ms, (unsigned long)t.open_ms,
+              (unsigned long)(t.net_us / 1000), (unsigned long)(t.wr_us / 1000),
+              (unsigned long)(t.lock_us / 1000), (unsigned long)t.writes,
+              (unsigned long)(t.max_wr_us / 1000), t.free_kb, rssi, ps_name);
+}
+
+// wifi_dl_fail plus the timing line, for failures after the request went out.
+static int wifi_dl_fail_timed(lua_State *L, const char *url, const char *path,
+                              const char *err, const DlTiming &t, uint32_t t0) {
+  int r = wifi_dl_fail(L, url, path, err);
+  wifi_dl_timing_log(t, millis() - t0);
+  return r;
+}
+
 static int lua_wifi_download_file(lua_State *L) {
   const char *url = luaL_checkstring(L, 1);
   const char *filepath = luaL_checkstring(L, 2);
+  const uint32_t t0 = millis();
 
   lua_newtable(L);
 
   if (!net_is_up()) {
     wifi_dl_client_close();
-    lua_pushboolean(L, 0);
-    lua_setfield(L, -2, "success");
-    lua_pushstring(L, "not connected");
-    lua_setfield(L, -2, "error");
-    return 1;
+    return wifi_dl_fail(L, url, filepath, "not connected");
   }
+
+  // Modem sleep stays off until this call returns (every return path below);
+  // the [HTTP] timing line reports the mode in effect.
+  WifiSleepOff sleep_off;
 
   if (!s_dl_buf) {
     s_dl_buf = (uint8_t *)heap_caps_malloc(DL_BUF_SIZE,
                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!s_dl_buf) {
-      lua_pushboolean(L, 0);
-      lua_setfield(L, -2, "success");
-      lua_pushstring(L, "Buffer alloc failed");
-      lua_setfield(L, -2, "error");
-      return 1;
-    }
+    if (!s_dl_buf) return wifi_dl_fail(L, url, filepath, "Buffer alloc failed");
   }
 
   if (!wifi_dl_client_open(url)) {
     wifi_dl_client_close();
-    lua_pushboolean(L, 0);
-    lua_setfield(L, -2, "success");
-    lua_pushstring(L, "Bad URL");
-    lua_setfield(L, -2, "error");
-    return 1;
+    return wifi_dl_fail(L, url, filepath, "Bad URL");
   }
 
+  DlTiming dt;
+  dt.reused = s_dl_http->connected();   // a socket kept from the last request
+  if (!dt.reused) {
+    // The lookup fills lwIP's DNS cache, which GET()'s own lookup of the
+    // same host then reads.
+    char host[96];
+    if (url_host(url, host, sizeof(host))) {
+      IPAddress ip;
+      uint32_t t_dns = millis();
+      dt.dns_ok = WiFi.hostByName(host, ip) == 1;
+      dt.dns_ms = millis() - t_dns;
+    }
+  }
   int httpCode = s_dl_http->GET();
 
   // Negative code on a kept-alive client usually means the server closed the
   // idle socket — rebuild the connection and retry once.
   if (httpCode < 0) {
     wifi_dl_client_close();
+    dt.reused = false;
     if (wifi_dl_client_open(url)) {
       httpCode = s_dl_http->GET();
     }
   }
+  dt.req_ms = millis() - t0;
 
   if (httpCode != 200) {
-    lua_pushboolean(L, 0);
-    lua_setfield(L, -2, "success");
+    char msg[64];
     if (httpCode > 0) {
-      char msg[48];
       snprintf(msg, sizeof(msg), "HTTP %d", httpCode);
-      lua_pushstring(L, msg);
     } else {
-      lua_pushstring(L, s_dl_http->errorToString(httpCode).c_str());
+      snprintf(msg, sizeof(msg), "%s (%d)", s_dl_http->errorToString(httpCode).c_str(), httpCode);
     }
-    lua_setfield(L, -2, "error");
     s_dl_http->end();
-    return 1;
+    return wifi_dl_fail_timed(L, url, filepath, msg, dt, t0);
   }
 
   // Transfer-Encoding overrides any Content-Length (RFC 7230 3.3.3).
@@ -2244,25 +2646,22 @@ static int lua_wifi_download_file(lua_State *L) {
     MpDrive drive;
     meshpunk_parse_drive(filepath, &drive, false);
     uint64_t free_bytes = 0;
-    if (meshpunk_df(drive, NULL, &free_bytes) &&
-        (uint64_t)len + 16384 > free_bytes) {
+    uint32_t t_df = millis();
+    bool have_df = meshpunk_df(drive, NULL, &free_bytes);
+    dt.df_ms = millis() - t_df;
+    if (have_df) dt.free_kb = (long)(free_bytes / 1024);
+    if (have_df && (uint64_t)len + 16384 > free_bytes) {
       wifi_dl_client_close();   // unread body: the socket cannot be reused
-      lua_pushboolean(L, 0);
-      lua_setfield(L, -2, "success");
-      lua_pushstring(L, "Not enough free space");
-      lua_setfield(L, -2, "error");
-      return 1;
+      return wifi_dl_fail_timed(L, url, filepath, "Not enough free space", dt, t0);
     }
   }
 
+  uint32_t t_open = millis();
   MeshpunkFile mf = meshpunk_open(filepath, "w", false);
+  dt.open_ms = millis() - t_open;
   if (!mf.valid) {
-    lua_pushboolean(L, 0);
-    lua_setfield(L, -2, "success");
-    lua_pushstring(L, "Failed to open file for writing");
-    lua_setfield(L, -2, "error");
     s_dl_http->end();
-    return 1;
+    return wifi_dl_fail_timed(L, url, filepath, "Failed to open file for writing", dt, t0);
   }
 
   // meshpunk_open returns HOLDING the SPI lock for SD paths (meshpunk_close
@@ -2282,32 +2681,56 @@ static int lua_wifi_download_file(lua_State *L) {
   // than any fixed budget, so the deadline resets on every received chunk.
   uint32_t deadline = millis() + 20000;
   ChunkDecoder ck;
+  const int expected = len;                 // Content-Length, or -1
+  const char *why = "connection closed";    // how the loop left before the whole body
   while (len > 0 || len == -1) {
     if (chunked && (ck.state == ChunkDecoder::CK_END || ck.state == ChunkDecoder::CK_BAD)) break;
-    if ((int32_t)(millis() - deadline) >= 0) break;
+    if ((int32_t)(millis() - deadline) >= 0) { why = "no data for 20 s"; break; }
+    uint32_t t_net = micros();
     int avail = stream->available();
     if (avail <= 0) {
-      if (!s_dl_http->connected()) break;
+      if (!s_dl_http->connected()) {
+        dt.net_us += micros() - t_net;
+        why = "connection closed";
+        break;
+      }
       delay(1);
+      dt.net_us += micros() - t_net;
       continue;
     }
+    // read(buf, n), not readBytes: Stream::readBytes takes one byte per call,
+    // and on an HTTPS stream every call runs two mbedtls_ssl_read()s.
     int toRead = (avail < (int)DL_BUF_SIZE) ? avail : (int)DL_BUF_SIZE;
-    int rd = stream->readBytes(s_dl_buf, toRead);
-    if (rd <= 0) break;
+    int rd = stream->read(s_dl_buf, toRead);
+    dt.net_us += micros() - t_net;
+    if (rd <= 0) { why = "read failed"; break; }
     int out = chunked ? chunk_decode(&ck, s_dl_buf, rd) : rd;
     if (out > 0) {
+      uint32_t t_lock = micros();
       if (mf.is_sd) sd_spi_take();
+      uint32_t t_wr = micros();
+      errno = 0;
       size_t wr = mf.file.write(s_dl_buf, out);
+      int wr_errno = errno;
+      uint32_t wr_us = micros() - t_wr;
+      dt.lock_us += t_wr - t_lock;
+      dt.wr_us += wr_us;
+      if (wr_us > dt.max_wr_us) dt.max_wr_us = wr_us;
+      dt.writes++;
       if (wr != (size_t)out) {
-        // Short write = the drive is full. meshpunk_close releases the SPI
-        // lock taken above; the unread body makes the socket unusable.
+        // Short write. meshpunk_close releases the SPI lock taken above; the
+        // unread body makes the socket unusable. ENOSPC = the filesystem
+        // found no free space; any other errno is a failed write.
         meshpunk_close(mf);
         wifi_dl_client_close();
-        lua_pushboolean(L, 0);
-        lua_setfield(L, -2, "success");
-        lua_pushstring(L, "Disk full");
-        lua_setfield(L, -2, "error");
-        return 1;
+        char msg[112];
+        if (wr_errno == ENOSPC) {
+          snprintf(msg, sizeof(msg), "Disk full (after %d bytes)", total + (int)wr);
+        } else {
+          snprintf(msg, sizeof(msg), "Write failed after %d bytes: %s (errno %d)",
+                   total + (int)wr, wr_errno ? strerror(wr_errno) : "no error code", wr_errno);
+        }
+        return wifi_dl_fail_timed(L, url, filepath, msg, dt, t0);
       }
       if (mf.is_sd) sd_spi_release();
     }
@@ -2324,23 +2747,22 @@ static int lua_wifi_download_file(lua_State *L) {
     // truncated and the keep-alive framing is unusable — drop the socket and
     // report failure so the caller can retry.
     wifi_dl_client_close();
-    lua_pushboolean(L, 0);
-    lua_setfield(L, -2, "success");
-    lua_pushstring(L, "Truncated download");
-    lua_setfield(L, -2, "error");
-    return 1;
+    char msg[96];
+    snprintf(msg, sizeof(msg), "Truncated download (%d of %d bytes: %s)", total, expected, why);
+    return wifi_dl_fail_timed(L, url, filepath, msg, dt, t0);
   }
 
   if (chunked && ck.state != ChunkDecoder::CK_END) {
     // The chunked body stopped before its zero-size chunk (stall, closed
     // connection or malformed framing): the file is incomplete.
     wifi_dl_client_close();
-    lua_pushboolean(L, 0);
-    lua_setfield(L, -2, "success");
-    lua_pushstring(L, ck.state == ChunkDecoder::CK_BAD ? "Bad chunked encoding"
-                                                     : "Truncated download");
-    lua_setfield(L, -2, "error");
-    return 1;
+    char msg[96];
+    if (ck.state == ChunkDecoder::CK_BAD) {
+      snprintf(msg, sizeof(msg), "Bad chunked encoding (after %d bytes)", total);
+    } else {
+      snprintf(msg, sizeof(msg), "Truncated download (%d bytes: %s)", total, why);
+    }
+    return wifi_dl_fail_timed(L, url, filepath, msg, dt, t0);
   }
 
   if (len == -1) {
@@ -2352,6 +2774,10 @@ static int lua_wifi_download_file(lua_State *L) {
     s_dl_http->end();  // keeps the socket alive when the server allows reuse
   }
 
+  uint32_t total_ms = millis() - t0;
+  SLog.printf("[HTTP] GET %s -> %s: %d bytes in %lu ms\n", url, filepath, total,
+              (unsigned long)total_ms);
+  wifi_dl_timing_log(dt, total_ms);
   lua_pushboolean(L, 1);
   lua_setfield(L, -2, "success");
   lua_pushinteger(L, total);
@@ -2371,37 +2797,51 @@ static int lua_wifi_scan_start(lua_State *L) {
     lua_pushboolean(L, 0);
     return 1;
   }
+  wifi_log("scan requested by an app");
   {
     UsbFlashGuard _g;
-    WiFi.mode(WIFI_STA);   // radio may be parked
+    if (!WiFi.mode(WIFI_STA))   // radio may be parked
+      wifi_log("radio did not switch to station mode");
     // esp_wifi_scan_start() fails while the STA is mid-connect — this is why
     // scans "found nothing" whenever a saved network was busy (re)connecting.
     // Abort the attempt first; the connect round restarts from these results.
     if (WiFi.status() != WL_CONNECTED) WiFi.disconnect();   // no-op when idle
-    if (WiFi.scanComplete() != WIFI_SCAN_RUNNING) WiFi.scanNetworks(true);
+    wifi_scan_begin("app");   // a scan still running is kept and waited for
   }
   // Fold the user scan into the state machine: it retries starts that failed
   // (disconnect needs a beat to land) and auto-joins known networks after.
   wa_state = WA_SCANNING;
-  wa_deadline = millis() + 12000;
   wa_scan_retries = 0;
+  wa_second_pass = false;
   wa_user_scan = true;
   lua_pushboolean(L, 1);
   return 1;
 }
 
 static int lua_wifi_scan_results(lua_State *L) {
-  int n = WiFi.scanComplete();
-  if (n == WIFI_SCAN_RUNNING) {
+  WifiScanState ss = wifi_scan_state();
+  if (ss == WS_RUNNING) {
     lua_pushnil(L);
     return 1;
   }
-  if (n == WIFI_SCAN_FAILED && wa_state == WA_SCANNING) {
-    // Scan hasn't started yet (wifi_auto_tick is retrying) — report "still
-    // scanning", not a bogus empty result. Once retries are exhausted the
-    // machine leaves WA_SCANNING and this returns the empty table below.
+  if (ss != WS_DONE && wa_state == WA_SCANNING) {
+    // No finished scan yet and wifi_auto_tick is retrying (a refused start,
+    // or a scan the driver ended as failed) — report "still scanning", not
+    // an empty result. Once the retries are used up the machine leaves
+    // WA_SCANNING and this returns the empty table below.
     lua_pushnil(L);
     return 1;
+  }
+  int n = -1;
+  if (ss == WS_DONE) {
+    n = wifi_scan_take();
+    if (n < 0) {   // Arduino holds no finished scan: still scanning
+      lua_pushnil(L);
+      return 1;
+    }
+  } else if (ss == WS_FAILED) {
+    WiFi.scanDelete();   // the records Arduino took over from the failed scan
+    wa_scan_started = false;
   }
   lua_newtable(L);
   if (n > 0) {
@@ -2417,8 +2857,12 @@ static int lua_wifi_scan_results(lua_State *L) {
     }
   }
   if (n >= 0) {
-    if (wa_state == WA_SCANNING) wifi_auto_on_scan_done(n);
-    WiFi.scanDelete();
+    wa_scan_started = false;
+    wifi_scan_log(n);
+    if (wa_state == WA_SCANNING) wifi_auto_on_scan_done(n);   // frees Arduino's copy
+    else WiFi.scanDelete();
+  } else {
+    wifi_log("scan results for the app: none (no finished scan)");
   }
   wa_user_scan = false;
   return 1;
@@ -2436,6 +2880,8 @@ static int lua_wifi_get_enabled(lua_State *L) {
 static int lua_wifi_set_enabled(lua_State *L) {
   wifi_enabled_pref = lua_toboolean(L, 1);
   bool persist = lua_isnoneornil(L, 2) ? true : (bool)lua_toboolean(L, 2);
+  wifi_log("WiFi turned %s by an app%s", wifi_enabled_pref ? "on" : "off",
+           persist ? "" : " (not saved)");
   {
     // WiFi mode/connect can write PHY calibration to NVS (internal flash) —
     // pause any USB audio stream around it so the cache stall can't crash it.
@@ -2525,7 +2971,7 @@ static int lua_wifi_connect_saved(lua_State *L) {
     lua_pushboolean(L, 0);
     return 1;
   }
-  SLog.printf("Connecting to saved WiFi: %s\n", ssid);
+  wifi_log("app join (saved): %s", ssid);
   wa_state = WA_IDLE;   // manual join overrides any auto round
   wa_reconnect_at = 0;
   {
@@ -3683,9 +4129,10 @@ static int lua_file_exists_sd(lua_State *L) {
   return 1;
 }
 
-// Persistent RGB565 conversion buffer — allocated once, reused across calls.
-// Eliminates hundreds of 128KB alloc/free cycles during bulk tile downloads
-// that fragment PSRAM and eventually cause decode failures.
+// RGB565 conversion buffer, one for all the conversions of a tile session
+// (hundreds of 128KB alloc/free cycles during bulk tile downloads fragment
+// PSRAM and eventually cause decode failures). Taken at the first conversion
+// (png_buf_to_bin), freed by tile_scratch_free().
 static uint16_t *s_rgb565_buf = nullptr;
 static const uint32_t RGB565_BUF_SIZE = 256 * 256 * 2;  // 131072 bytes
 
@@ -4014,12 +4461,14 @@ static const char *png_buf_to_bin(const uint8_t *png_data, uint32_t png_size,
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
 
-  // Allocate persistent RGB565 buffer on first call
+  // The session's conversion buffer (see s_rgb565_buf).
   if (!s_rgb565_buf) {
     s_rgb565_buf = (uint16_t *)heap_caps_malloc(RGB565_BUF_SIZE,
                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_rgb565_buf) {
-      SLog.println("[png2bin] FAIL: initial rgb565 buffer alloc");
+      SLog.printf("[png2bin] FAIL: rgb565 buffer (%u B of PSRAM in one block; the largest free block is %u B)\n",
+                  (unsigned)RGB565_BUF_SIZE,
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
       return "oom";
     }
   }
@@ -4165,11 +4614,28 @@ static int lua_png_to_bin(lua_State *L) {
 // the LVGL/Lua thread never blocks on the network. Lua submits requests with
 // _tile_fetch_start() and collects results with _tile_fetch_poll().
 
-// Persistent download buffer (PSRAM, allocated once, Core-1 only). OSM
+// The worker's download buffer (PSRAM, Core-1 only): taken at its first
+// fetch (do_tile_fetch), freed when the worker ends (tile_scratch_free). OSM
 // raster tiles run 10-40KB typical, ~100KB worst-case urban — 256KB clears
 // any real tile and is small next to the 8MB pool.
 static uint8_t *s_tile_png_buf = nullptr;
 static const uint32_t TILE_PNG_BUF_SIZE = 256 * 1024;
+
+// The tile scratch buffers (s_tile_png_buf, s_rgb565_buf) go back to the
+// heap. Called by the worker task as it ends, and by _tile_fetch_close() on
+// the Lua thread when no worker runs; the convert mutex keeps the free and
+// a conversion apart.
+static void tile_scratch_free() {
+  if (s_tile_png_buf) {
+    heap_caps_free(s_tile_png_buf);
+    s_tile_png_buf = nullptr;
+  }
+  ConvertLock lock(s_convert_mutex);
+  if (s_rgb565_buf) {
+    heap_caps_free(s_rgb565_buf);
+    s_rgb565_buf = nullptr;
+  }
+}
 
 // Worker-owned keep-alive client (never share an HTTPClient across cores —
 // _wifi_download_file's client stays on Core 0). Closed after 10s of queue
@@ -4206,7 +4672,12 @@ static const char *do_tile_fetch(const char *url, const char *bin_path) {
   if (!s_tile_png_buf) {
     s_tile_png_buf = (uint8_t *)heap_caps_malloc(TILE_PNG_BUF_SIZE,
                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!s_tile_png_buf) return "oom";
+    if (!s_tile_png_buf) {
+      SLog.printf("[tile] FAIL: download buffer (%u B of PSRAM in one block; the largest free block is %u B)\n",
+                  (unsigned)TILE_PNG_BUF_SIZE,
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+      return "oom";
+    }
   }
 
   if (!tile_http_open(url)) {
@@ -4250,7 +4721,7 @@ static const char *do_tile_fetch(const char *url, const char *bin_path) {
     uint32_t space = TILE_PNG_BUF_SIZE - total;
     if (space == 0) break;  // length-less response outgrew the buffer
     int toRead = (avail < (int)space) ? avail : (int)space;
-    int rd = stream->readBytes(s_tile_png_buf + total, toRead);
+    int rd = stream->read(s_tile_png_buf + total, toRead);   // a block read (see _wifi_download_file)
     if (rd <= 0) break;
     total += rd;
     if (len > 0) len -= rd;
@@ -4307,9 +4778,11 @@ static void tile_fetch_task(void *param) {
     // one notch under Doom's need. _tile_fetch_start recreates the worker on the
     // next fetch; the shared request queue preserves any pending work for it.
     // Signalled via a flag + an empty-url sentinel that just wakes an idle worker.
+    // The scratch buffers (384KB of PSRAM) go back to the heap here too.
     if (s_tile_http_close_req) {
       s_tile_http_close_req = false;
       tile_http_close();
+      tile_scratch_free();
       s_tile_task_handle = nullptr;
       vTaskDelete(NULL);   // frees our stack; never returns
     }
@@ -4383,6 +4856,8 @@ static int lua_tile_fetch_start(lua_State *L) {
 // empty-url sentinel to wake an idle worker; it runs the teardown on its own
 // thread and is recreated by _tile_fetch_start on the next fetch. No-op before
 // the worker exists. Called by the Map on shutdown so the next heavy app fits.
+// The tile scratch buffers are freed by the worker as it ends, or here when
+// no worker runs (tile_scratch_free).
 static int lua_tile_fetch_close(lua_State *L) {
   s_tile_http_close_req = true;
   if (s_tile_req_q) {
@@ -4390,6 +4865,7 @@ static int lua_tile_fetch_close(lua_State *L) {
     memset(&req, 0, sizeof(req));  // url[0] == '\0' = wake/close sentinel
     xQueueSend(s_tile_req_q, &req, 0);
   }
+  if (!s_tile_task_handle) tile_scratch_free();
   return 0;
 }
 
@@ -4752,6 +5228,8 @@ static int lua_dofile_sd(lua_State *L) {
 // encodes as 112.5%, 400 as 400%.
 #define LUA_GC_PAUSE       112
 #define LUA_GC_STEPMUL     400
+static_assert(LV_MEM_SMALL_POOL_BYTES < LUA_GAP_BYTES,
+              "LVGL's small-block pool is carved out of LUA_GAP_BYTES (lua_arena_create)");
 static multi_heap_handle_t s_lua_heap = NULL;
 static uintptr_t s_lua_arena_base = 0;
 static size_t    s_lua_arena_size = 0;
@@ -4774,12 +5252,72 @@ static inline bool lua_in_arena(void *p) {
          (uintptr_t)p < s_lua_arena_base + s_lua_arena_size;
 }
 
+// ── Small-block strip ───────────────────────────────────────────────────────
+// STRIP_HOLES free PSRAM blocks of STRIP_HOLE_BYTES each, kept apart by
+// allocated 16-byte blocks. small_strip_create() makes them once, in setup()
+// right before the first luaBringUp(), at the start of the free space that
+// the theme fonts, the gap and the Lua arena are then allocated from.
+// TLSF serves a request from the smallest free block that fits it, so a PSRAM
+// request of up to STRIP_HOLE_BYTES - 12 bytes is served from one of these
+// holes while one has room for it. The WiFi and GDMA drivers allocate objects
+// of 40 to 184 bytes from PSRAM when WiFi connects and around a module's
+// start and exit (a GDMA channel, the WiFi connection manager's records).
+// Sizes: a used block is its payload plus the 12 bytes of
+// CONFIG_HEAP_POISONING_LIGHT, and consecutive blocks are 4 bytes apart.
+#define STRIP_HOLES       32
+#define STRIP_HOLE_BYTES  256u
+
+static uint32_t s_strip_bytes = 0;   // the address range the strip occupies
+
+// The address a 1 MiB PSRAM block gets now: TLSF splits it off the start of
+// the smallest free block that fits it. 0 when no block that large is free.
+static uintptr_t psram_big_block_start() {
+  void *probe = heap_caps_malloc(1024 * 1024, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (probe) heap_caps_free(probe);
+  return (uintptr_t)probe;
+}
+
+static void small_strip_create() {
+  void *fence[STRIP_HOLES + 1];
+  const uintptr_t before = psram_big_block_start();
+  // STRIP_HOLES + 1 blocks of 16 + 4 + STRIP_HOLE_BYTES bytes each.
+  int n = 0;
+  while (n <= STRIP_HOLES) {
+    fence[n] = heap_caps_malloc(STRIP_HOLE_BYTES + 8, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!fence[n]) break;
+    n++;
+  }
+  // Shrunk in place to a 16-byte block, each leaves STRIP_HOLE_BYTES free
+  // behind it; the next block keeps that hole apart from the one after it.
+  // The bytes freed behind the last block merge with the free space there.
+  int moved = 0;
+  for (int i = 0; i < n; i++) {
+    void *p = heap_caps_realloc(fence[i], 4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (p != fence[i]) moved++;
+    if (p) fence[i] = p;
+  }
+  const uintptr_t after = psram_big_block_start();
+  if (before && after > before) s_strip_bytes = (uint32_t)(after - before);
+  if (n == STRIP_HOLES + 1 && moved == 0) {
+    SLog.printf("[strip] %d holes of %u bytes from 0x%08X, %u bytes in all\n",
+                STRIP_HOLES, (unsigned)STRIP_HOLE_BYTES,
+                (unsigned)(uintptr_t)fence[0], (unsigned)s_strip_bytes);
+  } else {
+    SLog.printf("[strip] FAIL: %d of %d blocks allocated, %d moved by the shrink\n",
+                n, STRIP_HOLES + 1, moved);
+  }
+}
+
 // Create the arena above a free gap (spacer trick — heap_caps_malloc can't take an
 // address). Sized dynamically: grab as much as Lua can use, leaving MAIN_HEAP_RESERVE
 // free for the Map's big buffers. Call at boot + each bring-up, BEFORE lua_newstate.
+// LVGL's small-block pool (lv_mem_psram.c) and the small-block strip are part
+// of LUA_GAP_BYTES: both were allocated at boot, lower in PSRAM, and the gap
+// left free here is LUA_GAP_BYTES less their sizes.
 static void lua_arena_create() {
   if (s_lua_heap) return;
-  void *spacer = heap_caps_malloc(LUA_GAP_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  const size_t gap = LUA_GAP_BYTES - lv_mem_small_pool_size() - s_strip_bytes;
+  void *spacer = heap_caps_malloc(gap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   size_t avail = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);  // block ABOVE the spacer
   size_t want  = (avail > MAIN_HEAP_RESERVE + LUA_ARENA_MIN) ? (avail - MAIN_HEAP_RESERVE)
                                                              : LUA_ARENA_MIN;
@@ -4797,7 +5335,7 @@ static void lua_arena_create() {
   s_lua_arena_size = want;
   SLog.printf("[lua_arena] %uKB @0x%08X (gap %uKB reserve %uKB avail %uKB); psram largest now %uKB\n",
               (unsigned)(want / 1024), (unsigned)(uintptr_t)blk,
-              (unsigned)(LUA_GAP_BYTES / 1024), (unsigned)(MAIN_HEAP_RESERVE / 1024),
+              (unsigned)(gap / 1024), (unsigned)(MAIN_HEAP_RESERVE / 1024),
               (unsigned)(avail / 1024),
               (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024));
 }
@@ -6404,16 +6942,28 @@ void setupLuaVGL() {
     return 0;
   });
 
-  // _snapshot_take(obj) -> lightuserdata draw_buf (or nil on failure).
-  // Renders the object + children into an ARGB8888 image via the normal draw
-  // pipeline (lv_snapshot_take). The Messenger bakes each chat bubble once and
-  // shows the result as an Image{ src = <this pointer> } so scrolling blits a
-  // finished bitmap instead of re-drawing the bubble's rects+TTF text per frame.
+  // _snapshot_take(obj [, format]) -> lightuserdata draw_buf (or nil on failure).
+  // Renders the object + children into an image via the normal draw pipeline
+  // (lv_snapshot_take). format: "argb8888" (the default: 4 bytes a pixel, with
+  // alpha) or "rgb565" (2 bytes a pixel, no alpha: what the object does not
+  // cover comes out black); any other name is an error. The Messenger bakes
+  // each chat bubble once and shows the result as an Image{ src = <this
+  // pointer> } so scrolling blits a finished bitmap instead of re-drawing the
+  // bubble's rects+TTF text per frame.
   // The caller OWNS the returned buffer — free it with _snapshot_free on prune.
   lua_register(L, "_snapshot_take", [](lua_State *L) -> int {
     luavgl_obj_t *lobj = (luavgl_obj_t *)lua_touserdata(L, 1);
+    lv_color_format_t cf = LV_COLOR_FORMAT_ARGB8888;
+    if (!lua_isnoneornil(L, 2)) {
+      const char *name = luaL_checkstring(L, 2);
+      if (strcmp(name, "rgb565") == 0) {
+        cf = LV_COLOR_FORMAT_RGB565;
+      } else if (strcmp(name, "argb8888") != 0) {
+        return luaL_error(L, "_snapshot_take: unknown format '%s'", name);
+      }
+    }
     if (!lobj || !lobj->obj) { lua_pushnil(L); return 1; }
-    lv_draw_buf_t *buf = lv_snapshot_take(lobj->obj, LV_COLOR_FORMAT_ARGB8888);
+    lv_draw_buf_t *buf = lv_snapshot_take(lobj->obj, cf);
     if (!buf) { lua_pushnil(L); return 1; }
     lua_pushlightuserdata(L, buf);
     return 1;
@@ -7010,15 +7560,20 @@ void luaTearDown() {
   mic_lua_release_holds("lua teardown");
   lua_net_close_all("lua teardown");
   lua_close(dead);                            // GCs luavgl widgets -> lv_obj_del
-  // Free the non-Lua global caches that survive lua_close and otherwise leave a
-  // persistent mid-heap cluster capping the largest contiguous block:
-  //  - emoji glyph cache: per-glyph PSRAM pixel+descriptor allocs, never freed —
-  //    CONFIRMED as the ~33KB wall splitting PSRAM after a Map session (the Map's
-  //    emoji contact names decode a burst of glyphs). This is the actual fix.
-  //  - LVGL image/draw-buf cache: belt-and-suspenders (decoded icons/markers).
-  // Both re-populate on demand when the launcher re-renders. Core-0 only.
-  emoji_font_cache_clear();
-  lv_image_cache_drop(NULL);
+  // Free the non-Lua global state that survives lua_close and otherwise caps
+  // the largest contiguous block. emoji_font_reload(true) releases all of it:
+  //  - the emoji glyph cache (per-glyph pixel + descriptor blocks);
+  //  - the LVGL image/draw-buf cache (decoded icons/markers);
+  //  - the emoji blob: its open file and its three tables (codepoint index,
+  //    sequence table, sequence index). The blob opens at the first emoji
+  //    lookup, which comes after lua_arena_create(), so those blocks lie
+  //    above the theme font buffers: while they stay, the font buffers freed
+  //    below cannot merge with the free space above them.
+  // Every user of the blob runs in Lua's context or inside LVGL
+  // (emoji_compose / emoji_decompose: the Lua bindings and the protocol's Lua
+  // dispatch; glyph loads: LVGL), and the first use after luaBringUp() opens
+  // the blob again. Core-0 only.
+  emoji_font_reload(true);
   // Runtime TTF fonts: buffers + glyph caches are the same class of resident
   // PSRAM cluster — release them all (chain reverts to montserrat); the
   // post-ELF luaBringUp() -> setupLuaVGL() -> theme_font_init() reloads the
@@ -7107,22 +7662,28 @@ void setup() {
   // tile handshake's hardware-SHA DMA buffer needs. See mbedtls_psram_calloc.
   mbedtls_platform_set_calloc_free(mbedtls_psram_calloc, heap_caps_free);
 
+#if !defined(BOARD_TDISPLAY_P4)
+  // malloc() serves requests of up to 4095 bytes from internal RAM and
+  // larger ones from PSRAM first (the Arduino core sets 4096 at start-up).
+  // The stdio buffer of an open Arduino File is a 4096-byte request, so it
+  // comes from PSRAM.
+  heap_caps_malloc_extmem_enable(4095);
+#endif
+
   // Create SPI/mesh mutexes and cross-core queues before any subsystem
   // that relies on them. Safe to call before LVGL/TFT init because the
   // macros no-op when the handle is null (not needed — this runs first —
   // but defensive).
   meshpunk_sync_init();
 
-  // Allocate the map tile worker's scratch buffers HERE, at boot, while the PSRAM
-  // heap is clean — so they land at stable low addresses instead of dropping into
-  // a mid-heap hole on first tile use and fragmenting the heap. They are never
-  // freed (Core-1 worker lifetime). The lazy `if (!s_x)` checks at the use sites
-  // stay as a fallback in case a boot alloc returns null.
-  s_dl_buf       = (uint8_t  *)heap_caps_malloc(DL_BUF_SIZE,       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  s_rgb565_buf   = (uint16_t *)heap_caps_malloc(RGB565_BUF_SIZE,   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  s_tile_png_buf = (uint8_t  *)heap_caps_malloc(TILE_PNG_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  SLog.printf("[boot] tile scratch: dl=%p rgb565=%p png=%p\n",
-              (void*)s_dl_buf, (void*)s_rgb565_buf, (void*)s_tile_png_buf);
+  // The download transfer buffer (_wifi_download_file) is allocated HERE, at
+  // boot, while the PSRAM heap is clean: it sits at a low address, below every
+  // later allocation, and is never freed.
+  // The map tile worker's two scratch buffers (s_tile_png_buf, s_rgb565_buf) are
+  // not allocated here: the worker takes them at its first fetch and they are
+  // freed when it ends (tile_scratch_free).
+  s_dl_buf = (uint8_t *)heap_caps_malloc(DL_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  SLog.printf("[boot] download buffer: %p\n", (void*)s_dl_buf);
   // PSRAM ceiling at boot (before LVGL/Lua/mesh init consume it). total tells us
   // how much we actually have to work with; everything below is carved from this.
   SLog.printf("[boot][mem] psram total=%uKB free=%uKB largest=%uKB | int free=%uKB largest=%uKB\n",
@@ -7379,28 +7940,51 @@ void setup() {
   // (nonstop scan+auth = battery drain, and scans fail while it churns).
   // All reconnect policy lives in wifi_auto_tick()'s bounded rounds instead.
   WiFi.setAutoReconnect(false);
-#if defined(BOARD_TDISPLAY_P4)
-  // WiFi diagnostics (the C6 over esp-hosted): every station event, with
-  // the disconnect reason and the RSSI at the disconnect.
+  // WiFi driver events: each scan's end as the driver reported it (status
+  // 0 = done, 1 = failed, and its network count), station start and stop,
+  // each join, and every disconnect with its reason and the RSSI at the
+  // disconnect.
   WiFi.onEvent([](arduino_event_id_t event, arduino_event_info_t info) {
     switch (event) {
-      case ARDUINO_EVENT_WIFI_STA_CONNECTED:
-        SLog.printf("[WIFI] event: connected (channel %u)\n",
-                    (unsigned)info.wifi_sta_connected.channel);
+      case ARDUINO_EVENT_WIFI_SCAN_DONE:
+        // One write: the event count and this event's status (see wa_scan_event).
+        wa_scan_event = (((wa_scan_event >> 8) + 1) << 8) |
+                        (uint32_t)(info.wifi_scan_done.status & 0xFF);
+        wifi_log("event: scan done, status %u, %u network(s)",
+                 (unsigned)info.wifi_scan_done.status, (unsigned)info.wifi_scan_done.number);
         break;
-      case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-        SLog.printf("[WIFI] event: disconnected, reason %u (%s), rssi %d\n",
-                    (unsigned)info.wifi_sta_disconnected.reason,
-                    WiFi.disconnectReasonName((wifi_err_reason_t)info.wifi_sta_disconnected.reason),
-                    (int)info.wifi_sta_disconnected.rssi);
+      case ARDUINO_EVENT_WIFI_STA_START: wifi_log("event: station started"); break;
+      case ARDUINO_EVENT_WIFI_STA_STOP:  wifi_log("event: station stopped"); break;
+      case ARDUINO_EVENT_WIFI_STA_CONNECTED: {
+        unsigned n = info.wifi_sta_connected.ssid_len;
+        if (n > 32) n = 32;
+        wifi_log("event: connected to %.*s (channel %u)", (int)n,
+                 (const char *)info.wifi_sta_connected.ssid,
+                 (unsigned)info.wifi_sta_connected.channel);
         break;
-      case ARDUINO_EVENT_WIFI_STA_GOT_IP:  SLog.println("[WIFI] event: got IP");          break;
-      case ARDUINO_EVENT_WIFI_STA_LOST_IP: SLog.println("[WIFI] event: lost IP");         break;
-      case ARDUINO_EVENT_WIFI_STA_STOP:    SLog.println("[WIFI] event: station stopped"); break;
+      }
+      case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: {
+        unsigned n = info.wifi_sta_disconnected.ssid_len;
+        if (n > 32) n = 32;
+        uint8_t reason = info.wifi_sta_disconnected.reason;
+        wifi_log("event: disconnected from %.*s, reason %u (%s), rssi %d", (int)n,
+                 (const char *)info.wifi_sta_disconnected.ssid, (unsigned)reason,
+                 WiFi.disconnectReasonName((wifi_err_reason_t)reason),
+                 (int)info.wifi_sta_disconnected.rssi);
+        // A failed join of the network the connect round is joining (see
+        // wa_join_fails). ASSOC_LEAVE is our own disconnect, not a failure.
+        if (reason != WIFI_REASON_ASSOC_LEAVE && n == strlen(wa_join_ssid) &&
+            memcmp(info.wifi_sta_disconnected.ssid, wa_join_ssid, n) == 0) {
+          wa_join_fail_reason = reason;
+          wa_join_fails = wa_join_fails + 1;
+        }
+        break;
+      }
+      case ARDUINO_EVENT_WIFI_STA_GOT_IP:  wifi_log("event: got IP");  break;
+      case ARDUINO_EVENT_WIFI_STA_LOST_IP: wifi_log("event: lost IP"); break;
       default: break;
     }
   });
-#endif
   if (wifi_enabled_pref) {
     WiFi.mode(WIFI_STA);
     if (!wifi_auto_kick()) {
@@ -7543,6 +8127,12 @@ void setup() {
   // session timers — the USB-host backend registers later via the tdeck
   // driver's link socket). See src/tdeck_link.cpp.
   tdeck_link_init();
+
+  // The small-block strip is the last PSRAM allocation of setup() before the
+  // first luaBringUp(): the theme font buffers allocated there start right
+  // after it.
+  small_strip_create();
+  log_boot_mem("after small-block strip");
 
   SLog.println("===== LUA INIT =====");
 
@@ -7790,8 +8380,10 @@ static void system_shutdown() {
 // or when GPIO0 (trackball click / USER) is pressed. Runs from the top of
 // loop() via s_standby_request.
 // Chip-armed-in-RX: every protocol drives the chip through the HAL's raw ops,
-// so its tracking answers for all of them. DIO1 latches HIGH on RX-done —
-// the level wake below is protocol-free.
+// so its tracking answers for all of them. DIO1 goes HIGH at RX-done (where
+// DIO1 is a GPIO, already at a valid header: radio_chip_sx126x.cpp) and
+// stays HIGH until the packet is read — the level wake below is
+// protocol-free.
 static bool standby_radio_in_rx() {
   return radio_hal_in_recv();
 }
@@ -7901,8 +8493,10 @@ static void standby_run() {
     bool slept = false;
     bool arm_dio1 = !standby_no_radio();
     if (!arm_dio1 || standby_radio_in_rx()) {
-      // Level wakes: DIO1 idles LOW and latches HIGH on RX-done; GPIO0
-      // idles HIGH (its pull survives light sleep) and reads LOW pressed.
+      // Level wakes: DIO1 idles LOW and goes HIGH for a packet (from its
+      // valid header where DIO1 is a GPIO, so a packet still arriving
+      // re-wakes at once until its RX-done is read); GPIO0 idles HIGH (its
+      // pull survives light sleep) and reads LOW pressed.
       // The timer is a safety net: if the DIO1 level wake ever fails to
       // fire, the next timer wake polls the radio's IRQ register instead,
       // bounding notification latency at ~15s.

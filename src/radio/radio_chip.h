@@ -53,6 +53,15 @@ public:
   virtual int16_t  standby() = 0;
   virtual int16_t  sleep() = 0;
 
+  // The GPIO wired to the chip's IRQ output, or -1 where that line is not a
+  // GPIO (the T-Display P4 reads it through an I/O expander). Where it is
+  // one, the adapter routes onto it every flag the chip raises that
+  // radio_hal_poll_irq()'s callers test: TX_DONE, RX_DONE and HEADER_VALID
+  // (PREAMBLE_DETECTED, which they test too, is not enabled, so the chip
+  // does not raise it). While the line reads low, none of those flags is
+  // latched in the IRQ register.
+  virtual int irqGpio() const = 0;
+
   // Receiver recovery: redo the chip's calibrations for the operating
   // frequency, then re-apply the board wiring and the rx boost state.
   // Leaves the chip in standby.

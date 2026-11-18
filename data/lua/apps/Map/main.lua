@@ -3888,7 +3888,11 @@ local function center_on_self()
     refresh_tiles()
 end
 
-local function shutdown()
+-- Cleanup for every exit through apps.go_home(): the close button and the ESC
+-- key (shutdown below) and the home chord. go_home runs it before the manager
+-- tears the UI down. Registered after apps.new_root, which clears an earlier
+-- callback.
+apps.set_on_close(function()
     map.running = false                               -- stops timer-tick work
     arch_load_stop()                                  -- untracked timer — stop explicitly
     -- The meshprint scan timer is untracked and can outlive a closed MP screen
@@ -3916,7 +3920,10 @@ local function shutdown()
     -- largest contiguous internal block below what a heavy app (Doom) needs for
     -- its own task stack right after the Map. Recreated on the next tile fetch.
     pcall(_tile_fetch_close)
-    apps.go_home()   -- manager: _nav_clear, delete tracked timers, then the root
+end)
+
+local function shutdown()
+    apps.go_home()   -- manager: the cleanup above, _nav_clear, delete tracked timers, then the root
 end
 
 -- ---------------------------------------------------------------------------

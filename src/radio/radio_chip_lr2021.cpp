@@ -107,6 +107,8 @@ public:
     return r->startReceive();
   }
   uint32_t irqFlags() override                         { return to_sx126x(r->getIrqFlags()); }
+  // DIO11 reaches the host through the expander (IO17), not a GPIO.
+  int irqGpio() const override                         { return -1; }
   size_t   packetLength() override                     { return r->getPacketLength(); }
   int16_t  readData(uint8_t* buf, size_t len) override { return r->readData(buf, len); }
   int16_t  startTransmit(const uint8_t* buf, size_t len) override { return r->startTransmit(buf, len); }

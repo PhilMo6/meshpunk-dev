@@ -18,6 +18,13 @@
 # staged next to the Xtensa files. No -lm/-lgcc on rv32: the toolchain's
 # libgcc.a/libm.a are not position-independent and ld refuses them in a
 # shared object, so every builtin a module needs comes from proto_exports[].
+#
+# The Xtensa LoRa elf carries a .iram.text section: meshcore_hot.ld lists the
+# functions linked into it, and lib/elf_loader copies the section into
+# internal SRAM at load. The audit after the link fails the build when the
+# section is missing, when a listed function is not in it, or when code in it
+# reaches outside it PC-relatively. The rv32 elf and both companion elfs are
+# built without it.
 param(
     [ValidateSet("s3", "rv32")]
     [string]$Arch = "s3"
@@ -30,13 +37,21 @@ if ($Arch -eq "rv32") {
     $ARCH_EXT = ".rv32.elf"
     $ARCH_CFLAGS = @("-march=rv32imafc_zicsr_zifencei", "-mabi=ilp32f", "-mno-relax")
     $LIBS = @()
+    $HOT_FLAGS = @()
 } else {
     $toolchain = "$env:USERPROFILE\.platformio\packages\toolchain-xtensa-esp32s3\bin"
     $CXX     = "$toolchain\xtensa-esp32s3-elf-g++.exe"
     $READELF = "$toolchain\xtensa-esp32s3-elf-readelf.exe"
+    $OBJDUMP = "$toolchain\xtensa-esp32s3-elf-objdump.exe"
+    $NM      = "$toolchain\xtensa-esp32s3-elf-nm.exe"
     $ARCH_EXT = ".elf"
     $ARCH_CFLAGS = @("-mlongcalls")
     $LIBS = @("-lm", "-lgcc")
+    # LoRa elf only. -mtext-section-literals keeps each function's literal
+    # pool in the function's own input section, so the pool travels with the
+    # functions meshcore_hot.ld collects into .iram.text.
+    $HOT_LD = "meshcore_hot.ld"
+    $HOT_FLAGS = @("-mtext-section-literals", "-Wl,-T,$HOT_LD")
 }
 
 $OUT  = "meshcore.loraproto$ARCH_EXT"
@@ -122,7 +137,7 @@ $FLAGS = $ARCH_CFLAGS + @(
 )
 
 Write-Host "  CXX  $($SRC.Count) sources -> $OUT"
-& $CXX @FLAGS -o $OUT @SRC @LIBS
+& $CXX @FLAGS @HOT_FLAGS -o $OUT @SRC @LIBS
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Compilation failed!"
     exit 1
@@ -182,6 +197,102 @@ if ($ops) {
 } else {
     Write-Host "ERROR: loraproto_ops is NOT exported!"
     exit 1
+}
+
+# .iram.text audit (Xtensa LoRa elf). The loader copies the section into
+# internal SRAM, which changes its distance to every other section. Absolute
+# references survive (the loader relocates them); l32r literals and direct
+# call, jump and branch targets are PC-relative and fixed at link time, so
+# each one must lie inside the section.
+if ($Arch -ne "rv32") {
+    Write-Host ""
+    $iram = & $READELF -S -W $OUT | Select-String '\.iram\.text\s+PROGBITS\s+([0-9a-f]+)\s+[0-9a-f]+\s+([0-9a-f]+)'
+    if (-not $iram) {
+        Write-Host "ERROR: $OUT has no .iram.text section ($HOT_LD)"
+        exit 1
+    }
+    $sec_addr = [Convert]::ToUInt32($iram.Matches[0].Groups[1].Value, 16)
+    $sec_size = [Convert]::ToUInt32($iram.Matches[0].Groups[2].Value, 16)
+    $sec_end  = $sec_addr + $sec_size
+    Write-Host ".iram.text: $sec_size bytes of internal SRAM at load"
+
+    # Function symbols whose address is inside the section (mangled names
+    # are case-sensitive: a HashSet, not a PowerShell hashtable).
+    $hotSyms = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($line in (& $NM --defined-only $OUT)) {
+        $fields = ($line -replace '\s+', ' ').Trim().Split(' ')
+        if ($fields.Length -ge 3 -and 'tTwW'.Contains($fields[1])) {
+            $addr = [Convert]::ToUInt32($fields[0], 16)
+            if ($addr -ge $sec_addr -and $addr -lt $sec_end) {
+                $hotSyms.Add($fields[2]) | Out-Null
+            }
+        }
+    }
+
+    # Every "*(.text.<symbol>)" entry of the linker script must have put its
+    # function in the section; an entry that ends in "*" names a prefix.
+    $ldText = Get-Content (Join-Path $PSScriptRoot $HOT_LD) -Raw
+    $listed = 0
+    $notHot = @()
+    foreach ($entry in [regex]::Matches($ldText, '\*\(\.text\.([A-Za-z0-9_$.]+)(\*?)\)')) {
+        $listed++
+        $want = $entry.Groups[1].Value
+        $found = $false
+        if ($entry.Groups[2].Value -eq '*') {
+            foreach ($have in $hotSyms) {
+                if ($have.StartsWith($want, [System.StringComparison]::Ordinal)) { $found = $true }
+            }
+        } else {
+            $found = $hotSyms.Contains($want)
+        }
+        if (-not $found) { $notHot += $want }
+    }
+    if ($listed -eq 0) {
+        Write-Host "ERROR: $HOT_LD lists no functions"
+        exit 1
+    }
+    if ($notHot.Count -gt 0) {
+        Write-Host "ERROR: $($notHot.Count) function(s) listed in $HOT_LD are not in .iram.text:"
+        $notHot | ForEach-Object { Write-Host "  $_" }
+        exit 1
+    }
+    Write-Host "  all $listed functions listed in $HOT_LD are in the section ($($hotSyms.Count) function symbols)"
+
+    $literals = 0
+    $directs = 0
+    $escapes = 0
+    foreach ($line in (& $OBJDUMP -d --no-show-raw-insn --section=.iram.text $OUT)) {
+        if ($line -notmatch '^\s*[0-9a-f]+:\s+(\S+)\s*(.*)$') { continue }
+        $insn = $matches[1]
+        $operands = $matches[2]
+        $target = $null
+        if ($insn -eq 'l32r') {
+            if ($operands -match ',\s*(?:0x)?([0-9a-f]+)') {
+                $literals++
+                $target = [Convert]::ToUInt32($matches[1], 16)
+            }
+        } elseif ($insn -match '^(call0|call4|call8|call12|j|loop|loopnez|loopgtz)$' -or
+                  ($insn -match '^b' -and $insn -notmatch '^break')) {
+            if ($operands -match '(?:^|,\s*)(?:0x)?([0-9a-f]{4,8})(?:\s|$|<)') {
+                $directs++
+                $target = [Convert]::ToUInt32($matches[1], 16)
+            }
+        }
+        if ($target -ne $null -and ($target -lt $sec_addr -or $target -ge $sec_end)) {
+            if ($escapes -lt 5) { Write-Host "  ESCAPES SECTION: $($line.Trim())" }
+            $escapes++
+        }
+    }
+    if ($escapes -gt 0) {
+        Write-Host "ERROR: $escapes PC-relative reference(s) in .iram.text reach outside it."
+        Write-Host "  The section is not self-contained and will crash once moved."
+        exit 1
+    }
+    if ($literals -eq 0 -and $directs -eq 0) {
+        Write-Host "ERROR: the .iram.text disassembly gave no l32r or branch to check"
+        exit 1
+    }
+    Write-Host "  all $literals l32r targets and $directs call/jump/branch targets resolve inside the section"
 }
 
 # ── The companion elf (BLE slot) ────────────────────────────────────────────

@@ -1,6 +1,8 @@
 // audio_plugin.cpp — loader for audio plugin modules (audio_plugin_abi.h):
 // one plugin at a time, loaded beside Lua by an app, its worker on core 1
-// below the mesh task, its memory granted at load and freed at unload.
+// below the mesh task, its `needs` blocks granted at load and freed at
+// unload, its working memory (psram_alloc) held from the worker's request
+// to its release.
 
 #include "audio_plugin.h"
 #include "audio_plugin_abi.h"
@@ -86,6 +88,8 @@ struct PlugSession {
     const AudioPlugDesc* desc;
     void*                blocks[AUDIOPLUG_MAX_BLOCKS];      // 16-byte aligned, inside block_mem
     void*                block_mem[AUDIOPLUG_MAX_BLOCKS];   // heap_caps_malloc's pointers
+    void*                work[AUDIOPLUG_MAX_WORK];          // psram_alloc's blocks, inside work_mem
+    void*                work_mem[AUDIOPLUG_MAX_WORK];      // heap_caps_malloc's pointers, NULL = slot free
     TaskHandle_t         task;
     volatile bool        stop;
     volatile bool        worker_done;
@@ -253,6 +257,45 @@ static void api_file_close(int h) {
     f->fd = -1;
 }
 
+// Working memory is taken as the `needs` blocks are (plugin_load): bytes + 15
+// from heap_caps_malloc, the block 16-byte aligned inside it.
+static void* api_psram_alloc(uint32_t bytes) {
+    PlugSession* s = s_sess;
+    if (!s || !bytes) return nullptr;
+    int slot = -1;
+    for (int i = 0; i < AUDIOPLUG_MAX_WORK; i++) {
+        if (!s->work_mem[i]) { slot = i; break; }
+    }
+    if (slot < 0) {
+        api_log("FAIL: psram_alloc of %u bytes: all %d working blocks are held", (unsigned)bytes, AUDIOPLUG_MAX_WORK);
+        return nullptr;
+    }
+    void* mem = heap_caps_malloc(bytes + 15, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!mem) return nullptr;
+    s->work_mem[slot] = mem;
+    s->work[slot] = (void*)(((uintptr_t)mem + 15) & ~(uintptr_t)15);
+    return s->work[slot];
+}
+
+static void api_psram_free(void* block) {
+    PlugSession* s = s_sess;
+    if (!s || !block) return;
+    for (int i = 0; i < AUDIOPLUG_MAX_WORK; i++) {
+        if (s->work_mem[i] && s->work[i] == block) {
+            heap_caps_free(s->work_mem[i]);
+            s->work_mem[i] = nullptr;
+            s->work[i] = nullptr;
+            return;
+        }
+    }
+    api_log("FAIL: psram_free of %p: not a block psram_alloc returned", block);
+}
+
+static uint32_t api_psram_largest(void) {
+    size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return largest > 15 ? (uint32_t)(largest - 15) : 0;
+}
+
 static const AudioPlugHostApi s_api = {
     AUDIO_PLUGIN_ABI_VERSION,
     &api_log,
@@ -270,6 +313,9 @@ static const AudioPlugHostApi s_api = {
     &api_file_seek,
     &api_file_read,
     &api_file_close,
+    &api_psram_alloc,
+    &api_psram_free,
+    &api_psram_largest,
 };
 
 // ── Load / unload ────────────────────────────────────────────────────────────
@@ -299,6 +345,12 @@ static void session_free(PlugSession* s) {
             if (s->files[i].sd) sd_spi_take();
             close(s->files[i].fd);
             if (s->files[i].sd) sd_spi_release();
+        }
+    }
+    for (int i = 0; i < AUDIOPLUG_MAX_WORK; i++) {
+        if (s->work_mem[i]) {
+            SLog.printf("[APLUG] %s left working block %d held; freed\n", s->name, i);
+            heap_caps_free(s->work_mem[i]);
         }
     }
     for (int i = 0; i < AUDIOPLUG_MAX_BLOCKS; i++) {

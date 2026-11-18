@@ -76,8 +76,9 @@
   // MESHPUNK: 1 (upstream 0). src/radio/radio_chip_sx126x.cpp and
   // radio_chip_lr2021.cpp send the chips' Calibrate command below the public
   // API (SX126x::mod->SPIwriteStream, LR2021::calibrate) and wait on the
-  // BUSY line through the Module (SX126x::mod, LR2021::getMod()); upstream
-  // keeps those members private.
+  // BUSY line through the Module (SX126x::mod, LR2021::getMod());
+  // radio_chip_sx126x.cpp reads the DIO1 pin through SX126x::getMod();
+  // upstream keeps those members private.
   #define RADIOLIB_GODMODE (1)
 #endif
 

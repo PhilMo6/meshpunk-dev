@@ -36,14 +36,31 @@ inline constexpr const uint16_t kHeapMaxBlocks{128};
 inline constexpr const uint32_t kTileBytes{16 * 1'024};
 inline constexpr const uint32_t kBiasTileBytes{1 * 1'024};
 
-// Plugin memory (plugin.cpp needs): the tensor heap for activations, the
-// blocks the model's resident tensors and tensor table live in, and the
-// audio FIFO between the microphone and the front end. STT_MODEL_RESIDENT
+// Plugin memory (plugin.cpp): the blocks the model's resident tensors and
+// tensor table live in (its needs, held from load to unload), and the
+// tensor heap for activations and the audio FIFO between the microphone and
+// the front end (each its own block, held for a listen or a file:
+// TakeWork). STT_MODEL_RESIDENT
 // (the P4 build: 32 MB PSRAM) keeps the whole model there (13,735,424
 // bytes with the table), so no clip reads the SD card, in two blocks of
 // 7 MiB (944 KB to spare): a load needs no 14 MB of contiguous PSRAM.
 // Elsewhere one block holds the front end's tensors only.
+//
+// The tensor heap's size. A tensor it cannot hold stops the firmware
+// (tlib::Tensor asserts on a failed allocation). The build with the S3
+// kernels (build.ps1 -Variant s3) never extends its heap past 1,350,080
+// bytes: the largest extent over every heap state the clip logic reaches (a
+// cut at any chunk from kClipCutFrom to kClipMaxChunks, a clip skipped as
+// quiet, a final clip of any length, in any order: 2,482 states), from that
+// build's allocation trace replayed on a model of tlib::heap's first fit.
+// The figure belongs to this model file's tensor shapes and these clip
+// constants. The portable builds (STT_KERNELS_C: rv32, s3c) allocate
+// differently in the attention (bmm_relpos); their extent is not measured.
+#ifdef STT_KERNELS_C
 inline constexpr const uint32_t kWorkHeapBytes{1'536 * 1'024};
+#else
+inline constexpr const uint32_t kWorkHeapBytes{1'376 * 1'024};
+#endif
 #ifdef STT_MODEL_RESIDENT
 inline constexpr const uint32_t kResidentBytes{7 * 1'024 * 1'024};
 inline constexpr const uint32_t kResidentBBytes{7 * 1'024 * 1'024};

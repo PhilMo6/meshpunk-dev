@@ -6,10 +6,11 @@
 // The ONE access path to the LoRa chip, whichever LoRa protocol is active:
 // bring-up, parameter programming, and the raw polled TX/RX primitives.
 // Protocol modules call these through the MeshHostApi table. Every call
-// takes SPI_LOCK (the bus is shared with TFT + SD on the T-Deck). The chip
-// itself sits behind a RadioChip adapter (radio_chip.h): the SX1262 on the
-// S3 boards and the T-Display P4's SX1262 SKU, the LR2021 on the P4's
-// other SKU — IRQ snapshots are always in SX126x bit positions.
+// that reaches the chip takes SPI_LOCK (the bus is shared with TFT + SD on
+// the T-Deck). The chip itself sits behind a RadioChip adapter
+// (radio_chip.h): the SX1262 on the S3 boards and the T-Display P4's SX1262
+// SKU, the LR2021 on the P4's other SKU — IRQ snapshots are always in SX126x
+// bit positions.
 //
 // This header is MeshCore-free on purpose: protocol modules compile against
 // it (via the MeshHostApi function table), and the record of what the chip
@@ -59,7 +60,12 @@ bool     radio_hal_start_receive();
 // Chip armed in RX (HAL-tracked; every chip access flows through these raw
 // ops, so this is the standby loop's RX check under any protocol).
 bool     radio_hal_in_recv();
-uint32_t radio_hal_poll_irq();                            // SX126x IRQ flag snapshot
+// SX126x IRQ flag snapshot. On a board whose radio IRQ line is a GPIO
+// (radio_chip.h irqGpio()) the register is read only while that line is
+// high; while it is low the result is 0 without a bus transaction. The line
+// carries TX_DONE, RX_DONE and HEADER_VALID, so the other flags (CRC_ERR,
+// HEADER_ERR, TIMEOUT) show only beside one of those.
+uint32_t radio_hal_poll_irq();
 int      radio_hal_read_packet(uint8_t* buf, int max_len); // after RX_DONE; re-arms RX; -1 on error
 bool     radio_hal_start_send(const uint8_t* buf, int len);
 void     radio_hal_send_finished();                       // after TX_DONE: finishTransmit + re-enter RX

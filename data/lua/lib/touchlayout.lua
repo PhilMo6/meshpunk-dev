@@ -21,14 +21,20 @@
 -- manager has no knowledge of layouts.
 
 local lvgl = require("lvgl")
+local utils = require("lib/utils")
 
 local M = {}
 
 local MODE_OFF, MODE_PAD, MODE_PAD_HIDDEN = 0, 1, 2
 
+-- Mode names as Settings > Device shows them, by mode value.
+local MODE_NAMES = { [0] = "Off", [1] = "Pad", [2] = "Pad hidden", [3] = "Keyboard" }
+local MODE_TOAST_MS = 1500
+
 -- ── State ───────────────────────────────────────────────────────────────────
 local layout  = nil       -- zones the running app set, or nil for no pad
 local overlay = nil       -- indicator layer
+local toast   = nil       -- the mode-name notification on screen, if any
 
 local function delete_overlay()
     if overlay then
@@ -109,9 +115,28 @@ function M.clear()
     delete_overlay()
 end
 
+-- The new mode's name for a moment: in an app with no pad, and in Pad
+-- hidden, nothing else on screen says which mode is live. A newer swap
+-- replaces the previous notification instead of stacking on it; the delete is
+-- pcall'd because that one may already be gone (its own timer, or an app
+-- teardown took the screen's children with it).
+local function show_mode(mode)
+    if toast then
+        local t = toast
+        toast = nil
+        pcall(function() t:delete() end)
+    end
+    toast = utils.createNotification(lvgl.disp.get_scr_act(),
+        "Touch input: " .. (MODE_NAMES[mode] or "?"), MODE_TOAST_MS)
+end
+
 -- ── Mode trigger (aux button / Shift+Alt chord / MODE zone) ─────────────────
+-- A board with no touch panel never changes mode, so it gets no notification.
 function M.on_mode_button()
-    apply(_touch_mode_cycle(layout ~= nil))
+    local before = _touch_mode()
+    local mode = _touch_mode_cycle(layout ~= nil)
+    apply(mode)
+    if mode ~= before then show_mode(mode) end
 end
 
 return M

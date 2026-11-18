@@ -22,6 +22,7 @@
 #include "notify.h"
 #include <helpers/ArduinoHelpers.h>   // VolatileRTCClock
 #include <esp_heap_caps.h>
+#include "lv_mem_psram.h"             // lv_mem_small_stats: LVGL's small-block pool
 
 extern VolatileRTCClock* host_rtc;    // host-owned device clock (main.cpp)
 extern volatile uint32_t g_lua_arena_spill_count;   // main.cpp: Lua allocs that missed the arena
@@ -70,7 +71,11 @@ static void mesh_task_body(void *param) {
     uint32_t now = millis();
     if (now - last_heap_log > 60000) {
       last_heap_log = now;
-      SLog.printf("[HEAP] internal: %u free, %u largest | PSRAM: %u free, %u largest | min ever: %u | lua_spill: %u | lua_heap: %u | arena_free: %u\n",
+      // lv_small: LVGL's small-block pool, bytes taken now / the most taken at
+      // once / small requests it had no room for (served from the PSRAM heap).
+      uint32_t lv_used = 0, lv_peak = 0, lv_spilled = 0;
+      lv_mem_small_stats(&lv_used, &lv_peak, &lv_spilled);
+      SLog.printf("[HEAP] internal: %u free, %u largest | PSRAM: %u free, %u largest | min ever: %u | lua_spill: %u | lua_heap: %u | arena_free: %u | lv_small: %u used, %u peak, %u spilled\n",
           heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
           heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
           heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
@@ -78,7 +83,8 @@ static void mesh_task_body(void *param) {
           esp_get_minimum_free_heap_size(),
           (unsigned)g_lua_arena_spill_count,
           (unsigned)g_lua_heap_bytes,
-          (unsigned)g_lua_arena_free_bytes);
+          (unsigned)g_lua_arena_free_bytes,
+          (unsigned)lv_used, (unsigned)lv_peak, (unsigned)lv_spilled);
     }
 
     // Yield so lower priority tasks (IDLE, watchdog) can run.

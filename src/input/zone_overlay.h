@@ -61,3 +61,16 @@ void zone_overlay_push_outside(int fx, int fy, int fw, int fh, bool erase,
 // render blank. Advance per char is 6*scale px; glyph height 7*scale.
 void zone_overlay_draw_text(uint16_t* buf, int bw, int x, int y, int scale,
                             const char* s, uint16_t color);
+
+// Timed labels: short texts in an opaque box centred on a screen_w x
+// screen_h screen, one shown at a time until its time runs out. All are
+// rendered by labels_build, under the same no-stamper-running rule as
+// build; show() then allocates nothing and is safe from any task.
+void zone_overlay_labels_build(const char* const* texts, int count,
+                               int screen_w, int screen_h);
+void zone_overlay_labels_clear(void);
+void zone_overlay_label_show(int index, uint32_t duration_ms);
+
+// Stamp the label being shown, if its time has not run out, into a frame
+// positioned at screen (fx,fy) with size fw x fh (clipped).
+void zone_overlay_label_stamp(uint16_t* frame, int fx, int fy, int fw, int fh);

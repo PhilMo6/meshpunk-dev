@@ -234,6 +234,16 @@ static int       s_elf_mzone_count = 0;
 #define CHIP_SET_PAD   0
 #define CHIP_SET_MOUSE 1
 
+// The mode's name, shown in mid-screen for MODE_LABEL_MS after each swap:
+// several modes put nothing else on screen. Indexed by mode value; the
+// Settings > Device names in capitals (the overlay font has no lowercase).
+#define MODE_LABEL_MS 1500
+static const char* const k_mode_labels[] = {
+    "TOUCH OFF", "PAD", "PAD HIDDEN", "KEYBOARD", "MOUSE", "MOUSE PAD",
+};
+static_assert(sizeof(k_mode_labels) / sizeof(k_mode_labels[0]) == TOUCH_MODE_COUNT,
+              "one label per touch mode");
+
 // ── Touch mouse (host_touch_read) ──────────────────────────────────────────
 // s_touch_mouse_ok: the module has called host_touch_read, which puts the two
 // mouse modes in its touch-mode cycle. s_mouse_mode: one of them is applied
@@ -823,9 +833,13 @@ static void poll_input(bool kb_only = false) {
             s_zone_prev_out = 0;
             s_zone_prev_n   = 0;
             s_osk_hover     = 0;
-            elf_apply_touch_mode(input_ui_touch_mode_cycle(
+            uint8_t before = input_ui_touch_mode();
+            uint8_t mode = input_ui_touch_mode_cycle(
                 s_elf_zone_count > 0, s_touch_mouse_ok,
-                s_touch_mouse_ok && s_elf_mzone_count > 0));
+                s_touch_mouse_ok && s_elf_mzone_count > 0);
+            elf_apply_touch_mode(mode);
+            // A board with no touch panel never changes mode; nothing to say.
+            if (mode != before) zone_overlay_label_show(mode, MODE_LABEL_MS);
         }
     }
 }
@@ -910,6 +924,8 @@ static void elf_input_start() {
     zone_overlay_build(s_elf_zones, s_elf_zone_count);
     if (s_elf_mzone_count > 0)
         zone_overlay_add(s_elf_mzones, s_elf_mzone_count, CHIP_SET_MOUSE);
+    zone_overlay_labels_build(k_mode_labels, TOUCH_MODE_COUNT,
+                              display_dev_width(), display_dev_height());
     elf_apply_touch_mode(input_ui_touch_mode());
     s_input_task_run = true;
     // Priority 5: ABOVE usb_mgr (4), sound_task (3) and elf_blit (3). The
@@ -963,6 +979,7 @@ static void elf_zones_teardown() {
     input_zones_enable(false);
     input_zones_clear();
     zone_overlay_clear();
+    zone_overlay_labels_clear();
     s_elf_zone_count  = 0;
     s_elf_mzone_count = 0;
     s_zone_overlay_on = false;
@@ -1553,6 +1570,9 @@ void host_blit_frame(const uint16_t* rgb565, int w, int h) {
     // keeps rendering while the user types.)
     if (host_osk_active())
         host_osk_stamp((uint16_t*)rgb565, x_offset, y_offset, w, h);
+    // A touch-mode name after a swap goes on top of both, for as long as it
+    // shows; once it runs out the next frame no longer carries it.
+    zone_overlay_label_stamp((uint16_t*)rgb565, x_offset, y_offset, w, h);
     display_dev_blit(x_offset, y_offset, w, h, rgb565);
     // Chip parts in the letterbox borders never ride a frame — push them
     // once per screen-clear, AFTER the frame so a clear can't wipe them.
@@ -1580,6 +1600,7 @@ void host_blit_rect(const uint16_t* rgb565, int x, int y, int w, int h) {
         zone_overlay_stamp((uint16_t*)rgb565, x, y, w, h);
     if (host_osk_active())
         host_osk_stamp((uint16_t*)rgb565, x, y, w, h);
+    zone_overlay_label_stamp((uint16_t*)rgb565, x, y, w, h);
     display_dev_blit(x, y, w, h, rgb565);
 }
 
@@ -3041,6 +3062,31 @@ void elf_arch_path(const char* in, char* out, size_t cap) {
     strlcpy(out, in, cap);
 }
 
+// The image block of the module being launched. elf_host_run_pending()
+// allocates it before it reads the module's file and gives it to the loader
+// as the segment block (launch_image_take). taken: the loader has it and
+// frees it in elf_unload().
+struct LaunchImage { void* mem; uint32_t size; bool taken; };
+static LaunchImage s_launch_img = { nullptr, 0, false };
+
+static void* launch_image_take(size_t size, void* ctx) {
+    LaunchImage* im = (LaunchImage*)ctx;
+    if (!im->mem || im->taken || size != im->size) return nullptr;
+    im->taken = true;
+    return im->mem;
+}
+
+// elf_image_size() of a module file, from the file's first bytes. 0 when
+// they cannot be read or do not hold the file's program header table.
+static uint32_t launch_image_size(const char* path) {
+    alignas(4) static uint8_t head[1024];
+    MeshpunkFile mf = meshpunk_open(path, "r", /*default_sd=*/true);
+    if (!mf.valid) return 0;
+    size_t got = mf.file.read(head, sizeof(head));
+    meshpunk_close(mf);
+    return elf_image_size(head, got);
+}
+
 int elf_host_run_pending(void) {
     // The launcher names the ".elf" artifact; this CPU loads its own
     // (elf_arch_path). argv[0] stays the name the launcher gave.
@@ -3056,11 +3102,33 @@ int elf_host_run_pending(void) {
                   heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                   heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
 
+    // The module's image block is allocated before the file is read. The
+    // file copy is freed after the load. TLSF splits an allocation off the
+    // start of a free block, so when both come out of the same free block the
+    // copy lies above the image, and freeing the copy leaves no hole below
+    // the image.
+    s_launch_img.mem   = nullptr;
+    s_launch_img.taken = false;
+    s_launch_img.size  = launch_image_size(path);
+    if (!s_launch_img.size) {
+        SLog.printf("[elf_host] FAIL: no ELF program headers read from %s\n", path);
+    } else {
+        s_launch_img.mem = elf_image_alloc(s_launch_img.size);
+        if (!s_launch_img.mem)
+            SLog.printf("[elf_host] FAIL: no block of %u bytes for the module image (largest PSRAM block %u)\n",
+                        (unsigned)s_launch_img.size,
+                        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    }
+
     // Read ELF file from SD
     uint32_t elf_size = 0;
     void* elf_data = host_read_file(path, &elf_size);
     if (!elf_data) {
         SLog.printf("[elf_host] failed to read ELF file: %s\n", path);
+        if (s_launch_img.mem) {
+            heap_caps_free(s_launch_img.mem);
+            s_launch_img.mem = nullptr;
+        }
         // Launch failures are otherwise INVISIBLE (Lua is torn down, the app
         // "just closes") — surface every one through the notification bell.
         {
@@ -3178,10 +3246,14 @@ int elf_host_run_pending(void) {
     // (display_dev.h). Restored after the cleanup below, on every path.
     display_dev_module_video(true);
 
-    // Load and relocate
-    elf_module_t* mod = elf_load(elf_data, elf_size, host_exports);
+    // Load and relocate. The loader's segment block is s_launch_img.
+    elf_module_t* mod = elf_load_ex(elf_data, elf_size, host_exports,
+                                    launch_image_take, NULL, &s_launch_img);
     heap_caps_free(elf_data); // raw ELF data no longer needed
     elf_data = NULL;
+    // A load that stopped before its segment allocation did not take the block.
+    if (s_launch_img.mem && !s_launch_img.taken) heap_caps_free(s_launch_img.mem);
+    s_launch_img.mem = nullptr;
 
     int result = -1;
     if (mod) {

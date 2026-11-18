@@ -558,8 +558,10 @@
 //                  so lengths came out in 8 s steps; WAV lengths were also
 //                  44 bytes short). No ELF host_export.
 //                  ALSO this level: audio plugins (src/audio/
-//                  audio_plugin_abi.h, ABI 1) — "<id>.audioplug.elf"
-//                  modules an app loads beside Lua, their worker on core 1.
+//                  audio_plugin_abi.h, ABI 2) — "<id>.audioplug.elf"
+//                  modules an app loads beside Lua, their worker on core 1,
+//                  which takes and returns its working memory through the
+//                  host's psram_alloc / psram_free.
 //                  `_audio_plug_load(path) -> true | nil, err` (one at a
 //                  time; err names a memory block that did not fit),
 //                  `_audio_plug_unload()`, `_audio_plug_loaded() -> name,
@@ -570,6 +572,10 @@
 //                  the ABI version. Plugins import only audio_plugin.cpp's
 //                  export table (libc string/memory, formatting, libm), not
 //                  host_exports.
+//                  ALSO this level: `_snapshot_take(obj, format)` takes an
+//                  optional format name, "argb8888" (the default) or
+//                  "rgb565" (2 bytes a pixel, no alpha); any other name is
+//                  an error.
 #define MESHPUNK_FW_API 16
 
 // BLE companion protocol identity (reported in the DEVICE_INFO frame — see

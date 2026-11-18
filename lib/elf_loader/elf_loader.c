@@ -482,6 +482,26 @@ static int process_rela_section(elf_module_t* mod, void* load_base,
     return 0;
 }
 
+// The virtual address range [*lo, *hi) spanned by the PT_LOAD entries of a
+// program header table. false when the table has no PT_LOAD entry.
+static bool load_span(const Elf32_Phdr* phdr, int phnum,
+                      Elf32_Addr* lo, Elf32_Addr* hi) {
+    Elf32_Addr vaddr_lo = UINT32_MAX, vaddr_hi = 0;
+    for (int i = 0; i < phnum; i++) {
+        if (phdr[i].p_type == PT_LOAD) {
+            if (phdr[i].p_vaddr < vaddr_lo)
+                vaddr_lo = phdr[i].p_vaddr;
+            Elf32_Addr end = phdr[i].p_vaddr + phdr[i].p_memsz;
+            if (end > vaddr_hi)
+                vaddr_hi = end;
+        }
+    }
+    if (vaddr_lo == UINT32_MAX) return false;
+    *lo = vaddr_lo;
+    *hi = vaddr_hi;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -489,6 +509,22 @@ static int process_rela_section(elf_module_t* mod, void* load_base,
 elf_module_t* elf_load(const void* data, size_t size,
                        const elf_symbol_t* exports) {
     return elf_load_ex(data, size, exports, NULL, NULL, NULL);
+}
+
+uint32_t elf_image_size(const void* data, size_t size) {
+    if (size < sizeof(Elf32_Ehdr)) return 0;
+    const Elf32_Ehdr* ehdr = (const Elf32_Ehdr*)data;
+    if (memcmp(ehdr->e_ident, ELFMAG, 4) != 0) return 0;
+    if ((uint64_t)ehdr->e_phoff +
+        (uint64_t)ehdr->e_phnum * sizeof(Elf32_Phdr) > size) return 0;
+    Elf32_Addr lo, hi;
+    if (!load_span((const Elf32_Phdr*)((const uint8_t*)data + ehdr->e_phoff),
+                   ehdr->e_phnum, &lo, &hi)) return 0;
+    return hi - lo;
+}
+
+void* elf_image_alloc(size_t size) {
+    return elf_alloc(size, true);
 }
 
 elf_module_t* elf_load_ex(const void* data, size_t size,
@@ -534,17 +570,8 @@ elf_module_t* elf_load_ex(const void* data, size_t size,
 
     // First pass: find total virtual address range across all PT_LOAD segments
     const Elf32_Phdr* phdr = (const Elf32_Phdr*)(raw + ehdr->e_phoff);
-    Elf32_Addr vaddr_lo = UINT32_MAX, vaddr_hi = 0;
-    for (int i = 0; i < ehdr->e_phnum; i++) {
-        if (phdr[i].p_type == PT_LOAD) {
-            if (phdr[i].p_vaddr < vaddr_lo)
-                vaddr_lo = phdr[i].p_vaddr;
-            Elf32_Addr end = phdr[i].p_vaddr + phdr[i].p_memsz;
-            if (end > vaddr_hi)
-                vaddr_hi = end;
-        }
-    }
-    if (vaddr_lo == UINT32_MAX) {
+    Elf32_Addr vaddr_lo, vaddr_hi;
+    if (!load_span(phdr, ehdr->e_phnum, &vaddr_lo, &vaddr_hi)) {
         LOG_E("no PT_LOAD segments found");
         free(mod);
         return NULL;
