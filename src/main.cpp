@@ -585,16 +585,13 @@ static uint8_t  wa_scan_retries = 0;
 static bool     wa_user_scan = false;     // Wireless app is waiting on this scan
 static bool     wa_was_connected = false; // successful connect since last failure
 static uint32_t wa_reconnect_at = 0;      // pending grace round after AP loss
-static uint32_t wa_scan_t0 = 0;           // millis() at the latest scan start
-static uint32_t wa_join_t0 = 0;           // millis() at the round's latest begin()
 // Join outcome from the driver events. Arduino's WiFi.begin() leaves the
 // station status of the previous attempt in place (only driver events change
 // it), so a round's join is judged by the events after its own begin(): a
 // STA_DISCONNECTED for the network being joined, with any reason except
 // ASSOC_LEAVE (our own disconnect), bumps wa_join_fails. The event task
-// writes wa_join_fails / wa_join_fail_reason; wifi_auto_tick() reads them.
+// writes wa_join_fails; wifi_auto_tick() reads it.
 static volatile uint32_t wa_join_fails = 0;
-static volatile uint8_t  wa_join_fail_reason = 0;
 static uint32_t wa_join_fails_at_begin = 0;   // wa_join_fails at the round's latest begin()
 static char     wa_join_ssid[33] = "";         // the network the round is joining
 static uint8_t  wa_join_attempt = 0;           // 1 or 2: which join of that network is in progress
@@ -626,37 +623,6 @@ static WifiScanState wifi_scan_state() {
   return (ev & 0xFF) == 0 ? WS_DONE : WS_FAILED;
 }
 
-// [WIFI] lines carry the uptime (seconds.ms), so a capture lines the connect
-// round up against setup() and the driver events. The line is formatted into
-// one buffer and printed with println (no second printf pass): the WiFi
-// event task logs through this too.
-static void wifi_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-static void wifi_log(const char *fmt, ...) {
-  char line[208];
-  uint32_t ms = millis();
-  int k = snprintf(line, sizeof(line), "[WIFI %lu.%03lu] ",
-                   (unsigned long)(ms / 1000), (unsigned long)(ms % 1000));
-  va_list ap;
-  va_start(ap, fmt);
-  vsnprintf(line + k, sizeof(line) - k, fmt, ap);
-  va_end(ap);
-  SLog.println(line);
-}
-
-static const char *wifi_status_name(wl_status_t st) {
-  switch (st) {
-    case WL_IDLE_STATUS:     return "idle";
-    case WL_NO_SSID_AVAIL:   return "no SSID";
-    case WL_SCAN_COMPLETED:  return "scan completed";
-    case WL_CONNECTED:       return "connected";
-    case WL_CONNECT_FAILED:  return "connect failed";
-    case WL_CONNECTION_LOST: return "connection lost";
-    case WL_DISCONNECTED:    return "disconnected";
-    case WL_NO_SHIELD:       return "no radio";
-    default:                 return "other";
-  }
-}
-
 // How long a scan listens on each channel, in ms. What follows is the S3
 // boards' driver (ESP-IDF 4.4). Under its default country policy (auto),
 // which is in force here, a station that is not connected scans 14
@@ -682,19 +648,14 @@ static const uint32_t WIFI_SCAN_LISTEN_MS = 300;
 // Arduino core 3 (the T-Display P4): the scan is started with
 // WiFi.scanNetworks(), with the active min and max WIFI_SCAN_LISTEN_MS; that
 // core copies the records only of a scan its own scanNetworks() started.
-// The log line records what the start depended on: the WiFi mode (0 = radio
-// off, 1 = station), the station status and the internal heap the driver
-// allocates its receive buffers from. Returns true when a scan is running.
-static bool wifi_scan_begin(const char *who) {
-  bool was_running = wifi_scan_state() == WS_RUNNING;
-  char how[40] = "one was already running";
-  if (!was_running) {
+// Returns true when a scan is running.
+static bool wifi_scan_begin() {
+  if (wifi_scan_state() != WS_RUNNING) {
     wa_scan_mark = wa_scan_event >> 8;   // taken before the start: the next done event is this scan's
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
     WiFi.setScanActiveMinTime(WIFI_SCAN_LISTEN_MS);
     wa_scan_started =
         WiFi.scanNetworks(true, false, false, WIFI_SCAN_LISTEN_MS) == WIFI_SCAN_RUNNING;
-    snprintf(how, sizeof(how), "%s", wa_scan_started ? "started" : "refused");
 #else
     WiFi.scanDelete();
     wifi_scan_config_t cfg = {};
@@ -702,19 +663,10 @@ static bool wifi_scan_begin(const char *who) {
     cfg.scan_time.active.min = WIFI_SCAN_LISTEN_MS;
     cfg.scan_time.active.max = WIFI_SCAN_LISTEN_MS;
     cfg.scan_time.passive = WIFI_SCAN_LISTEN_MS;
-    esp_err_t err = esp_wifi_scan_start(&cfg, false);
-    wa_scan_started = (err == ESP_OK);
-    if (wa_scan_started) snprintf(how, sizeof(how), "started");
-    else                 snprintf(how, sizeof(how), "refused (error 0x%x)", (unsigned)err);
+    wa_scan_started = (esp_wifi_scan_start(&cfg, false) == ESP_OK);
 #endif
-    wa_scan_t0 = millis();
   }
   wa_deadline = millis() + 12000;
-  wifi_log("scan start (%s): %s; mode %d, %s, internal heap %u free / %u largest",
-           who, how,
-           (int)WiFi.getMode(), wifi_status_name(WiFi.status()),
-           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
   return wa_scan_started;
 }
 
@@ -728,59 +680,10 @@ static int wifi_scan_take() {
   return n;
 }
 
-// What a finished scan heard: the count, the five strongest networks, and
-// every saved network outside those five.
-static void wifi_scan_log(int n) {
-  wifi_log("scan done: %d network(s), %lu ms after its start", n,
-           (unsigned long)(millis() - wa_scan_t0));
-  int top[5];
-  int ntop = 0;
-  for (int i = 0; i < n; i++) {
-    int32_t r = WiFi.RSSI(i);
-    if (ntop == 5 && r <= WiFi.RSSI(top[4])) continue;   // weaker than all five
-    int pos = (ntop < 5) ? ntop++ : 4;                  // full: replace the weakest
-    while (pos > 0 && WiFi.RSSI(top[pos - 1]) < r) {    // keep top[] strongest first
-      top[pos] = top[pos - 1];
-      pos--;
-    }
-    top[pos] = i;
-  }
-  for (int k = 0; k < ntop; k++) {
-    int i = top[k];
-    bool saved = wifi_creds_find(WiFi.SSID(i).c_str()) >= 0;
-    wifi_log("  %s %ld dBm ch %ld %s%s", WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i),
-             (long)WiFi.channel(i), WiFi.BSSIDstr(i).c_str(), saved ? " (saved)" : "");
-  }
-  for (int i = 0; i < n; i++) {
-    bool in_top = false;
-    for (int k = 0; k < ntop; k++) in_top = in_top || (top[k] == i);
-    if (in_top || wifi_creds_find(WiFi.SSID(i).c_str()) < 0) continue;
-    wifi_log("  %s %ld dBm ch %ld %s (saved)", WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i),
-             (long)WiFi.channel(i), WiFi.BSSIDstr(i).c_str());
-  }
-  // Every result counted by channel ("ch:count"), strongest RSSI per channel.
-  int per_ch[15] = {0};
-  int best_ch[15];
-  for (int c = 0; c < 15; c++) best_ch[c] = -127;
-  for (int i = 0; i < n; i++) {
-    long ch = WiFi.channel(i);
-    if (ch < 1 || ch > 14) continue;
-    per_ch[ch]++;
-    if (WiFi.RSSI(i) > best_ch[ch]) best_ch[ch] = WiFi.RSSI(i);
-  }
-  char chans[160];
-  int len = 0;
-  chans[0] = '\0';
-  for (int c = 1; c <= 14 && len < (int)sizeof(chans) - 16; c++) {
-    if (per_ch[c]) len += snprintf(chans + len, sizeof(chans) - len, " %d:%d(%d)", c, per_ch[c], best_ch[c]);
-  }
-  wifi_log("  per channel:%s", len ? chans : " none");
-}
-
 static void wifi_radio_park(const char *why) {
   UsbFlashGuard _g;
   WiFi.disconnect(true);   // true = radio off too
-  wifi_log("radio parked: %s", why);
+  SLog.printf("[WIFI] radio parked: %s\n", why);
 }
 
 // Start a connect round (scan phase). Returns false when there is nothing to
@@ -789,13 +692,12 @@ static bool wifi_auto_kick() {
   if (!wifi_enabled_pref || wifi_saved_count == 0) return false;
   if (WiFi.status() == WL_CONNECTED) return true;
   if (wa_state != WA_IDLE) return true;   // round already in the works
-  wifi_log("connect round: scanning for known networks");
+  SLog.println("[WIFI] connect round: scanning for known networks");
   {
     UsbFlashGuard _g;          // mode/begin can write PHY cal to NVS
-    if (!WiFi.mode(WIFI_STA))  // radio may be parked
-      wifi_log("radio did not switch to station mode");
+    WiFi.mode(WIFI_STA);       // radio may be parked
     WiFi.disconnect();         // abort any in-flight begin() so the scan can start
-    wifi_scan_begin("connect round");   // async; tick retries if it couldn't start yet
+    wifi_scan_begin();         // async; tick retries if it couldn't start yet
   }
   wa_state = WA_SCANNING;
   wa_scan_retries = 0;
@@ -820,10 +722,7 @@ static bool bt_controller_started() {
 // radio is parked.
 static void wifi_auto_fail_round(const char *why) {
   wa_state = WA_IDLE;
-  if (WiFi.status() == WL_CONNECTED) {
-    wifi_log("round ended: %s; the station is connected, radio left on", why);
-    return;
-  }
+  if (WiFi.status() == WL_CONNECTED) return;
   wa_was_connected = false;
   wa_reconnect_at = 0;
   wifi_radio_park(why);
@@ -841,8 +740,7 @@ static void wifi_round_begin(int idx, uint8_t channel, uint8_t attempt) {
   wa_join_ssid[sizeof(wa_join_ssid) - 1] = '\0';
   wa_join_fails_at_begin = wa_join_fails;
   { UsbFlashGuard _g; WiFi.begin(wifi_saved_ssid[idx].c_str(), wifi_saved_pass[idx].c_str(), channel); }
-  wa_join_t0 = millis();
-  wa_deadline = wa_join_t0 + 10000;
+  wa_deadline = millis() + 10000;
 }
 
 // The round's scanning is over: join its strongest candidate, or end the
@@ -855,8 +753,8 @@ static void wifi_round_join_first() {
   }
   int pos = wa_cand_next++;
   int idx = wa_cand[pos];
-  wifi_log("connecting to %s (channel %d; %d known network(s) in range)",
-           wifi_saved_ssid[idx].c_str(), (int)wa_cand_chan[pos], wa_cand_count);
+  SLog.printf("[WIFI] connecting to %s (channel %d; %d known network(s) in range)\n",
+              wifi_saved_ssid[idx].c_str(), (int)wa_cand_chan[pos], wa_cand_count);
   wifi_round_begin(idx, wa_cand_chan[pos], 1);
   wa_state = WA_CONNECTING;
 }
@@ -898,9 +796,7 @@ static void wifi_auto_on_scan_done(int n) {
   }
   if (!wa_second_pass && bt_controller_started() && wa_cand_count < wifi_saved_count) {
     wa_second_pass = true;
-    wifi_log("second scan pass: %d of %d saved network(s) heard in the first",
-             wa_cand_count, wifi_saved_count);
-    wifi_scan_begin("second pass");
+    wifi_scan_begin();
     return;
   }
   wifi_round_join_first();
@@ -913,19 +809,6 @@ static void wifi_auto_tick() {
   next_ms = now + 250;
   if (!wifi_enabled_pref) return;
 
-#if defined(BOARD_TDISPLAY_P4)
-  // WiFi diagnostics (the C6 over esp-hosted): the access point's signal
-  // level every 10 s while connected, so a link stall shows whether the
-  // station still sees the AP.
-  {
-    static uint32_t next_rssi_ms = 0;
-    if (WiFi.status() == WL_CONNECTED && (int32_t)(now - next_rssi_ms) >= 0) {
-      next_rssi_ms = now + 10000;
-      wifi_log("rssi %d dBm, channel %d", (int)WiFi.RSSI(), (int)WiFi.channel());
-    }
-  }
-#endif
-
   switch (wa_state) {
   case WA_IDLE: {
     if (WiFi.status() == WL_CONNECTED) {
@@ -935,7 +818,7 @@ static void wifi_auto_tick() {
       // AP dropped on us: one grace round after a short settle, then park.
       if (wa_reconnect_at == 0) {
         wa_reconnect_at = now + 10000;
-        wifi_log("connection lost — grace round in 10s");
+        SLog.println("[WIFI] connection lost — grace round in 10s");
       } else if ((int32_t)(now - wa_reconnect_at) >= 0) {
         wa_reconnect_at = 0;
         wa_was_connected = false;   // the grace round is one-shot
@@ -955,7 +838,6 @@ static void wifi_auto_tick() {
         if (n >= 0) {
           wa_user_scan = false;
           wa_scan_started = false;
-          wifi_scan_log(n);
           wifi_auto_on_scan_done(n);
         }
       }
@@ -965,18 +847,11 @@ static void wifi_auto_tick() {
       // the records Arduino took over from it are deleted. Both are retried.
       if (ss == WS_FAILED) WiFi.scanDelete();
       if (wa_scan_retries++ < 8) {
-        if (ss == WS_FAILED) {
-          wifi_log("the driver ended the scan as failed %lu ms after its start; retry %u of 8",
-                   (unsigned long)(now - wa_scan_t0), (unsigned)wa_scan_retries);
-        } else {
-          wifi_log("scan start refused; retry %u of 8", (unsigned)wa_scan_retries);
-        }
-        wifi_scan_begin("retry");
+        wifi_scan_begin();
       } else {
         wa_user_scan = false;
         wa_scan_started = false;
         if (wa_second_pass) {   // the round goes on with what its first pass heard
-          wifi_log("the second scan pass did not complete in the round's 9 starts");
           wifi_round_join_first();
         } else {
           wifi_auto_fail_round("no scan completed in 9 starts");
@@ -988,7 +863,6 @@ static void wifi_auto_tick() {
       wa_user_scan = false;
       wa_scan_started = false;
       if (wa_second_pass) {   // the round goes on with what its first pass heard
-        wifi_log("the second scan pass did not finish within 12 s");
         wifi_round_join_first();
       } else {
         wifi_auto_fail_round("the scan did not finish within 12 s");
@@ -1008,19 +882,9 @@ static void wifi_auto_tick() {
       wa_state = WA_IDLE;
       wa_was_connected = true;
       wa_reconnect_at = 0;
-      wifi_log("connected to %s (%s) after %lu ms, rssi %d dBm, channel %d",
-               WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(),
-               (unsigned long)(now - wa_join_t0), (int)WiFi.RSSI(), (int)WiFi.channel());
+      SLog.printf("[WIFI] connected to %s (%s)\n",
+                  WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
     } else if (failed || (int32_t)(now - wa_deadline) >= 0) {
-      if (failed) {
-        uint8_t reason = wa_join_fail_reason;
-        wifi_log("%s: join failed after %lu ms, reason %u (%s)", wa_join_ssid,
-                 (unsigned long)(now - wa_join_t0), (unsigned)reason,
-                 WiFi.disconnectReasonName((wifi_err_reason_t)reason));
-      } else {
-        wifi_log("%s: not connected within 10 s, status %s", wa_join_ssid,
-                 wifi_status_name(st));
-      }
       if (failed && wa_join_attempt == 1) {
         // A join the driver reports as failed gets one more of the same
         // network. Arduino's event handler restarts the first failed join of
@@ -1028,14 +892,13 @@ static void wifi_auto_tick() {
         // in core 3); disconnect() ends that attempt. The second join begins
         // at the next tick, 250 ms later, after the driver's event for the
         // ended one.
-        wifi_log("%s: joining again (second attempt)", wa_join_ssid);
         WiFi.disconnect();
         wa_join_again = true;
       } else if (wa_cand_next < wa_cand_count) {
         int pos = wa_cand_next++;
         int idx = wa_cand[pos];
-        wifi_log("trying next candidate: %s (channel %d)", wifi_saved_ssid[idx].c_str(),
-                 (int)wa_cand_chan[pos]);
+        SLog.printf("[WIFI] trying next candidate: %s (channel %d)\n",
+                    wifi_saved_ssid[idx].c_str(), (int)wa_cand_chan[pos]);
         wifi_round_begin(idx, wa_cand_chan[pos], 1);
       } else {
         char why[48];
@@ -2209,8 +2072,6 @@ static int lua_wifi_connect(lua_State *L) {
   const char *network = luaL_checkstring(L, 1);
   const char *pass = luaL_checkstring(L, 2);
 
-  wifi_log("app join: %s", network);
-
   wa_state = WA_IDLE;   // manual join overrides any auto round
   wa_reconnect_at = 0;
   {
@@ -2290,7 +2151,6 @@ static int lua_wifi_status(lua_State *L) {
 
 // WiFi disconnect function for Lua
 static int lua_wifi_disconnect(lua_State *L) {
-  wifi_log("disconnect requested by an app");
   wa_state = WA_IDLE;
   wa_was_connected = false;   // intentional disconnect — no grace round
   wa_reconnect_at = 0;
@@ -2371,8 +2231,6 @@ static int lua_wifi_fetch(lua_State *L) {
     lua_pushstring(L, payload.c_str());
     lua_setfield(L, -2, "body");
   } else {
-    SLog.printf("[HTTP] %s %s: %s (%d)\n", method, url,
-                http.errorToString(httpCode).c_str(), httpCode);
     lua_pushboolean(L, 0); // success = false
     lua_setfield(L, -2, "success");
 
@@ -2493,9 +2351,8 @@ static bool wifi_dl_client_open(const char *url) {
 }
 
 // A download that failed: success=false and the error in the result table
-// on top of the stack, and the same error on the console with the URL.
-static int wifi_dl_fail(lua_State *L, const char *url, const char *path, const char *err) {
-  SLog.printf("[HTTP] GET %s -> %s: %s\n", url, path, err);
+// on top of the stack.
+static int wifi_dl_fail(lua_State *L, const char *err) {
   lua_pushboolean(L, 0);
   lua_setfield(L, -2, "success");
   lua_pushstring(L, err);
@@ -2516,112 +2373,41 @@ struct WifiSleepOff {
   ~WifiSleepOff() { if (active) esp_wifi_set_ps(saved); }
 };
 
-// Copies the host part of an http(s) URL into host. False when there is none
-// or it doesn't fit.
-static bool url_host(const char *url, char *host, size_t n) {
-  const char *p = strstr(url, "://");
-  p = p ? p + 3 : url;
-  size_t len = strcspn(p, "/:?#");
-  if (len == 0 || len >= n) return false;
-  memcpy(host, p, len);
-  host[len] = '\0';
-  return true;
-}
-
-// Where one download's time went; printed as a second [HTTP] line.
-struct DlTiming {
-  uint32_t req_ms = 0;     // begin() + GET(): DNS/TCP/TLS on a new socket, the request, the headers
-  bool     reused = false; // the request went out on the socket kept from the last one
-  uint32_t dns_ms = 0;     // new socket only: the host lookup, timed on its own before GET()
-  bool     dns_ok = true;
-  uint32_t df_ms = 0;      // free-space check of the target drive
-  long     free_kb = -1;   // its answer; -1 = not checked (no Content-Length)
-  uint32_t open_ms = 0;    // opening the target file (SD: includes taking the bus lock)
-  uint64_t net_us = 0;     // body: available() + read(), and the 1 ms waits for data
-  uint64_t lock_us = 0;    // body: waiting for the SPI bus before each SD write
-  uint64_t wr_us = 0;      // body: File::write
-  uint32_t max_wr_us = 0;  // the longest single write
-  uint32_t writes = 0;
-};
-
-static void wifi_dl_timing_log(const DlTiming &t, uint32_t total_ms) {
-  char rssi[12] = "-";
-  if (WiFi.status() == WL_CONNECTED) snprintf(rssi, sizeof(rssi), "%d", (int)WiFi.RSSI());
-  char dns[20] = "-";
-  if (!t.reused) snprintf(dns, sizeof(dns), "%lu%s", (unsigned long)t.dns_ms, t.dns_ok ? "" : " failed");
-  wifi_ps_type_t ps;
-  const char *ps_name = "-";
-  if (esp_wifi_get_ps(&ps) == ESP_OK)
-    ps_name = (ps == WIFI_PS_NONE) ? "off" : (ps == WIFI_PS_MIN_MODEM) ? "min modem" : "max modem";
-  SLog.printf("[HTTP]   %lu ms: request %lu (%s socket, dns %s), df %lu, open %lu, net %lu, "
-              "sd %lu + bus wait %lu in %lu writes (longest %lu); free %ld KB, rssi %s, sleep %s\n",
-              (unsigned long)total_ms, (unsigned long)t.req_ms, t.reused ? "kept" : "new", dns,
-              (unsigned long)t.df_ms, (unsigned long)t.open_ms,
-              (unsigned long)(t.net_us / 1000), (unsigned long)(t.wr_us / 1000),
-              (unsigned long)(t.lock_us / 1000), (unsigned long)t.writes,
-              (unsigned long)(t.max_wr_us / 1000), t.free_kb, rssi, ps_name);
-}
-
-// wifi_dl_fail plus the timing line, for failures after the request went out.
-static int wifi_dl_fail_timed(lua_State *L, const char *url, const char *path,
-                              const char *err, const DlTiming &t, uint32_t t0) {
-  int r = wifi_dl_fail(L, url, path, err);
-  wifi_dl_timing_log(t, millis() - t0);
-  return r;
-}
-
 static int lua_wifi_download_file(lua_State *L) {
   const char *url = luaL_checkstring(L, 1);
   const char *filepath = luaL_checkstring(L, 2);
-  const uint32_t t0 = millis();
 
   lua_newtable(L);
 
   if (!net_is_up()) {
     wifi_dl_client_close();
-    return wifi_dl_fail(L, url, filepath, "not connected");
+    return wifi_dl_fail(L, "not connected");
   }
 
-  // Modem sleep stays off until this call returns (every return path below);
-  // the [HTTP] timing line reports the mode in effect.
+  // Modem sleep stays off until this call returns (every return path below).
   WifiSleepOff sleep_off;
 
   if (!s_dl_buf) {
     s_dl_buf = (uint8_t *)heap_caps_malloc(DL_BUF_SIZE,
                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!s_dl_buf) return wifi_dl_fail(L, url, filepath, "Buffer alloc failed");
+    if (!s_dl_buf) return wifi_dl_fail(L, "Buffer alloc failed");
   }
 
   if (!wifi_dl_client_open(url)) {
     wifi_dl_client_close();
-    return wifi_dl_fail(L, url, filepath, "Bad URL");
+    return wifi_dl_fail(L, "Bad URL");
   }
 
-  DlTiming dt;
-  dt.reused = s_dl_http->connected();   // a socket kept from the last request
-  if (!dt.reused) {
-    // The lookup fills lwIP's DNS cache, which GET()'s own lookup of the
-    // same host then reads.
-    char host[96];
-    if (url_host(url, host, sizeof(host))) {
-      IPAddress ip;
-      uint32_t t_dns = millis();
-      dt.dns_ok = WiFi.hostByName(host, ip) == 1;
-      dt.dns_ms = millis() - t_dns;
-    }
-  }
   int httpCode = s_dl_http->GET();
 
   // Negative code on a kept-alive client usually means the server closed the
   // idle socket — rebuild the connection and retry once.
   if (httpCode < 0) {
     wifi_dl_client_close();
-    dt.reused = false;
     if (wifi_dl_client_open(url)) {
       httpCode = s_dl_http->GET();
     }
   }
-  dt.req_ms = millis() - t0;
 
   if (httpCode != 200) {
     char msg[64];
@@ -2631,7 +2417,7 @@ static int lua_wifi_download_file(lua_State *L) {
       snprintf(msg, sizeof(msg), "%s (%d)", s_dl_http->errorToString(httpCode).c_str(), httpCode);
     }
     s_dl_http->end();
-    return wifi_dl_fail_timed(L, url, filepath, msg, dt, t0);
+    return wifi_dl_fail(L, msg);
   }
 
   // Transfer-Encoding overrides any Content-Length (RFC 7230 3.3.3).
@@ -2646,22 +2432,17 @@ static int lua_wifi_download_file(lua_State *L) {
     MpDrive drive;
     meshpunk_parse_drive(filepath, &drive, false);
     uint64_t free_bytes = 0;
-    uint32_t t_df = millis();
-    bool have_df = meshpunk_df(drive, NULL, &free_bytes);
-    dt.df_ms = millis() - t_df;
-    if (have_df) dt.free_kb = (long)(free_bytes / 1024);
-    if (have_df && (uint64_t)len + 16384 > free_bytes) {
+    if (meshpunk_df(drive, NULL, &free_bytes) &&
+        (uint64_t)len + 16384 > free_bytes) {
       wifi_dl_client_close();   // unread body: the socket cannot be reused
-      return wifi_dl_fail_timed(L, url, filepath, "Not enough free space", dt, t0);
+      return wifi_dl_fail(L, "Not enough free space");
     }
   }
 
-  uint32_t t_open = millis();
   MeshpunkFile mf = meshpunk_open(filepath, "w", false);
-  dt.open_ms = millis() - t_open;
   if (!mf.valid) {
     s_dl_http->end();
-    return wifi_dl_fail_timed(L, url, filepath, "Failed to open file for writing", dt, t0);
+    return wifi_dl_fail(L, "Failed to open file for writing");
   }
 
   // meshpunk_open returns HOLDING the SPI lock for SD paths (meshpunk_close
@@ -2686,37 +2467,23 @@ static int lua_wifi_download_file(lua_State *L) {
   while (len > 0 || len == -1) {
     if (chunked && (ck.state == ChunkDecoder::CK_END || ck.state == ChunkDecoder::CK_BAD)) break;
     if ((int32_t)(millis() - deadline) >= 0) { why = "no data for 20 s"; break; }
-    uint32_t t_net = micros();
     int avail = stream->available();
     if (avail <= 0) {
-      if (!s_dl_http->connected()) {
-        dt.net_us += micros() - t_net;
-        why = "connection closed";
-        break;
-      }
+      if (!s_dl_http->connected()) { why = "connection closed"; break; }
       delay(1);
-      dt.net_us += micros() - t_net;
       continue;
     }
     // read(buf, n), not readBytes: Stream::readBytes takes one byte per call,
     // and on an HTTPS stream every call runs two mbedtls_ssl_read()s.
     int toRead = (avail < (int)DL_BUF_SIZE) ? avail : (int)DL_BUF_SIZE;
     int rd = stream->read(s_dl_buf, toRead);
-    dt.net_us += micros() - t_net;
     if (rd <= 0) { why = "read failed"; break; }
     int out = chunked ? chunk_decode(&ck, s_dl_buf, rd) : rd;
     if (out > 0) {
-      uint32_t t_lock = micros();
       if (mf.is_sd) sd_spi_take();
-      uint32_t t_wr = micros();
       errno = 0;
       size_t wr = mf.file.write(s_dl_buf, out);
       int wr_errno = errno;
-      uint32_t wr_us = micros() - t_wr;
-      dt.lock_us += t_wr - t_lock;
-      dt.wr_us += wr_us;
-      if (wr_us > dt.max_wr_us) dt.max_wr_us = wr_us;
-      dt.writes++;
       if (wr != (size_t)out) {
         // Short write. meshpunk_close releases the SPI lock taken above; the
         // unread body makes the socket unusable. ENOSPC = the filesystem
@@ -2730,7 +2497,7 @@ static int lua_wifi_download_file(lua_State *L) {
           snprintf(msg, sizeof(msg), "Write failed after %d bytes: %s (errno %d)",
                    total + (int)wr, wr_errno ? strerror(wr_errno) : "no error code", wr_errno);
         }
-        return wifi_dl_fail_timed(L, url, filepath, msg, dt, t0);
+        return wifi_dl_fail(L, msg);
       }
       if (mf.is_sd) sd_spi_release();
     }
@@ -2749,7 +2516,7 @@ static int lua_wifi_download_file(lua_State *L) {
     wifi_dl_client_close();
     char msg[96];
     snprintf(msg, sizeof(msg), "Truncated download (%d of %d bytes: %s)", total, expected, why);
-    return wifi_dl_fail_timed(L, url, filepath, msg, dt, t0);
+    return wifi_dl_fail(L, msg);
   }
 
   if (chunked && ck.state != ChunkDecoder::CK_END) {
@@ -2762,7 +2529,7 @@ static int lua_wifi_download_file(lua_State *L) {
     } else {
       snprintf(msg, sizeof(msg), "Truncated download (%d bytes: %s)", total, why);
     }
-    return wifi_dl_fail_timed(L, url, filepath, msg, dt, t0);
+    return wifi_dl_fail(L, msg);
   }
 
   if (len == -1) {
@@ -2774,10 +2541,6 @@ static int lua_wifi_download_file(lua_State *L) {
     s_dl_http->end();  // keeps the socket alive when the server allows reuse
   }
 
-  uint32_t total_ms = millis() - t0;
-  SLog.printf("[HTTP] GET %s -> %s: %d bytes in %lu ms\n", url, filepath, total,
-              (unsigned long)total_ms);
-  wifi_dl_timing_log(dt, total_ms);
   lua_pushboolean(L, 1);
   lua_setfield(L, -2, "success");
   lua_pushinteger(L, total);
@@ -2797,16 +2560,14 @@ static int lua_wifi_scan_start(lua_State *L) {
     lua_pushboolean(L, 0);
     return 1;
   }
-  wifi_log("scan requested by an app");
   {
     UsbFlashGuard _g;
-    if (!WiFi.mode(WIFI_STA))   // radio may be parked
-      wifi_log("radio did not switch to station mode");
+    WiFi.mode(WIFI_STA);   // radio may be parked
     // esp_wifi_scan_start() fails while the STA is mid-connect — this is why
     // scans "found nothing" whenever a saved network was busy (re)connecting.
     // Abort the attempt first; the connect round restarts from these results.
     if (WiFi.status() != WL_CONNECTED) WiFi.disconnect();   // no-op when idle
-    wifi_scan_begin("app");   // a scan still running is kept and waited for
+    wifi_scan_begin();   // a scan still running is kept and waited for
   }
   // Fold the user scan into the state machine: it retries starts that failed
   // (disconnect needs a beat to land) and auto-joins known networks after.
@@ -2858,11 +2619,8 @@ static int lua_wifi_scan_results(lua_State *L) {
   }
   if (n >= 0) {
     wa_scan_started = false;
-    wifi_scan_log(n);
     if (wa_state == WA_SCANNING) wifi_auto_on_scan_done(n);   // frees Arduino's copy
     else WiFi.scanDelete();
-  } else {
-    wifi_log("scan results for the app: none (no finished scan)");
   }
   wa_user_scan = false;
   return 1;
@@ -2880,8 +2638,6 @@ static int lua_wifi_get_enabled(lua_State *L) {
 static int lua_wifi_set_enabled(lua_State *L) {
   wifi_enabled_pref = lua_toboolean(L, 1);
   bool persist = lua_isnoneornil(L, 2) ? true : (bool)lua_toboolean(L, 2);
-  wifi_log("WiFi turned %s by an app%s", wifi_enabled_pref ? "on" : "off",
-           persist ? "" : " (not saved)");
   {
     // WiFi mode/connect can write PHY calibration to NVS (internal flash) —
     // pause any USB audio stream around it so the cache stall can't crash it.
@@ -2971,7 +2727,6 @@ static int lua_wifi_connect_saved(lua_State *L) {
     lua_pushboolean(L, 0);
     return 1;
   }
-  wifi_log("app join (saved): %s", ssid);
   wa_state = WA_IDLE;   // manual join overrides any auto round
   wa_reconnect_at = 0;
   {
@@ -7952,47 +7707,27 @@ void setup() {
   // All reconnect policy lives in wifi_auto_tick()'s bounded rounds instead.
   WiFi.setAutoReconnect(false);
   // WiFi driver events: each scan's end as the driver reported it (status
-  // 0 = done, 1 = failed, and its network count), station start and stop,
-  // each join, and every disconnect with its reason and the RSSI at the
-  // disconnect.
+  // 0 = done, 1 = failed), and a failed join of the network a connect round
+  // is joining.
   WiFi.onEvent([](arduino_event_id_t event, arduino_event_info_t info) {
     switch (event) {
       case ARDUINO_EVENT_WIFI_SCAN_DONE:
         // One write: the event count and this event's status (see wa_scan_event).
         wa_scan_event = (((wa_scan_event >> 8) + 1) << 8) |
                         (uint32_t)(info.wifi_scan_done.status & 0xFF);
-        wifi_log("event: scan done, status %u, %u network(s)",
-                 (unsigned)info.wifi_scan_done.status, (unsigned)info.wifi_scan_done.number);
         break;
-      case ARDUINO_EVENT_WIFI_STA_START: wifi_log("event: station started"); break;
-      case ARDUINO_EVENT_WIFI_STA_STOP:  wifi_log("event: station stopped"); break;
-      case ARDUINO_EVENT_WIFI_STA_CONNECTED: {
-        unsigned n = info.wifi_sta_connected.ssid_len;
-        if (n > 32) n = 32;
-        wifi_log("event: connected to %.*s (channel %u)", (int)n,
-                 (const char *)info.wifi_sta_connected.ssid,
-                 (unsigned)info.wifi_sta_connected.channel);
-        break;
-      }
       case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: {
         unsigned n = info.wifi_sta_disconnected.ssid_len;
         if (n > 32) n = 32;
-        uint8_t reason = info.wifi_sta_disconnected.reason;
-        wifi_log("event: disconnected from %.*s, reason %u (%s), rssi %d", (int)n,
-                 (const char *)info.wifi_sta_disconnected.ssid, (unsigned)reason,
-                 WiFi.disconnectReasonName((wifi_err_reason_t)reason),
-                 (int)info.wifi_sta_disconnected.rssi);
         // A failed join of the network the connect round is joining (see
         // wa_join_fails). ASSOC_LEAVE is our own disconnect, not a failure.
-        if (reason != WIFI_REASON_ASSOC_LEAVE && n == strlen(wa_join_ssid) &&
+        if (info.wifi_sta_disconnected.reason != WIFI_REASON_ASSOC_LEAVE &&
+            n == strlen(wa_join_ssid) &&
             memcmp(info.wifi_sta_disconnected.ssid, wa_join_ssid, n) == 0) {
-          wa_join_fail_reason = reason;
           wa_join_fails = wa_join_fails + 1;
         }
         break;
       }
-      case ARDUINO_EVENT_WIFI_STA_GOT_IP:  wifi_log("event: got IP");  break;
-      case ARDUINO_EVENT_WIFI_STA_LOST_IP: wifi_log("event: lost IP"); break;
       default: break;
     }
   });
