@@ -287,7 +287,18 @@ static hosted_mempool_t * transport_drv_common_mempool_create(void)
 			.pre_allocated_mem = NULL,
 			.pre_allocated_mem_size = 0,
 			.num_blocks = H_TRANSPORT_QUEUE_SIZE + MEMPOOL_PADDING,
-			.block_size = ESP_TRANSPORT_MAX_BUF_SIZE,
+			/* MESHPUNK: MAX_TRANSPORT_BUFFER_SIZE, the size the two transmit
+			 * functions below ask a block for, not ESP_TRANSPORT_MAX_BUF_SIZE
+			 * (1600). The blocks follow one another from the pool's aligned
+			 * start, and a block goes to the bus driver as it is. For a block
+			 * transfer the SDMMC host takes a buffer only at a multiple of
+			 * the cache line of the memory it is in
+			 * (sdmmc_host_check_buffer_alignment; sdmmc_io_write_blocks
+			 * returns ESP_ERR_INVALID_ARG otherwise): 128 bytes in PSRAM under
+			 * CONFIG_CACHE_L2_CACHE_LINE_128B, where
+			 * CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM puts this pool. The SDIO
+			 * buffer size, 1536, is a multiple of 128; 1600 is not. */
+			.block_size = MAX_TRANSPORT_BUFFER_SIZE,
 			.alignment_in_bytes = HOSTED_MEM_ALIGNMENT_64,
 			.malloc = transport_util_malloc,
 			.calloc = transport_util_calloc,
@@ -368,6 +379,16 @@ static esp_err_t transport_drv_sta_tx(void *h, void *buffer, size_t len)
 
 	assert(h && h==chan_arr[ESP_STA_IF]->api_chan);
 
+	/* MESHPUNK: the frame is copied into a pool block of
+	 * MAX_TRANSPORT_BUFFER_SIZE bytes, behind the payload header, so its
+	 * length is checked before the copy. esp_hosted_tx() refuses the same
+	 * lengths with the same result; upstream reaches it after the copy. */
+	if (len > MAX_PAYLOAD_SIZE) {
+		ESP_LOGE(TAG, "STA TX: pkt len (%u) > max len (%u), drop pkt",
+				(unsigned)len, (unsigned)MAX_PAYLOAD_SIZE);
+		return ESP_FAIL;
+	}
+
 	/*  Prepare transport buffer directly consumable */
 	copy_buff = mempool_alloc(chan_arr[ESP_STA_IF]->memp, MAX_TRANSPORT_BUFFER_SIZE, true);
 	if (!copy_buff) {
@@ -402,6 +423,14 @@ static esp_err_t transport_drv_ap_tx(void *h, void *buffer, size_t len)
 	}
 
 	assert(h && h==chan_arr[ESP_AP_IF]->api_chan);
+
+	/* MESHPUNK: length checked before the copy into the pool block, as in
+	 * transport_drv_sta_tx(). */
+	if (len > MAX_PAYLOAD_SIZE) {
+		ESP_LOGE(TAG, "AP TX: pkt len (%u) > max len (%u), drop pkt",
+				(unsigned)len, (unsigned)MAX_PAYLOAD_SIZE);
+		return ESP_FAIL;
+	}
 
 	/*  Prepare transport buffer directly consumable */
 	copy_buff = mempool_alloc(chan_arr[ESP_AP_IF]->memp, MAX_TRANSPORT_BUFFER_SIZE, true);
