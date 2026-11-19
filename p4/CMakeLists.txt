@@ -1,4 +1,23 @@
 cmake_minimum_required(VERSION 3.16)
+
+# The updater image (platformio.ini env meshpunk_p4_updater passes
+# -DMESHPUNK_UPDATER=1): the build is the updater component (updater/, the
+# program of the `updater` partition), main and the components those two
+# require. The firmware's components (components/) are not part of it.
+if(MESHPUNK_UPDATER)
+    list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/updater")
+    set(COMPONENTS main updater)
+    # The image's own settings (sdkconfig.updater) on top of the firmware's.
+    set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults"
+                           "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.updater")
+    # PlatformIO's builder takes the build flags of generic files from the
+    # __pio_env component it adds to the IDF tree, and stops when the build
+    # has no such component. A tree used with bare idf.py has none.
+    if(EXISTS "$ENV{IDF_PATH}/components/__pio_env")
+        list(APPEND COMPONENTS __pio_env)
+    endif()
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(meshpunk_p4)
 
@@ -42,6 +61,12 @@ set(MESHPUNK_DEFINITIONS
     # board layer owns the I2C buses.
     "PIN_BOARD_SDA=-1"
     "PIN_BOARD_SCL=-1")
+# The release build (platformio.ini env meshpunk_p4_release passes
+# -DMESHPUNK_EMBED_PACK=1): src/main.cpp then carries the first-boot data
+# pack, which that env links in (board_build.embed_files).
+if(MESHPUNK_EMBED_PACK)
+    list(APPEND MESHPUNK_DEFINITIONS "MESHPUNK_EMBED_PACK=1")
+endif()
 idf_build_set_property(COMPILE_DEFINITIONS "${MESHPUNK_DEFINITIONS}" APPEND)
 
 # Arduino's USB device classes need its arduino_tinyusb component

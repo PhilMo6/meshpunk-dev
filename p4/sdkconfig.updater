@@ -1,0 +1,22 @@
+# The updater image's settings on top of sdkconfig.defaults. CMakeLists.txt
+# names both files for the updater build (-DMESHPUNK_UPDATER=1); ESP-IDF reads
+# them when it creates sdkconfig.meshpunk_p4_updater, so that file has to be
+# deleted for a change here to take effect.
+
+# esp_ipa is in every build of this project (esp_video, which
+# main/idf_component.yml lists, requires it), and its CMakeLists.txt links
+# each enabled image-processing algorithm into the image with a
+# `-u __esp_ipa_detect_fn_*` option. The updater has no camera.
+CONFIG_ESP_IPA_IAN_ALGORITHM=n
+CONFIG_ESP_IPA_ADN_ALGORITHM=n
+CONFIG_ESP_IPA_AWB_ALGORITHM=n
+CONFIG_ESP_IPA_ACC_ALGORITHM=n
+CONFIG_ESP_IPA_AGC_ALGORITHM=n
+CONFIG_ESP_IPA_AEN_ALGORITHM=n
+CONFIG_ESP_IPA_AF_ALGORITHM=n
+CONFIG_ESP_IPA_ATC_ALGORITHM=n
+
+# The printf/scanf family of the chip's ROM in place of newlib's full one: no
+# 64-bit integer and no floating-point conversions. The updater's format
+# strings use neither.
+CONFIG_LIBC_NEWLIB_NANO_FORMAT=y

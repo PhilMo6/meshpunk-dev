@@ -3385,16 +3385,24 @@ static bool copyFile(fs::FS &srcFS, const char* srcPath, fs::FS &dstFS, const ch
 // or web-flasher install. Pack format: "MPK1" | u32 version | u32 count |
 // u32 index_size, then count entries (u16 path_len | u16 flags | u32 raw_size
 // | u32 stored_size | u32 offset | path). flags bit0 = raw DEFLATE, inflated
-// with the ESP32-S3 ROM's tinfl; the pack is read in place from mapped flash.
+// with the chip ROM's tinfl; the pack is read in place from mapped flash.
 #include "esp_flash.h"
 #include "esp_partition.h"
-#include "rom/md5_hash.h"
+#include "esp_rom_md5.h"   // the ROM's MD5 under the names ESP-IDF 4.4 and 5 share
 
-// Symbol names come from objcopy mangling the project-relative source path
-// ("pack/data_pack.bin"), directories included - verified with nm on the
-// generated .txt.o. If the pack file moves, these must change with it.
+// Symbol names. The S3 envs' builder embeds the file with objcopy, which
+// mangles the project-relative source path ("pack/data_pack.bin"),
+// directories included - verified with nm on the generated .txt.o; if the
+// pack file moves, these must change with it. The T-Display P4's builder
+// (p4/platformio.ini) writes an assembly file whose symbols carry the
+// file's name alone (data_pack.bin.S in its build directory).
+#if defined(BOARD_TDISPLAY_P4)
+extern const uint8_t data_pack_start[] asm("_binary_data_pack_bin_start");
+extern const uint8_t data_pack_end[]   asm("_binary_data_pack_bin_end");
+#else
 extern const uint8_t data_pack_start[] asm("_binary_pack_data_pack_bin_start");
 extern const uint8_t data_pack_end[]   asm("_binary_pack_data_pack_bin_end");
+#endif
 
 static bool pack_inflate_to_file(const uint8_t *src, size_t stored, File &out, uint32_t raw_size) {
   tinfl_decompressor *inf =
@@ -3724,14 +3732,14 @@ static void ensure_data_partition() {
 
   if (md5_at >= 0) {
     int md5_new = insert_at + 32;
-    struct MD5Context md5ctx;
-    MD5Init(&md5ctx);
-    MD5Update(&md5ctx, table, md5_new);
+    md5_context_t md5ctx;
+    esp_rom_md5_init(&md5ctx);
+    esp_rom_md5_update(&md5ctx, table, md5_new);
     uint8_t *m = table + md5_new;
     memset(m, 0xFF, 32);
     m[0] = 0xEB;
     m[1] = 0xEB;
-    MD5Final(m + 16, &md5ctx);
+    esp_rom_md5_final(m + 16, &md5ctx);
   }
 
   SLog.printf("[PART] adding assets partition at 0x%06X size 0x%06X, rebooting\n",
@@ -5253,19 +5261,22 @@ static inline bool lua_in_arena(void *p) {
 }
 
 // ── Small-block strip ───────────────────────────────────────────────────────
-// STRIP_HOLES free PSRAM blocks of STRIP_HOLE_BYTES each, kept apart by
-// allocated 16-byte blocks. small_strip_create() makes them once, in setup()
-// right before the first luaBringUp(), at the start of the free space that
-// the theme fonts, the gap and the Lua arena are then allocated from.
+// STRIP_HOLES free PSRAM blocks kept apart by small allocated blocks.
+// small_strip_create() makes them once, in setup() right before the first
+// luaBringUp(), at the start of the free space that the theme fonts, the gap
+// and the Lua arena are then allocated from. Each hole is what is left of a
+// block requested with STRIP_BLOCK_REQUEST bytes once that block is shrunk to
+// 4: 256 bytes behind a 16-byte block where the heap adds its 12 poison
+// bytes to a block (CONFIG_HEAP_POISONING_LIGHT, the S3 boards), 248 bytes
+// behind a 12-byte block where it does not (the T-Display P4). Consecutive
+// blocks are 4 bytes apart.
 // TLSF serves a request from the smallest free block that fits it, so a PSRAM
-// request of up to STRIP_HOLE_BYTES - 12 bytes is served from one of these
-// holes while one has room for it. The WiFi and GDMA drivers allocate objects
-// of 40 to 184 bytes from PSRAM when WiFi connects and around a module's
-// start and exit (a GDMA channel, the WiFi connection manager's records).
-// Sizes: a used block is its payload plus the 12 bytes of
-// CONFIG_HEAP_POISONING_LIGHT, and consecutive blocks are 4 bytes apart.
-#define STRIP_HOLES       32
-#define STRIP_HOLE_BYTES  256u
+// request of up to 244 bytes is served from one of these holes while one has
+// room for it. The WiFi and GDMA drivers allocate objects of 40 to 184 bytes
+// from PSRAM when WiFi connects and around a module's start and exit (a GDMA
+// channel, the WiFi connection manager's records).
+#define STRIP_HOLES         32
+#define STRIP_BLOCK_REQUEST 264u
 
 static uint32_t s_strip_bytes = 0;   // the address range the strip occupies
 
@@ -5280,16 +5291,16 @@ static uintptr_t psram_big_block_start() {
 static void small_strip_create() {
   void *fence[STRIP_HOLES + 1];
   const uintptr_t before = psram_big_block_start();
-  // STRIP_HOLES + 1 blocks of 16 + 4 + STRIP_HOLE_BYTES bytes each.
+  // STRIP_HOLES + 1 blocks, one after the other.
   int n = 0;
   while (n <= STRIP_HOLES) {
-    fence[n] = heap_caps_malloc(STRIP_HOLE_BYTES + 8, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    fence[n] = heap_caps_malloc(STRIP_BLOCK_REQUEST, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!fence[n]) break;
     n++;
   }
-  // Shrunk in place to a 16-byte block, each leaves STRIP_HOLE_BYTES free
-  // behind it; the next block keeps that hole apart from the one after it.
-  // The bytes freed behind the last block merge with the free space there.
+  // Shrunk in place, each leaves the rest of its block free behind it; the
+  // next block keeps that hole apart from the one after it. The bytes freed
+  // behind the last block merge with the free space there.
   int moved = 0;
   for (int i = 0; i < n; i++) {
     void *p = heap_caps_realloc(fence[i], 4, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -5299,8 +5310,8 @@ static void small_strip_create() {
   const uintptr_t after = psram_big_block_start();
   if (before && after > before) s_strip_bytes = (uint32_t)(after - before);
   if (n == STRIP_HOLES + 1 && moved == 0) {
-    SLog.printf("[strip] %d holes of %u bytes from 0x%08X, %u bytes in all\n",
-                STRIP_HOLES, (unsigned)STRIP_HOLE_BYTES,
+    SLog.printf("[strip] %d holes, one every %u bytes from 0x%08X, %u bytes in all\n",
+                STRIP_HOLES, (unsigned)((uintptr_t)fence[1] - (uintptr_t)fence[0]),
                 (unsigned)(uintptr_t)fence[0], (unsigned)s_strip_bytes);
   } else {
     SLog.printf("[strip] FAIL: %d of %d blocks allocated, %d moved by the shrink\n",

@@ -4,19 +4,32 @@ import shutil
 import struct
 import subprocess
 import sys
-import data_filter  # the per-board shipping filter, data_filter.py at the project root
+import zlib
 Import("env")
 
+# The repository root (data/, data_filter.py, releases/): $PROJECT_DIR for the
+# S3 project, its parent for the p4/ project.
+_project_dir = env.subst("$PROJECT_DIR")
+REPO_DIR = (_project_dir if os.path.isfile(os.path.join(_project_dir, "data_filter.py"))
+            else os.path.dirname(_project_dir))
+sys.path.insert(0, REPO_DIR)
+import data_filter  # the per-board shipping filter, data_filter.py at the repository root
+
 # Flash offsets of the direct-flash layout (merged.bin) - MUST stay in lockstep
-# with meshpunk_custom_16Mb.csv.
+# with meshpunk_custom_16Mb.csv and p4/partitions_meshpunk_p4.csv, which hold
+# the same layout. The second-stage bootloader's offset is the chip's.
+BOOTLOADER_OFFSET = {
+    "esp32s3": "0x0000",
+    "esp32p4": "0x2000",
+}
 OFFSETS = {
-    "bootloader": "0x0000",
     "partitions": "0x8000",
     "otadata":    "0xE000",     # boot_app0.bin: otadata selecting main (ota_0)
     "firmware":   "0x10000",    # main (ota_0)
     "updater":    "0x590000",   # updater (factory)
     "littlefs":   "0x610000",   # assets
 }
+OTADATA_SIZE = 0x2000           # the otadata partition: two 4096-byte sectors
 
 # The Launcher image has its own table (build_launcher_partition_table) and
 # its own file layout; both are independent of the CSV.
@@ -48,9 +61,11 @@ BOARD_SLUG = {
     "meshpunk_heltec_release": "heltec_v4",
     "meshpunk_wio_l2":        "wio_l2",
     "meshpunk_wio_l2_release": "wio_l2",
+    "meshpunk_p4":            "tdisplay_p4",
+    "meshpunk_p4_release":    "tdisplay_p4",
 }
 RELEASE_ENVS  = {"meshpunk_release", "meshpunk_heltec_release",
-                 "meshpunk_wio_l2_release"}
+                 "meshpunk_wio_l2_release", "meshpunk_p4_release"}
 LAUNCHER_ENVS = {"meshpunk_release",   # bmorcelli Launcher exists for these boards
                  "meshpunk_wio_l2_release"}
 
@@ -65,7 +80,50 @@ UPDATER_ENV = {
     "meshpunk_heltec_release": "meshpunk_heltec_updater",
     "meshpunk_wio_l2":         "meshpunk_wio_l2_updater",
     "meshpunk_wio_l2_release": "meshpunk_wio_l2_updater",
+    "meshpunk_p4":             "meshpunk_p4_updater",
+    "meshpunk_p4_release":     "meshpunk_p4_updater",
 }
+
+def esptool_merge(env, mcu, output, parts):
+    """esptool's merge of (offset, file) pairs into one image starting at 0."""
+    if mcu == "esp32p4":
+        # pioarduino installs esptool 5 into the Python environment the build
+        # runs in; its tool-esptoolpy package folder holds no script.
+        cmd = [sys.executable, "-m", "esptool", "--chip", mcu, "merge-bin",
+               "--target-offset", "0x0000", "--output", output,
+               "--flash-mode", "keep", "--flash-freq", "keep", "--flash-size", "keep"]
+    else:
+        esptool = os.path.join(
+            env.PioPlatform().get_package_dir("tool-esptoolpy"), "esptool.py")
+        cmd = [sys.executable, esptool, "--chip", mcu, "merge_bin",
+               "--target-offset", "0x0000", "--output", output,
+               "--flash_mode", "keep", "--flash_freq", "keep", "--flash_size", "keep"]
+    for offset, path in parts:
+        cmd += [offset, path]
+    subprocess.check_call(cmd)
+
+def otadata_image(env, mcu, build_dir):
+    """An otadata image that selects ota_0 (main): the bootloader then starts
+    main, not the factory partition (the updater)."""
+    if mcu == "esp32p4":
+        # The p4/ project has the Arduino core as an ESP-IDF managed component,
+        # which comes without the core's tools/ folder, so the image is written
+        # here: the 8192 bytes of the core's tools/partitions/boot_app0.bin.
+        # One esp_ota_select_entry_t per sector: the first has ota_seq 1 and
+        # the bootloader's CRC of it (bootloader_common_ota_select_crc: CRC-32
+        # of the four ota_seq bytes, seed 0xFFFFFFFF); the second has ota_seq 0
+        # and no CRC, which the bootloader does not take as a valid entry.
+        first  = struct.pack("<I", 1) + b"\xFF" * 24
+        first += struct.pack("<I", zlib.crc32(first[:4], 0xFFFFFFFF) & 0xFFFFFFFF)
+        second = struct.pack("<I", 0)
+        sector = OTADATA_SIZE // 2
+        path = os.path.join(build_dir, "otadata_main.bin")
+        with open(path, "wb") as f:
+            f.write(first + b"\xFF" * (sector - len(first)))
+            f.write(second + b"\xFF" * (sector - len(second)))
+        return path
+    framework_dir = env.PioPlatform().get_package_dir("framework-arduinoespressif32")
+    return os.path.join(framework_dir, "tools", "partitions", "boot_app0.bin")
 
 # Launcher build (bmorcelli/Launcher): a merged image of bootloader + table +
 # the RELEASE app + the littlefs payload. The table declares the data partition
@@ -133,14 +191,18 @@ def merge_bin(source, target, env):
     version     = git_version(project_dir)
     pioenv      = env["PIOENV"]
     slug        = BOARD_SLUG.get(pioenv, pioenv)
+    mcu         = str(env.BoardConfig().get("build.mcu", "")).lower()
+    if mcu not in BOOTLOADER_OFFSET:
+        print("merge_bin: no bootloader offset known for chip '%s' - no artifacts" % mcu)
+        return
+    bootloader_offset = BOOTLOADER_OFFSET[mcu]
 
-    releases_dir = os.path.join(project_dir, RELEASES_DIR_NAME)
+    releases_dir = os.path.join(REPO_DIR, RELEASES_DIR_NAME)
     os.makedirs(releases_dir, exist_ok=True)
 
     output      = os.path.join(releases_dir,
                                "meshpunk-%s-%s-merged.bin" % (slug, version))
 
-    framework_dir = env.PioPlatform().get_package_dir("framework-arduinoespressif32")
     updater_env   = UPDATER_ENV.get(pioenv)
     if updater_env is None:
         print("merge_bin: %s has no updater env yet - no merged/release"
@@ -150,7 +212,7 @@ def merge_bin(source, target, env):
     bins = {
         "bootloader": os.path.join(build_dir, "bootloader.bin"),
         "partitions": os.path.join(build_dir, "partitions.bin"),
-        "otadata":    os.path.join(framework_dir, "tools", "partitions", "boot_app0.bin"),
+        "otadata":    otadata_image(env, mcu, build_dir),
         "firmware":   os.path.join(build_dir, "firmware.bin"),
         "updater":    os.path.join(os.path.dirname(build_dir), updater_env, "firmware.bin"),
         "littlefs":   os.path.join(build_dir, "littlefs.bin"),
@@ -176,29 +238,15 @@ def merge_bin(source, target, env):
                 print("merge_bin: missing %s - run 'pio run --target buildfs' first?" % name)
             return
 
-    esptool = os.path.join(
-        env.PioPlatform().get_package_dir("tool-esptoolpy"), "esptool.py"
-    )
-
-    cmd = [
-        sys.executable, esptool,
-        "--chip", "esp32s3",
-        "merge_bin",
-        "--target-offset", "0x0000",
-        "--output", output,
-        "--flash_mode", "keep",
-        "--flash_freq", "keep",
-        "--flash_size", "keep",
-        OFFSETS["bootloader"], bins["bootloader"],
-        OFFSETS["partitions"], bins["partitions"],
-        OFFSETS["otadata"],    bins["otadata"],
-        OFFSETS["firmware"],   bins["firmware"],
-        OFFSETS["updater"],    bins["updater"],
-        OFFSETS["littlefs"],   bins["littlefs"],
-    ]
-
     print("merge_bin: creating %s" % output)
-    subprocess.check_call(cmd)
+    esptool_merge(env, mcu, output, [
+        (bootloader_offset,     bins["bootloader"]),
+        (OFFSETS["partitions"], bins["partitions"]),
+        (OFFSETS["otadata"],    bins["otadata"]),
+        (OFFSETS["firmware"],   bins["firmware"]),
+        (OFFSETS["updater"],    bins["updater"]),
+        (OFFSETS["littlefs"],   bins["littlefs"]),
+    ])
 
     # Full filesystem image (the build's littlefs, for flashing the FS alone).
     littlefs_out = os.path.join(releases_dir,
@@ -255,7 +303,7 @@ def merge_bin(source, target, env):
     # does not ship, such as the other architecture's ELF modules, are left out.
     arch = data_filter.arch_of(env.BoardConfig().get("build.mcu", ""))
     launcher_data = os.path.join(build_dir, "data_launcher")
-    kept, skipped = data_filter.stage(os.path.join(project_dir, "data"),
+    kept, skipped = data_filter.stage(os.path.join(REPO_DIR, "data"),
                                       launcher_data, arch, env.get("BOARD", ""))
     print("merge_bin: Launcher payload = %d files for %s; left out: %s"
           % (kept, arch, ", ".join(skipped) if skipped else "-"))
@@ -281,22 +329,13 @@ def merge_bin(source, target, env):
 
     launcher_img = os.path.join(releases_dir,
                                 "meshpunk-%s-%s-launcher.bin" % (slug, version))
-    launcher_cmd = [
-        sys.executable, esptool,
-        "--chip", "esp32s3",
-        "merge_bin",
-        "--target-offset", "0x0000",
-        "--output", launcher_img,
-        "--flash_mode", "keep",
-        "--flash_freq", "keep",
-        "--flash_size", "keep",
-        OFFSETS["bootloader"],    bins["bootloader"],
-        OFFSETS["partitions"],    launcher_table,
-        LAUNCHER_FIRMWARE_OFFSET, bins["firmware"],
-        LAUNCHER_FS_OFFSET,       launcher_fs,
-    ]
     print("merge_bin: creating Launcher image %s" % launcher_img)
-    subprocess.check_call(launcher_cmd)
+    esptool_merge(env, mcu, launcher_img, [
+        (bootloader_offset,        bins["bootloader"]),
+        (OFFSETS["partitions"],    launcher_table),
+        (LAUNCHER_FIRMWARE_OFFSET, bins["firmware"]),
+        (LAUNCHER_FS_OFFSET,       launcher_fs),
+    ])
     print("merge_bin: Launcher image done, %.1f MB incl. %.1f MB fs payload"
           " (users install THIS file via Launcher)"
           % (os.path.getsize(launcher_img) / (1024.0 * 1024.0),

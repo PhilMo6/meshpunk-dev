@@ -11,6 +11,10 @@
 # docs/P4_PORT_PLAN_2026-10-12.md. They are not registered, so neither CMake
 # nor pioarduino compiles them (the builder compiles the sources the CMake
 # code model lists).
+#
+# The updater image (platformio.ini env meshpunk_p4_updater) builds this
+# component too: there the firmware's components are not in the build
+# (../CMakeLists.txt) and the program is ../updater.
 idf_component_register(SRCS "meshpunk_p4.cpp")
 
 # Keep the strong shouldPrintChipDebugReport() in meshpunk_p4.cpp over the

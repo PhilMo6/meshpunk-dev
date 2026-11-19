@@ -1,7 +1,9 @@
 // main_updater.cpp — MeshPunk updater firmware. Lives in the `updater`
 // factory partition of meshpunk_custom_16Mb.csv (envs meshpunk_updater,
-// meshpunk_heltec_updater and meshpunk_wio_l2_updater) and writes a staged
-// app image into the `main` (ota_0) partition, then boots it.
+// meshpunk_heltec_updater and meshpunk_wio_l2_updater) and of
+// p4/partitions_meshpunk_p4.csv (env meshpunk_p4_updater in
+// p4/platformio.ini), and writes a staged app image into the `main` (ota_0)
+// partition, then boots it.
 //
 // Handoff from the main firmware (src/ota_update.cpp): it stages the image on
 // the SD card or LittleFS, writes L:/.ota_job and calls
@@ -28,6 +30,13 @@
 // build's configuration: TFT_eSPI on the T-Deck and Heltec, the LovyanGFX
 // device of boards/wio_l2_lgfx.h on the Wio L2. Nothing else comes up: no
 // WiFi, no BLE, no input.
+//
+// The T-Display P4's env builds this file inside the p4/ ESP-IDF project
+// (p4/updater/CMakeLists.txt) with the board layer (boards/tdisplay_p4_board.cpp),
+// the panel backend (display/display_tdisplay_p4.cpp), the SDMMC backend
+// (storage/sd_tdisplay_p4.cpp) and SLog. Its panel text is drawn here, as
+// RGB565 rectangles through display_dev_blit(), from TFT_eSPI's font 2 glyph
+// table (lib/TFT_eSPI/Fonts/Font16.c).
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -46,8 +55,22 @@
 #if defined(BOARD_WIO_L2)
 #include "boards/wio_l2_board.h"
 #include "boards/wio_l2_lgfx.h"
+#elif defined(BOARD_TDISPLAY_P4)
+#include "boards/tdisplay_p4_board.h"
+#include "display/display_dev.h"
+#include <Fonts/Font16.h>   // widtbl_f16, chrtbl_f16 (the header includes Font16.c)
 #else
 #include <TFT_eSPI.h>
+#endif
+
+// The chip id in an app image's header (esp_image_header_t.chip_id) for the
+// chip this program is built for.
+#if CONFIG_IDF_TARGET_ESP32P4
+static const uint16_t kChipId     = 0x0012;
+static const char*    kChipReason = "not an ESP32-P4 image (chip id)";
+#else
+static const uint16_t kChipId     = 0x0009;
+static const char*    kChipReason = "not an ESP32-S3 image (chip id)";
 #endif
 
 static const char*  kJobPath     = "/.ota_job";      // on the assets LittleFS
@@ -63,11 +86,12 @@ static bool     s_sd_mounted = false;
 
 // The main build's panel driver, and its rotation number for the 320 x 240
 // landscape the main firmware uses (rotation 0 on the Wio L2: the
-// offset_rotation in boards/wio_l2_lgfx.h).
+// offset_rotation in boards/wio_l2_lgfx.h). The T-Display P4 has no driver
+// object: its panel backend is display/display_dev.h.
 #if defined(BOARD_WIO_L2)
 static WioL2Lgfx     tft;
 static const uint8_t kLandscape = 0;
-#else
+#elif !defined(BOARD_TDISPLAY_P4)
 static TFT_eSPI      tft;
 static const uint8_t kLandscape = 1;
 #endif
@@ -175,9 +199,105 @@ static void board_backlight_on(void) {
   wio_l2_backlight_init(255);
 }
 
+#elif defined(BOARD_TDISPLAY_P4)
+
+// The board layer (boards/tdisplay_p4_board.h) creates the I2C bus, sets the
+// XL9535 expander's lines and cycles the rails. It runs once: the panel
+// backend's display_dev_init() and the SDMMC backend call it again and get
+// the first result.
+static void board_init(void) {
+  tdp4_board_init();   // logs its own FAIL line
+}
+
+// RM69A10 AMOLED: the level is a panel register (display_dev_brightness,
+// 0..16); display_dev_backlight_init() parks the unused boost converter.
+static void board_backlight_on(void) {
+  display_dev_backlight_init();
+  display_dev_brightness(16);
+}
+
 #endif
 
 // ── Panel text ───────────────────────────────────────────────────────────────
+
+#if defined(BOARD_TDISPLAY_P4)
+
+// The TFT boards' 320 x 240 layout, centred on the panel backend's 616 x 284
+// native landscape (boards/tdisplay_p4_board.h). Everything is drawn as RGB565
+// rectangles through display_dev_blit(), from s_strip: up to 320 x 32 pixels.
+static const int      kUiX   = (TDP4_UI_W - 320) / 2;
+static const int      kUiY   = (TDP4_UI_H - 240) / 2;
+static const int      kStripRows = 32;
+static const uint16_t kBlack = 0x0000;
+static const uint16_t kWhite = 0xFFFF;
+static const uint16_t kGreen = 0x07E0;
+static uint16_t       s_strip[320 * kStripRows];
+
+// A filled rectangle of the layout, at most 320 pixels wide.
+static void ui_fill(int x, int y, int w, int h, uint16_t color) {
+  if (w <= 0 || h <= 0 || w > 320) return;
+  int rows = h < kStripRows ? h : kStripRows;
+  for (int i = 0; i < w * rows; i++) s_strip[i] = color;
+  for (int done = 0; done < h; done += kStripRows) {
+    int n = (h - done) < kStripRows ? (h - done) : kStripRows;
+    display_dev_blit(kUiX + x, kUiY + y + done, w, n, s_strip);
+  }
+}
+
+// Text in TFT_eSPI's font 2 (Fonts/Font16.c): 16 rows a glyph, (width + 6) / 8
+// bytes a row, the most significant bit left; the width table's value is the
+// advance. Each font pixel is scale x scale screen pixels, scale 1 or 2. The
+// line is white on black, rendered into s_strip and blitted once; what does
+// not fit the 320-pixel layout is cut.
+static void ui_text(int x, int y, const char* text, int scale) {
+  const int h = chr_hgt_f16 * scale;
+  int w = 0;
+  for (const char* p = text; *p; p++) {
+    uint8_t c = (uint8_t)*p;
+    if (c < 32 || c > 127) c = '?';
+    w += widtbl_f16[c - 32] * scale;
+  }
+  if (w > 320 - x) w = 320 - x;
+  if (w <= 0 || h > kStripRows) return;
+  for (int i = 0; i < w * h; i++) s_strip[i] = kBlack;
+  int cx = 0;
+  for (const char* p = text; *p && cx < w; p++) {
+    uint8_t c = (uint8_t)*p;
+    if (c < 32 || c > 127) c = '?';
+    const unsigned char* glyph = chrtbl_f16[c - 32];
+    const int advance = widtbl_f16[c - 32];
+    const int bytes   = (advance + 6) / 8;
+    const int cols    = bytes * 8 < advance ? bytes * 8 : advance;
+    for (int row = 0; row < chr_hgt_f16; row++) {
+      for (int col = 0; col < cols; col++) {
+        if (!(glyph[row * bytes + col / 8] & (0x80 >> (col % 8)))) continue;
+        for (int sy = 0; sy < scale; sy++) {
+          for (int sx = 0; sx < scale; sx++) {
+            int px = cx + col * scale + sx;
+            if (px < w) s_strip[(row * scale + sy) * w + px] = kWhite;
+          }
+        }
+      }
+    }
+    cx += advance * scale;
+  }
+  display_dev_blit(kUiX + x, kUiY + y, w, h, s_strip);
+}
+
+static void ui_init(void) {
+  display_dev_init();   // logs its own FAIL line
+  display_dev_fill_black();
+  ui_text(10, 8, "MeshPunk updater", 2);
+}
+
+// Six 20 px text rows under the title (rows 0..5).
+static void ui_row(int row, const char* text) {
+  int y = 48 + row * 20;
+  ui_fill(0, y, 320, 20, kBlack);
+  ui_text(10, y, text, 1);
+}
+
+#else
 
 static void ui_init(void) {
   tft.begin();
@@ -198,6 +318,8 @@ static void ui_row(int row, const char* text) {
   tft.drawString(text, 10, y);
 }
 
+#endif
+
 static void say(int row, const char* text) {
   Serial.printf("[UPD] %s\n", text);
   ui_row(row, text);
@@ -205,9 +327,17 @@ static void say(int row, const char* text) {
 
 static void ui_progress(uint32_t done, uint32_t total) {
   const int x = 10, y = 176, w = 300, h = 18;
-  tft.drawRect(x, y, w, h, TFT_WHITE);
   int fill = total ? (int)((uint64_t)(w - 2) * done / total) : 0;
+#if defined(BOARD_TDISPLAY_P4)
+  ui_fill(x, y, w, 1, kWhite);
+  ui_fill(x, y + h - 1, w, 1, kWhite);
+  ui_fill(x, y, 1, h, kWhite);
+  ui_fill(x + w - 1, y, 1, h, kWhite);
+  ui_fill(x + 1, y + 1, fill, h - 2, kGreen);
+#else
+  tft.drawRect(x, y, w, h, TFT_WHITE);
   tft.fillRect(x + 1, y + 1, fill, h - 2, TFT_GREEN);
+#endif
   char line[48];
   snprintf(line, sizeof line, "%u / %u KB", (unsigned)(done / 1024), (unsigned)(total / 1024));
   ui_row(5, line);
@@ -326,8 +456,9 @@ static void to_hex(const uint8_t* in, size_t n, char* out) {
   out[2 * n] = 0;
 }
 
-// nullptr when the file is an ESP32-S3 app image whose appended SHA-256 (the
-// last 32 bytes, covering every byte before them) matches, else the reason.
+// nullptr when the file is an app image for this chip (kChipId) whose appended
+// SHA-256 (the last 32 bytes, covering every byte before them) matches, else
+// the reason.
 // expect_size 0 and an empty expect_sha skip the job cross-checks.
 static const char* verify_image(fs::File& f, uint32_t expect_size, const String& expect_sha,
                                 uint32_t slot_size) {
@@ -340,7 +471,7 @@ static const char* verify_image(fs::File& f, uint32_t expect_size, const String&
   if (!f.seek(0) || f.read(hdr, sizeof hdr) != sizeof hdr) return "header read failed";
   if (hdr[0] != 0xE9) return "not an ESP32 app image (magic byte)";
   uint16_t chip = (uint16_t)hdr[12] | ((uint16_t)hdr[13] << 8);
-  if (chip != 0x0009) return "not an ESP32-S3 image (chip id)";
+  if (chip != kChipId) return kChipReason;
   if (hdr[23] != 1) return "image carries no appended hash";
 
   mbedtls_sha256_context ctx;
@@ -378,8 +509,9 @@ static const char* verify_image(fs::File& f, uint32_t expect_size, const String&
     if (!expect_sha.equalsIgnoreCase(hex)) return "SHA-256 differs from the job";
   }
 
-  // Board tag (ota_tag.h): every board is an ESP32-S3, so this is the only
-  // thing that tells their images apart.
+  // Board tag (ota_tag.h): the T-Deck, the Heltec and the Wio L2 are all
+  // ESP32-S3 boards, so the tag is the only thing that tells their images
+  // apart.
   if (!tag.found) return "image carries no board tag (built before the on-device updater)";
   if (strcmp(tag.slug, MESHPUNK_BOARD_NAME) != 0) {
     static char reason[96];

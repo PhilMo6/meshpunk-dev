@@ -75,13 +75,69 @@ runs it.
 A FAIL from the sweep or a psram size of 0 means the SPIRAM hex/200MHz
 config and the module disagree — stop and diagnose before any further rung.
 
+## Envs, flash layout, release files
+
+`platformio.ini` has three envs:
+
+| env | builds | partition |
+|---|---|---|
+| `meshpunk_p4` | the firmware without the data pack (dev build) | `main`, 0x10000 |
+| `meshpunk_p4_updater` | the updater program (`../src/updater/main_updater.cpp`, IDF component `updater/`, settings `sdkconfig.defaults` + `sdkconfig.updater`) | `updater`, 0x590000 |
+| `meshpunk_p4_release` | the firmware with the first-boot data pack embedded, and the release files | `main`, 0x10000 |
+
+Flash layout (`partitions_meshpunk_p4.csv`; the partitions sit where the S3
+boards' `meshpunk_custom_16Mb.csv` puts them):
+
+| offset | size | what |
+|---|---|---|
+| 0x2000 | | second-stage bootloader (0x0 on the S3 boards) |
+| 0x8000 | | partition table |
+| 0x9000 | 0x5000 | `nvs` |
+| 0xE000 | 0x2000 | `otadata`: which app the bootloader starts; blank = `updater` |
+| 0x10000 | 0x580000 | `main` (ota_0): the firmware |
+| 0x590000 | 0x80000 | `updater` (factory): the updater program |
+| 0x610000 | 0x9F0000 | `assets`: the LittleFS drive |
+
+On-device updates work as on the S3 boards (`../src/ota_update.cpp`,
+`../src/updater/main_updater.cpp`): the firmware stages and verifies an
+image, blanks otadata and restarts; the updater writes the image into
+`main` and starts it. With no update job the updater installs a release
+`-firmware.bin` for this board found in `S:/meshpunk/ota/`, else it starts
+the firmware.
+
+Release files, written to `../releases/` by `../merge_bin.py`:
+
+```
+pio run -e meshpunk_p4_updater
+pio run -e meshpunk_p4 -t buildfs
+pio run -e meshpunk_p4_release
+```
+
+| file | write at |
+|---|---|
+| `meshpunk-tdisplay_p4-<version>-merged.bin` | 0x0: the whole flash (bootloader, table, an otadata that selects `main`, firmware, updater, drive) |
+| `meshpunk-tdisplay_p4-<version>-firmware.bin` | 0x10000; also the file the on-device updater installs |
+| `meshpunk-tdisplay_p4-<version>-updater.bin` | 0x590000 |
+| `meshpunk-tdisplay_p4-<version>-littlefs.bin` | 0x610000 |
+
+The release env runs `merge_bin.py` when it builds `firmware.bin`; when
+nothing needed rebuilding, `pio run -e meshpunk_p4_release -t mergebin`
+runs it alone.
+
+Uploads:
+
+- `pio run -e meshpunk_p4_updater -t upload --upload-port COMx` writes the
+  updater at 0x590000 (the env's own esptool command).
+- `pio run -e meshpunk_p4 -t upload` writes bootloader, table and firmware,
+  and with them a blank otadata (`ota_data_initial.bin`, this platform's
+  espidf builder). The next start therefore goes through the updater
+  first. An esptool write of `firmware.bin` at 0x10000 alone leaves
+  otadata as it is.
+
 ## Notes
 
 - sdkconfig.defaults carries the board vendor's memory configuration
   (hex-mode PSRAM @200MHz, 256KB L2 cache) from Xinyuan-LilyGO/T-Display-P4.
-- partitions_meshpunk_p4.csv is provisional (factory + "assets" label,
-  matching the S3 firmware's data-partition name); the OTA/updater layout
-  replaces it later.
 - Factory recovery: LilyGo's prebuilt images (their repo `firmware/`
   directory) reflash the stock demo at offset 0x0 via Espressif's web
   flasher.

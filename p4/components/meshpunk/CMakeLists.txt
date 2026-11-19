@@ -23,8 +23,9 @@ file(GLOB_RECURSE MESHPUNK_SOURCES
      "${MESHPUNK_SRC}/*.c" "${MESHPUNK_SRC}/*.cpp" "${MESHPUNK_SRC}/*.S")
 
 # Not in the P4 build:
-#  - src/updater/: the standalone updater firmware (its own envs on the S3
-#    boards); it defines its own setup()/loop().
+#  - src/updater/: the standalone updater program; it defines its own
+#    setup()/loop(). This project builds it as the component ../../updater
+#    (env meshpunk_p4_updater).
 # The USB-OTG subsystem (src/usb/, usb_fs.cpp, usb_manager.cpp) and the peer
 # link (tdeck_link.cpp) build for this board: the P4's USB 2.0 OTG
 # high-speed pair reaches the USB-C port USB1 and the USB-A host socket (the
@@ -58,3 +59,13 @@ idf_component_register(
         # the USB host library (src/usb/usb_core.cpp) and esp_tinyusb with
         # the TinyUSB core (src/usb/usb_msc_dev.cpp, drive mode)
         usb espressif__esp_tinyusb espressif__tinyusb)
+
+# The release build's first-boot data pack (platformio.ini env
+# meshpunk_p4_release: -DMESHPUNK_EMBED_PACK=1). PlatformIO generates
+# <build dir>/data_pack.bin.S from the env's board_build.embed_files; this
+# declaration is what puts that file among this component's sources, so it is
+# assembled and linked.
+if(MESHPUNK_EMBED_PACK)
+    target_add_binary_data(${COMPONENT_LIB}
+        "${CMAKE_CURRENT_LIST_DIR}/../../pack/data_pack.bin" BINARY)
+endif()

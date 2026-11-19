@@ -88,8 +88,20 @@ static const char* kUpdaterEnv = "meshpunk_updater";
 static const char* kUpdaterEnv = "meshpunk_heltec_updater";
 #elif defined(BOARD_WIO_L2)
 static const char* kUpdaterEnv = "meshpunk_wio_l2_updater";
+#elif defined(BOARD_TDISPLAY_P4)
+static const char* kUpdaterEnv = "meshpunk_p4_updater";
 #else
 static const char* kUpdaterEnv = "<board>_updater";
+#endif
+
+// The chip id in an app image's header (esp_image_header_t.chip_id) for the
+// chip this firmware is built for.
+#if CONFIG_IDF_TARGET_ESP32P4
+static const uint16_t kChipId     = 0x0012;
+static const char*    kChipReason = "not an ESP32-P4 image (chip id)";
+#else
+static const uint16_t kChipId     = 0x0009;
+static const char*    kChipReason = "not an ESP32-S3 image (chip id)";
 #endif
 
 // Release channels. The id is persisted in /firmware_prefs as `ota_channel=`
@@ -440,7 +452,7 @@ static bool ensure_buf(void) {
 }
 
 // Opens the staged image for the verify phase and checks the header. The
-// checks mirror the updater's (magic 0xE9, ESP32-S3 chip id, appended hash,
+// checks mirror the updater's (magic 0xE9, this chip's id, appended hash,
 // fits the main slot); the SHA-256 itself is accumulated by the steps.
 static const char* verify_open(const OtaLayout& lay) {
   s.in = meshpunk_open(s.path.c_str(), "r", false);
@@ -459,7 +471,7 @@ static const char* verify_open(const OtaLayout& lay) {
   if (!ok) return "header read failed";
   if (hdr[0] != 0xE9) return "not an ESP32 app image (magic byte)";
   uint16_t chip = (uint16_t)hdr[12] | ((uint16_t)hdr[13] << 8);
-  if (chip != 0x0009) return "not an ESP32-S3 image (chip id)";
+  if (chip != kChipId) return kChipReason;
   if (hdr[23] != 1) return "image carries no appended hash";
 
   mbedtls_sha256_init(&s.sha);
@@ -558,8 +570,9 @@ static void step_verify(void) {
       session_fail("appended SHA-256 mismatch (file corrupt)");
       return;
     }
-    // Board tag (ota_tag.h): both boards are ESP32-S3, so this is the only
-    // thing that tells their images apart.
+    // Board tag (ota_tag.h): the T-Deck, the Heltec and the Wio L2 are all
+    // ESP32-S3 boards, so the tag is the only thing that tells their images
+    // apart.
     ota_tag_scan_finish(s.board_tag);
     if (!s.board_tag.found) {
       session_fail("image carries no board tag (built before the on-device updater)");

@@ -8,7 +8,12 @@ Import("env")
 # The per-board shipping filter (data_filter.py at the project root): the
 # pack carries only the files this board ships — the other architecture's
 # module artifacts stay out of the S3 release image.
-sys.path.insert(0, env.subst("$PROJECT_DIR"))
+# The repository root (data/, data_filter.py): $PROJECT_DIR for the S3
+# project, its parent for the p4/ project.
+_project_dir = env.subst("$PROJECT_DIR")
+REPO_DIR = (_project_dir if os.path.isfile(os.path.join(_project_dir, "data_filter.py"))
+            else os.path.dirname(_project_dir))
+sys.path.insert(0, REPO_DIR)
 import data_filter
 
 # Packs data/ into pack/data_pack.bin for embedding into the release app image
@@ -41,7 +46,7 @@ def git_version(project_dir):
 
 def build_pack(source, target, env):
     project_dir = env.subst("$PROJECT_DIR")
-    data_dir    = os.path.join(project_dir, "data")
+    data_dir    = os.path.join(REPO_DIR, "data")
     out_dir     = os.path.join(project_dir, PACK_DIR)
     out_path    = os.path.join(out_dir, PACK_NAME)
 
